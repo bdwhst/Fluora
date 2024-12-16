@@ -2,12 +2,12 @@
 MATERIAL 0
 TYPE conductor
 ROUGHNESS   0.01
-REFRIOR_REAL_NAMED metal-Ag-eta
-REFRIOR_IMAG_NAMED metal-Ag-k
+REFRIOR_REAL_NAMED metal-Au-eta
+REFRIOR_IMAG_NAMED metal-Au-k
 
 // Camera
 CAMERA
-RES         1920 1300
+RES         1920 1080
 FOVY        45
 ITERATIONS  10000
 DEPTH       8
@@ -26,5 +26,5 @@ SCALE       18 18 18
 
 
 SKYBOX
-../scenes/environment/pine_attic_4k.hdr
+../scenes/environment/garden_nook_8k.hdr
 

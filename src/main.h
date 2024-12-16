@@ -33,7 +33,8 @@ extern int iteration;
 extern int width;
 extern int height;
 
-extern MonotonicBlockMemoryResourceBackend* mainBackend;
+extern MemoryResourceBackend* mainBlockBackend;
+extern MemoryResourceBackend* baseBackend;
 void initScene();
 void runCuda();
 void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods);

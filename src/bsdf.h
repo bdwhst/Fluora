@@ -18,7 +18,7 @@ class ConductorBxDF;
 //class AsymDielectricBxDF;
 
 
-class BxDF: public TaggedPointer<DiffuseBxDF, DielectricBxDF, ConductorBxDF>
+class BxDFPtr: public TaggedPointer<DiffuseBxDF, DielectricBxDF, ConductorBxDF>
 {
 public:
     using TaggedPointer::TaggedPointer;

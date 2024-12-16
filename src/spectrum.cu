@@ -2286,19 +2286,19 @@ namespace spec
     __device__ DenselySampledSpectrum* dev_x, * dev_y, * dev_z;
 }
 
-__device__ __host__  float Spectrum::operator()(float lambda) const
+__device__ __host__  float SpectrumPtr::operator()(float lambda) const
 {
     auto op = [&](auto ptr) { return (*ptr)(lambda); };
     return Dispatch(op);
 }
 
-__device__ __host__  float Spectrum::max_value() const
+__device__ __host__  float SpectrumPtr::max_value() const
 {
     auto op = [&](auto ptr) {return ptr->max_value(); };
     return Dispatch(op);
 }
 
-__device__ __host__  SampledSpectrum Spectrum::sample(const SampledWavelengths& lambda) const
+__device__ __host__  SampledSpectrum SpectrumPtr::sample(const SampledWavelengths& lambda) const
 {
     auto op = [&](auto ptr) {return ptr->sample(lambda); };
     return Dispatch(op);
@@ -2338,7 +2338,7 @@ PiecewiseLinearSpectrum* PiecewiseLinearSpectrum::from_interleaved(const float* 
 
 namespace spec
 {
-    std::map<std::string, Spectrum> namedSpectra;
+    std::map<std::string, SpectrumPtr> namedSpectra;
 
 	void init(Allocator alloc)
 	{
@@ -2355,68 +2355,68 @@ namespace spec
         cudaMemcpyToSymbol(dev_y, &y, sizeof(y));
         cudaMemcpyToSymbol(dev_z, &z, sizeof(z));
 
-        Spectrum illuma = FROM_INTERLEAVED_FLT_ARRAY(CIE_Illum_A, true, alloc);
-        Spectrum illumd50 = 
+        SpectrumPtr illuma = FROM_INTERLEAVED_FLT_ARRAY(CIE_Illum_A, true, alloc);
+        SpectrumPtr illumd50 = 
             FROM_INTERLEAVED_FLT_ARRAY(CIE_Illum_D5000, true, alloc);
-        Spectrum illumacesd60 =
+        SpectrumPtr illumacesd60 =
             FROM_INTERLEAVED_FLT_ARRAY(ACES_Illum_D60, true, alloc);
-        Spectrum illumd65 =
+        SpectrumPtr illumd65 =
             FROM_INTERLEAVED_FLT_ARRAY(CIE_Illum_D6500, true, alloc);
-        Spectrum illumf1 =
+        SpectrumPtr illumf1 =
             FROM_INTERLEAVED_FLT_ARRAY(CIE_Illum_F1, true, alloc);
-        Spectrum illumf2 =
+        SpectrumPtr illumf2 =
             FROM_INTERLEAVED_FLT_ARRAY(CIE_Illum_F2, true, alloc);
-        Spectrum illumf3 =
+        SpectrumPtr illumf3 =
             FROM_INTERLEAVED_FLT_ARRAY(CIE_Illum_F3, true, alloc);
-        Spectrum illumf4 =
+        SpectrumPtr illumf4 =
             FROM_INTERLEAVED_FLT_ARRAY(CIE_Illum_F4, true, alloc);
-        Spectrum illumf5 =
+        SpectrumPtr illumf5 =
             FROM_INTERLEAVED_FLT_ARRAY(CIE_Illum_F5, true, alloc);
-        Spectrum illumf6 =
+        SpectrumPtr illumf6 =
             FROM_INTERLEAVED_FLT_ARRAY(CIE_Illum_F6,  true, alloc);
-        Spectrum illumf7 =
+        SpectrumPtr illumf7 =
             FROM_INTERLEAVED_FLT_ARRAY(CIE_Illum_F7,  true, alloc);
-        Spectrum illumf8 =
+        SpectrumPtr illumf8 =
             FROM_INTERLEAVED_FLT_ARRAY(CIE_Illum_F8,  true, alloc);
-        Spectrum illumf9 =
+        SpectrumPtr illumf9 =
             FROM_INTERLEAVED_FLT_ARRAY(CIE_Illum_F9,  true, alloc);
-        Spectrum illumf10 =
+        SpectrumPtr illumf10 =
             FROM_INTERLEAVED_FLT_ARRAY(CIE_Illum_F10,  true, alloc);
-        Spectrum illumf11 =
+        SpectrumPtr illumf11 =
             FROM_INTERLEAVED_FLT_ARRAY(CIE_Illum_F11,  true, alloc);
-        Spectrum illumf12 =
+        SpectrumPtr illumf12 =
             FROM_INTERLEAVED_FLT_ARRAY(CIE_Illum_F12,  true, alloc);
 
-        Spectrum ageta = FROM_INTERLEAVED_FLT_ARRAY(Ag_eta, false, alloc);
-        Spectrum agk = FROM_INTERLEAVED_FLT_ARRAY(Ag_k, false, alloc);
-        Spectrum aleta = FROM_INTERLEAVED_FLT_ARRAY(Al_eta, false, alloc);
-        Spectrum alk = FROM_INTERLEAVED_FLT_ARRAY(Al_k, false, alloc);
-        Spectrum aueta = FROM_INTERLEAVED_FLT_ARRAY(Au_eta, false, alloc);
-        Spectrum auk = FROM_INTERLEAVED_FLT_ARRAY(Au_k, false, alloc);
-        Spectrum cueta = FROM_INTERLEAVED_FLT_ARRAY(Cu_eta, false, alloc);
-        Spectrum cuk = FROM_INTERLEAVED_FLT_ARRAY(Cu_k, false, alloc);
-        Spectrum cuzneta = FROM_INTERLEAVED_FLT_ARRAY(CuZn_eta, false, alloc);
-        Spectrum cuznk = FROM_INTERLEAVED_FLT_ARRAY(CuZn_k, false, alloc);
-        Spectrum mgoeta = FROM_INTERLEAVED_FLT_ARRAY(MgO_eta, false, alloc);
-        Spectrum mgok = FROM_INTERLEAVED_FLT_ARRAY(MgO_k, false, alloc);
-        Spectrum tio2eta = FROM_INTERLEAVED_FLT_ARRAY(TiO2_eta, false, alloc);
-        Spectrum tio2k = FROM_INTERLEAVED_FLT_ARRAY(TiO2_k, false, alloc);
-        Spectrum glassbk7eta =
+        SpectrumPtr ageta = FROM_INTERLEAVED_FLT_ARRAY(Ag_eta, false, alloc);
+        SpectrumPtr agk = FROM_INTERLEAVED_FLT_ARRAY(Ag_k, false, alloc);
+        SpectrumPtr aleta = FROM_INTERLEAVED_FLT_ARRAY(Al_eta, false, alloc);
+        SpectrumPtr alk = FROM_INTERLEAVED_FLT_ARRAY(Al_k, false, alloc);
+        SpectrumPtr aueta = FROM_INTERLEAVED_FLT_ARRAY(Au_eta, false, alloc);
+        SpectrumPtr auk = FROM_INTERLEAVED_FLT_ARRAY(Au_k, false, alloc);
+        SpectrumPtr cueta = FROM_INTERLEAVED_FLT_ARRAY(Cu_eta, false, alloc);
+        SpectrumPtr cuk = FROM_INTERLEAVED_FLT_ARRAY(Cu_k, false, alloc);
+        SpectrumPtr cuzneta = FROM_INTERLEAVED_FLT_ARRAY(CuZn_eta, false, alloc);
+        SpectrumPtr cuznk = FROM_INTERLEAVED_FLT_ARRAY(CuZn_k, false, alloc);
+        SpectrumPtr mgoeta = FROM_INTERLEAVED_FLT_ARRAY(MgO_eta, false, alloc);
+        SpectrumPtr mgok = FROM_INTERLEAVED_FLT_ARRAY(MgO_k, false, alloc);
+        SpectrumPtr tio2eta = FROM_INTERLEAVED_FLT_ARRAY(TiO2_eta, false, alloc);
+        SpectrumPtr tio2k = FROM_INTERLEAVED_FLT_ARRAY(TiO2_k, false, alloc);
+        SpectrumPtr glassbk7eta =
             FROM_INTERLEAVED_FLT_ARRAY(GlassBK7_eta, false, alloc);
-        Spectrum glassbaf10eta =
+        SpectrumPtr glassbaf10eta =
             FROM_INTERLEAVED_FLT_ARRAY(GlassBAF10_eta, false, alloc);
-        Spectrum glassfk51aeta =
+        SpectrumPtr glassfk51aeta =
             FROM_INTERLEAVED_FLT_ARRAY(GlassFK51A_eta, false, alloc);
-        Spectrum glasslasf9eta =
+        SpectrumPtr glasslasf9eta =
             FROM_INTERLEAVED_FLT_ARRAY(GlassLASF9_eta, false, alloc);
-        Spectrum glasssf5eta =
+        SpectrumPtr glasssf5eta =
             FROM_INTERLEAVED_FLT_ARRAY(GlassSF5_eta, false, alloc);
-        Spectrum glasssf10eta =
+        SpectrumPtr glasssf10eta =
             FROM_INTERLEAVED_FLT_ARRAY(GlassSF10_eta, false, alloc);
-        Spectrum glasssf11eta =
+        SpectrumPtr glasssf11eta =
             FROM_INTERLEAVED_FLT_ARRAY(GlassSF11_eta, false, alloc);
 
-        Spectrum glassfakeeta =
+        SpectrumPtr glassfakeeta =
             FROM_INTERLEAVED_FLT_ARRAY(GlassSFake_eta, false, alloc);
 	
     
@@ -2587,13 +2587,13 @@ namespace spec
     
 
 
-    glm::vec3 spectrum_to_xyz(Spectrum s) {
+    glm::vec3 spectrum_to_xyz(SpectrumPtr s) {
         return glm::vec3(inner_product(&spec::X(), s), inner_product(&spec::Y(), s),
             inner_product(&spec::Z(), s)) /
             spec::CIE_Y_integral;
     }
 
-    Spectrum get_named_spectrum(const std::string& name)
+    SpectrumPtr get_named_spectrum(const std::string& name)
     {
         auto iter = namedSpectra.find(name);
         if (iter != namedSpectra.end())

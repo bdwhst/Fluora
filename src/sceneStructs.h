@@ -8,6 +8,8 @@
 #include "materials.h"
 #include "spectrum.h"
 #include "camera.h"
+#include "medium.h"
+
 
 #define USE_BVH 1
 #define USE_MIS 0
@@ -29,6 +31,7 @@
 #define SAH_RAY_BOX_INTERSECTION_COST 0.1f
 #define WHITE_FURNANCE_TEST 0
 #define NUM_MULTI_SCATTER_BOUNCE 16
+#define WATER_TIGHT_MESH_INTERSECTION 1
 
 enum GeomType {
     SPHERE,
@@ -39,6 +42,7 @@ enum GeomType {
 struct Ray {
     glm::vec3 origin;
     glm::vec3 direction;
+    int medium = -1;
 };
 
 struct ObjectTransform {
@@ -52,8 +56,9 @@ struct ObjectTransform {
 
 struct Object {
     enum GeomType type;
-    int materialid;
+    int materialid = -1;
     int triangleStart, triangleEnd;
+    int mediumIn = -1, mediumOut = -1;
     ObjectTransform Transform;
 };
 
@@ -183,6 +188,7 @@ struct PathSegment {
     int pixelIndex;
     int remainingBounces;
     float lastMatPdf;
+    thrust::default_random_engine rng;
 };
 
 // Use with a corresponding PathSegment to do:
@@ -210,7 +216,8 @@ struct ModelInfoDev {
 };
 
 struct SceneInfoDev {
-    Material* dev_materials;
+    MaterialPtr* dev_materials;
+    MediumPtr* dev_media;
     Object* dev_objs;
     int objectsSize;
     ModelInfoDev modelInfo;
@@ -224,12 +231,12 @@ struct SceneInfoDev {
     int lightsSize;
     cudaTextureObject_t skyboxObj;
     PixelSensor* pixelSensor;
+    bool containsVolume = false;
 };
 
 struct SceneGbuffer {
     glm::vec3* dev_albedo;
     glm::vec3* dev_normal;
 };
-
 
 

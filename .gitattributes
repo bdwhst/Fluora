@@ -1,0 +1,4 @@
+*.hdr filter=lfs diff=lfs merge=lfs binary
+*.nvdb filter=lfs diff=lfs merge=lfs binary
+*.obj filter=lfs diff=lfs merge=lfs binary
+*.gltf filter=lfs diff=lfs merge=lfs binary

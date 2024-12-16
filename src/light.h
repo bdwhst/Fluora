@@ -87,7 +87,7 @@ public:
     SampledSpectrum L(const glm::vec3& p, const glm::vec3& n, const glm::vec2& uv, const glm::vec3& w, const SampledWavelengths& lambda) const { return SampledSpectrum(0.0f); }
     SampledSpectrum Le(const Ray& ray, const SampledWavelengths& lambda) const { return SampledSpectrum(0.0f); }
 protected:
-    static const DenselySampledSpectrum* lookup_spectrum(Spectrum s)
+    static const DenselySampledSpectrum* lookup_spectrum(SpectrumPtr s)
     {
         if (mSpectrumInstanceSet == nullptr)
             mSpectrumInstanceSet = new InstanceSet<DenselySampledSpectrum>(Allocator(CUDAMemoryResourceBackend::getInstance()));

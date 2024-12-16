@@ -24,19 +24,22 @@ namespace spec
 class SampledSpectrum
 {
 public:
-	__device__ __host__ SampledSpectrum() = default;
+	SampledSpectrum() = default;
 	__device__ __host__ explicit SampledSpectrum(float* v)
 	{
+#pragma unroll
 		for (int i = 0; i < spec::NSpectrumSamples; ++i)
 			values[i] = v[i];
 	}
 	__device__ __host__ explicit SampledSpectrum(float v)
 	{
+#pragma unroll
 		for (int i = 0; i < spec::NSpectrumSamples; ++i)
 			values[i] = v;
 	}
 	__device__ __host__ SampledSpectrum& operator+=(const SampledSpectrum& s)
 	{
+#pragma unroll
 		for (int i = 0; i < spec::NSpectrumSamples; i++)
 		{
 			values[i] += s.values[i];
@@ -45,6 +48,7 @@ public:
 	}
 	__device__ __host__ SampledSpectrum& operator-=(const SampledSpectrum& s)
 	{
+#pragma unroll
 		for (int i = 0; i < spec::NSpectrumSamples; i++)
 		{
 			values[i] -= s.values[i];
@@ -53,6 +57,7 @@ public:
 	}
 	__device__ __host__ SampledSpectrum& operator*=(const SampledSpectrum& s)
 	{
+#pragma unroll
 		for (int i = 0; i < spec::NSpectrumSamples; i++)
 		{
 			values[i] *= s.values[i];
@@ -61,6 +66,7 @@ public:
 	}
 	__device__ __host__ SampledSpectrum& operator/=(const SampledSpectrum& s)
 	{
+#pragma unroll
 		for (int i = 0; i < spec::NSpectrumSamples; i++)
 		{
 			values[i] /= s.values[i];
@@ -91,6 +97,7 @@ public:
 
 	__device__ __host__ SampledSpectrum& operator*=(float a)
 	{
+#pragma unroll
 		for (int i = 0; i < spec::NSpectrumSamples; ++i)
 			values[i] *= a;
 		return *this;
@@ -106,6 +113,7 @@ public:
 	__device__ __host__ SampledSpectrum operator/(float a) const
 	{
 		SampledSpectrum ans = *this;
+#pragma unroll
 		for (int i = 0; i < spec::NSpectrumSamples; ++i)
 			ans.values[i] /= a;
 		return ans;
@@ -114,6 +122,7 @@ public:
 	__device__ __host__ float operator==(const SampledSpectrum& s)
 	{
 		bool eq = values[0] == s.values[0];
+#pragma unroll
 		for (int i = 1; i < spec::NSpectrumSamples; i++)
 		{
 			eq &= values[i] == s.values[i];
@@ -124,6 +133,7 @@ public:
 	__device__ __host__ float operator!=(const SampledSpectrum& s)
 	{
 		bool ieq = values[0] != s.values[0];
+#pragma unroll
 		for (int i = 1; i < spec::NSpectrumSamples; i++)
 		{
 			ieq |= values[i] != s.values[i];
@@ -143,6 +153,7 @@ public:
 
 	__device__ __host__ float average() const {
 		float ans = values[0];
+#pragma unroll
 		for (int i = 1; i < spec::NSpectrumSamples; i++)
 		{
 			ans += values[i];
@@ -153,6 +164,7 @@ public:
 	__device__ __host__ bool is_nan() const
 	{
 		bool ans = false;
+#pragma unroll
 		for (int i = 0; i < spec::NSpectrumSamples; i++)
 		{
 			ans = ans || math::is_nan(values[i]);
@@ -168,11 +180,23 @@ __device__ __host__ inline SampledSpectrum operator*(float a, const SampledSpect
 __device__ __host__ inline SampledSpectrum safe_div(const SampledSpectrum& s0, const SampledSpectrum& s1)
 {
 	SampledSpectrum s;
+#pragma unroll
 	for (int i = 0; i < spec::NSpectrumSamples; i++)
 	{
 		s[i] = s1[i] == 0 ? s0[i] : s0[i] / s1[i];
 	}
 	return s;
+}
+
+__device__ __host__ inline SampledSpectrum exp(const SampledSpectrum& s)
+{
+	SampledSpectrum ans;
+#pragma unroll
+	for (int i = 0; i < spec::NSpectrumSamples; i++)
+	{
+		ans[i] = expf(s[i]);
+	}
+	return ans;
 }
 
 
@@ -183,6 +207,7 @@ public:
 	{
 		bool eq0 = m_lambda[0] == swl.m_lambda[0];
 		bool eq1 = m_pdf[1] == swl.m_pdf[1];
+#pragma unroll
 		for (int i = 1; i < spec::NSpectrumSamples; i++)
 		{
 			eq0 &= m_lambda[i] == swl.m_lambda[i];
@@ -195,6 +220,7 @@ public:
 	{
 		bool ieq0 = m_lambda[0] != swl.m_lambda[0];
 		bool ieq1 = m_pdf[1] != swl.m_pdf[1];
+#pragma unroll
 		for (int i = 1; i < spec::NSpectrumSamples; i++)
 		{
 			ieq0 |= m_lambda[i] != swl.m_lambda[i];
@@ -207,6 +233,7 @@ public:
 		SampledWavelengths swl;
 		swl.m_lambda[0] = math::lerp(u, lmin, lmax);
 		float step = (lmax - lmin) / spec::NSpectrumSamples;
+#pragma unroll
 		for (int i = 1; i < spec::NSpectrumSamples; i++)
 		{
 			swl.m_lambda[i] = swl.m_lambda[i - 1] + step;
@@ -229,7 +256,7 @@ public:
 		SampledWavelengths swl;
 		for (int i = 0; i < spec::NSpectrumSamples; i++)
 		{
-			float up = u+(float)i / spec::NSpectrumSamples;
+			float up = u + (float)i / spec::NSpectrumSamples;
 			if (up > 1) up -= 1;
 			swl.m_lambda[i] = SampleVisibleWavelengths(up);
 			swl.m_pdf[i] = VisibleWavelengthsPDF(swl.m_lambda[i]);
@@ -239,6 +266,7 @@ public:
 
 	__device__ __host__ bool secondary_terminated() const
 	{
+#pragma unroll
 		for (int i = 1; i < spec::NSpectrumSamples; i++)
 			if (m_pdf[i] != 0) return false;
 		return true;
@@ -246,6 +274,7 @@ public:
 	__device__ __host__ void terminate_secondary()
 	{
 		if (secondary_terminated()) return;
+#pragma unroll
 		for (int i = 1; i < spec::NSpectrumSamples; i++)
 			m_pdf[i] = 0;
 		m_pdf[0] /= spec::NSpectrumSamples;
@@ -278,7 +307,7 @@ class RGBAlbedoSpectrum;
 class RGBUnboundedSpectrum;
 class RGBIlluminantSpectrum;
 
-class Spectrum :public TaggedPointer< ConstantSpectrum, PiecewiseLinearSpectrum, DenselySampledSpectrum, RGBAlbedoSpectrum, RGBUnboundedSpectrum, RGBIlluminantSpectrum>
+class SpectrumPtr :public TaggedPointer< ConstantSpectrum, PiecewiseLinearSpectrum, DenselySampledSpectrum, RGBAlbedoSpectrum, RGBUnboundedSpectrum, RGBIlluminantSpectrum>
 {
 public:
 	using TaggedPointer::TaggedPointer;
@@ -287,7 +316,7 @@ public:
 	__device__ __host__ SampledSpectrum sample(const SampledWavelengths& lambda) const;
 };
 
-inline float inner_product(Spectrum f, Spectrum g) {
+inline float inner_product(SpectrumPtr f, SpectrumPtr g) {
 	float integral = 0;
 	for (float lambda = spec::gLambdaMin; lambda <= spec::gLambdaMax; ++lambda)
 		integral += f(lambda) * g(lambda);
@@ -296,8 +325,8 @@ inline float inner_product(Spectrum f, Spectrum g) {
 
 namespace spec
 {
-	glm::vec3 spectrum_to_xyz(Spectrum s);
-	Spectrum get_named_spectrum(const std::string& name);
+	glm::vec3 spectrum_to_xyz(SpectrumPtr s);
+	SpectrumPtr get_named_spectrum(const std::string& name);
 }
 
 
@@ -325,7 +354,7 @@ public:
 	{
 		values = alloc.allocate<float>(get_size());
 	}
-	DenselySampledSpectrum(Spectrum spec, int lmin, int lmax, Allocator  alloc = {}) :lambda_min(lmin), lambda_max(lmax), alloc(alloc)
+	DenselySampledSpectrum(SpectrumPtr spec, int lmin, int lmax, Allocator  alloc = {}) :lambda_min(lmin), lambda_max(lmax), alloc(alloc)
 	{
 		values = alloc.allocate<float>(get_size());
 		if (spec)
@@ -335,8 +364,15 @@ public:
 				values[l-lmin] = spec(l);
 			}
 		}
+		else
+		{
+			for (int l = lmin; l <= lmax; l++)
+			{
+				values[l - lmin] = 0;
+			}
+		}
 	}
-	DenselySampledSpectrum(Spectrum s, Allocator alloc)
+	DenselySampledSpectrum(SpectrumPtr s, Allocator alloc)
 		: DenselySampledSpectrum(s, spec::gLambdaMin, spec::gLambdaMax, alloc) {}
 	~DenselySampledSpectrum()
 	{
@@ -396,6 +432,14 @@ public:
 	}
 
 	__device__ __host__ float max_value() const { return *std::max_element(values, values + get_size()); }
+
+	__device__ __host__ void scale(float val)
+	{
+		for (int l = lambda_min; l <= lambda_max; l++)
+		{
+			values[l - lambda_min] *= val;
+		}
+	}
 };
 
 template <>
@@ -493,4 +537,40 @@ public:
 
 #define FLT_ARRAY_HALFSIZE(arr) (sizeof(arr)/sizeof(float)/2)
 #define FROM_INTERLEAVED_FLT_ARRAY(arr, normalized, alloc) (PiecewiseLinearSpectrum::from_interleaved((float*)(arr), FLT_ARRAY_HALFSIZE(arr), normalized, alloc))
+
+__device__ __host__ inline float Blackbody(float lambda, float T) {
+	if (T <= 0)
+		return 0;
+	const float c = 299792458.f;
+	const float h = 6.62606957e-34f;
+	const float kb = 1.3806488e-23f;
+	// Return emitted radiance for blackbody at wavelength _lambda_
+	float l = lambda * 1e-9f;
+	float Le = (2 * h * c * c) / (math::pow<5>(l) * (expf((h * c) / (l * kb * T)) - 1));
+	assert(!math::is_nan(Le));
+	return Le;
+}
+
+class BlackbodySpectrum
+{
+public:
+	__device__ __host__ BlackbodySpectrum(float t) :t(t) {
+		float lambdaMax = 2.8977721e-3f / t;
+		normalization_factor = 1 / Blackbody(lambdaMax * 1e9f, t);
+	}
+	__device__ __host__ float operator()(float lambda) const {
+		return Blackbody(lambda, t) * normalization_factor;
+	}
+	__device__ __host__ float max_value() const { return 1.f; }
+
+	__device__ __host__ SampledSpectrum sample(const SampledWavelengths& lambda) const {
+		SampledSpectrum s;
+		for (int i = 0; i < spec::NSpectrumSamples; ++i)
+			s[i] = Blackbody(lambda[i], t) * normalization_factor;
+		return s;
+	}
+
+private:
+	float t, normalization_factor;
+};
 

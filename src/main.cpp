@@ -33,7 +33,9 @@ int height;
 
 OIDNDevice device;
 
-MonotonicBlockMemoryResourceBackend* mainBackend = nullptr;
+MemoryResourceBackend* mainBlockBackend = nullptr;
+MemoryResourceBackend* baseBackend = nullptr;
+
 const char* sceneFile = nullptr;
 
 //-------------------------------
@@ -50,7 +52,8 @@ int main(int argc, char** argv) {
 
 	sceneFile = argv[1];
 
-	mainBackend = new MonotonicBlockMemoryResourceBackend(256 * 1024, CUDAMemoryResourceBackend::getInstance());
+	baseBackend = CUDAMemoryResourceBackend::getInstance();
+	mainBlockBackend = new MonotonicBlockMemoryResourceBackend(256 * 1024, baseBackend);
 	
 	initScene();
 
@@ -64,13 +67,14 @@ int main(int argc, char** argv) {
 	stbi_set_flip_vertically_on_load(1);
 	scene->LoadAllTexturesToGPU();
 
-	Allocator alloc(mainBackend);
+	Allocator alloc(mainBlockBackend);
 
 	spec::init(alloc);
 	RGBToSpectrumTable::init(alloc);
 	RGBColorSpace::init(alloc);
 
 	scene->LoadAllMaterialsToGPU(alloc);
+	scene->LoadAllMediaToGPU(Allocator(baseBackend));
 	scene->CreateLights();
 
 	// Initialize ImGui Data
@@ -88,7 +92,7 @@ int main(int argc, char** argv) {
 
 void initScene()
 {
-	Allocator alloc(mainBackend);
+	Allocator alloc(mainBlockBackend);
 	// Load scene file
 	scene = new Scene(sceneFile);
 	scene->buildBVH();
@@ -215,7 +219,7 @@ void runCuda() {
 
 	if (iteration == 0) {
 		pathtraceFree(scene);
-		Allocator alloc(mainBackend);
+		Allocator alloc(mainBlockBackend);
 		pathtraceInit(scene, alloc);
 	}
 

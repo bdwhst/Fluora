@@ -1,17 +1,17 @@
 #include "interactions.h"
 
-__device__ float util_geometry_ray_box_intersection(const glm::vec3& pMin, const glm::vec3& pMax, const Ray& r, bool& outside, glm::vec3* normal)
+__device__ float util_geometry_ray_box_intersection(const glm::vec3& pMin, const glm::vec3& pMax, const Ray& r, bool* outside, glm::vec3* normal)
 {
-    float tmin = -1e38f;
+    float tmin = 0;
     float tmax = 1e38f;
     glm::vec3 tmin_n;
     glm::vec3 tmax_n;
 
     for (int xyz = 0; xyz < 3; ++xyz) {
-        float qdxyz = r.direction[xyz];
+        float inv_qdxyz = 1.0f / r.direction[xyz];
         {
-            float t1 = (pMin[xyz] - r.origin[xyz]) / qdxyz;
-            float t2 = (pMax[xyz] - r.origin[xyz]) / qdxyz;
+            float t1 = (pMin[xyz] - r.origin[xyz]) * inv_qdxyz;
+            float t2 = (pMax[xyz] - r.origin[xyz]) * inv_qdxyz;
             float ta = glm::min(t1, t2);
             float tb = glm::max(t1, t2);
             glm::vec3 n;
@@ -27,17 +27,46 @@ __device__ float util_geometry_ray_box_intersection(const glm::vec3& pMin, const
         }
     }
     if (tmax >= tmin && tmax > 0) {
-        outside = true;
+        *outside = true;
         if (tmin <= 0) {
             tmin = tmax;
             tmin_n = tmax_n;
-            outside = false;
+            *outside = false;
         }
         if (normal) *normal = tmin_n;
         return tmin;
     }
     return -1;
 }
+
+__device__ bool util_geometry_ray_box_intersection(const glm::vec3& pMin, const glm::vec3& pMax, const Ray& r, float t_max, float* t_min_p, float* t_max_p)
+{
+    float tmin = 0;
+    float tmax = t_max;
+
+    for (int xyz = 0; xyz < 3; ++xyz) {
+        float inv_qdxyz = 1.0f / r.direction[xyz];
+        {
+            float t1 = (pMin[xyz] - r.origin[xyz]) * inv_qdxyz;
+            float t2 = (pMax[xyz] - r.origin[xyz]) * inv_qdxyz;
+            float ta = glm::min(t1, t2);
+            float tb = glm::max(t1, t2);
+            if (ta > 0 && ta > tmin) {
+                tmin = ta;
+            }
+            if (tb < tmax) {
+                tmax = tb;
+            }
+        }
+    }
+    if (tmax >= tmin && tmax > 0) {
+        *t_min_p = tmin;
+        *t_max_p = tmax;
+        return true;
+    }
+    return false;
+}
+
 
 __device__ float boxIntersectionTest(const Object& box, const Ray& r,
     glm::vec3& intersectionPoint, glm::vec3& normal) {
@@ -46,11 +75,13 @@ __device__ float boxIntersectionTest(const Object& box, const Ray& r,
     q.direction = glm::normalize(multiplyMV(box.Transform.inverseTransform, glm::vec4(r.direction, 0.0f)));
     bool outside;
     glm::vec3 local_n;
-    float t = util_geometry_ray_box_intersection(glm::vec3(-0.5f), glm::vec3(0.5f), q, outside, &local_n);
+    // This t is inside transformed box space
+    float t = util_geometry_ray_box_intersection(glm::vec3(-0.5f), glm::vec3(0.5f), q, &outside, &local_n);
 
     if (t > 0) {
         intersectionPoint = multiplyMV(box.Transform.transform, glm::vec4(getPointOnRay(q, t), 1.0f));
         normal = glm::normalize(multiplyMV(box.Transform.invTranspose, glm::vec4(local_n, 0.0f)));
+        // Get t in world space
         return glm::length(r.origin - intersectionPoint);
     }
     return -1;
@@ -147,17 +178,121 @@ __device__ bool util_geometry_ray_triangle_intersection(
     return true;
 }
 
+__device__ bool util_geometry_ray_triangle_intersection_watertight(
+    const glm::vec3& ori, const glm::vec3& dir,
+    const glm::vec3& p0, const glm::vec3& p1,
+    const glm::vec3& p2, float tMax, float& t,
+    glm::vec3& normal, glm::vec3& baryCoord)
+{
+    glm::vec3 N = glm::cross(p1 - p0, p2 - p0);
+    float area = glm::length2(N);
+    if (area == 0)
+    {
+        return false;
+    }
+    glm::vec3 p0t = p0 - ori;
+    glm::vec3 p1t = p1 - ori;
+    glm::vec3 p2t = p2 - ori;
+    glm::vec3 abs_dir = glm::abs(dir);
+    int kz = math::max_component_index(abs_dir);
+    int kx = kz + 1; if (kx == 3) kx = 0;
+    int ky = kx + 1; if (ky == 3) ky = 0;
+    glm::vec3 d = math::permute(dir, { kx,ky,kz });
+    p0t = math::permute(p0t, { kx,ky,kz });
+    p1t = math::permute(p1t, { kx,ky,kz });
+    p2t = math::permute(p2t, { kx,ky,kz });
+    float Sx = -d.x / d.z;
+    float Sy = -d.y / d.z;
+    float Sz = 1 / d.z;
+    
+    p0t.x += Sx * p0t.z;
+    p0t.y += Sy * p0t.z;
+    p1t.x += Sx * p1t.z;
+    p1t.y += Sy * p1t.z;
+    p2t.x += Sx * p2t.z;
+    p2t.y += Sy * p2t.z;
+
+    float e0 = math::difference_of_products(p1t.x, p2t.y, p1t.y, p2t.x);
+    float e1 = math::difference_of_products(p2t.x, p0t.y, p2t.y, p0t.x);
+    float e2 = math::difference_of_products(p0t.x, p1t.y, p0t.y, p1t.x);
+
+
+    if (e0 == 0.0f || e1 == 0.0f || e2 == 0.0f)
+    {
+        double p2txp1ty = (double)p2t.x * (double)p1t.y;
+        double p2typ1tx = (double)p2t.y * (double)p1t.x;
+        e0 = (float)(p2typ1tx - p2txp1ty);
+        double p0txp2ty = (double)p0t.x * (double)p2t.y;
+        double p0typ2tx = (double)p0t.y * (double)p2t.x;
+        e1 = (float)(p0typ2tx - p0txp2ty);
+        double p1txp0ty = (double)p1t.x * (double)p0t.y;
+        double p1typ0tx = (double)p1t.y * (double)p0t.x;
+        e2 = (float)(p1typ0tx - p1txp0ty);
+    }
+
+    if ((e0 < 0 || e1 < 0 || e2 < 0) && (e0 > 0 || e1 > 0 || e2 > 0))
+        return false;
+    float det = e0 + e1 + e2;
+    if (det == 0.0f)
+        return false;
+
+    p0t.z *= Sz;
+    p1t.z *= Sz;
+    p2t.z *= Sz;
+    float tScaled = e0 * p0t.z + e1 * p1t.z + e2 * p2t.z;
+    if (det < 0 && (tScaled >= 0 || tScaled < tMax * det))
+        return false;
+    else if (det > 0 && (tScaled <= 0 || tScaled > tMax * det))
+        return false;
+
+    float invDet = 1 / det;
+    float b0 = e0 * invDet, b1 = e1 * invDet, b2 = e2 * invDet;
+    t = tScaled * invDet;
+    assert(!math::is_nan(t));
+#if 1
+    float maxZt = math::max_component_value(abs(glm::vec3(p0t.z, p1t.z, p2t.z)));
+    float deltaZ = math::gamma(3) * maxZt;
+
+    float maxXt = math::max_component_value(abs(glm::vec3(p0t.x, p1t.x, p2t.x)));
+    float maxYt = math::max_component_value(abs(glm::vec3(p0t.y, p1t.y, p2t.y)));
+    float deltaX = math::gamma(5) * (maxXt + maxZt);
+    float deltaY = math::gamma(5) * (maxYt + maxZt);
+
+    float deltaE = 2 * (math::gamma(2) * maxXt * maxYt + deltaY * maxXt +
+        deltaX * maxYt);
+
+    float maxE = math::max_component_value(abs(glm::vec3(e0, e1, e2)));
+    float deltaT = 3 * (math::gamma(3) * maxE * maxZt + deltaE * maxZt +
+        deltaZ * maxE) * std::abs(invDet);
+    if (t <= deltaT)
+        return false;
+#endif
+
+    
+    baryCoord = glm::vec3(b0, b1, b2);
+    normal = N / sqrtf(math::max(area, 0.0f));
+    return true;
+}
+
 __device__ float triangleIntersectionTest(const ObjectTransform& Transform, const glm::vec3& v0, const glm::vec3& v1, const glm::vec3& v2, const Ray& r, glm::vec3& intersectionPoint, glm::vec3& normal, glm::vec3& baryCoord)
 {
     float t = -1.0;
     glm::vec3 v0w = multiplyMV(Transform.transform, glm::vec4(v0, 1.0f));
     glm::vec3 v1w = multiplyMV(Transform.transform, glm::vec4(v1, 1.0f));
     glm::vec3 v2w = multiplyMV(Transform.transform, glm::vec4(v2, 1.0f));
+#if WATER_TIGHT_MESH_INTERSECTION
+    if (util_geometry_ray_triangle_intersection_watertight(r.origin, r.direction, v0w, v1w, v2w, FLT_MAX, t, normal, baryCoord))
+    {
+        intersectionPoint = r.origin + r.direction * t;
+        return t;
+    }
+#else
     if (util_geometry_ray_triangle_intersection(r.origin, r.direction, v0w, v1w, v2w, t, normal, baryCoord))
     {
         intersectionPoint = r.origin + r.direction * t;
         return t;
     }
+#endif
     else
     {
         return -1;
@@ -168,7 +303,7 @@ __device__ bool util_bvh_leaf_intersect(
     int primsStart,
     int primsEnd,
     const SceneInfoDev& dev_sceneInfo,
-    const Ray& ray,
+    Ray* ray,
     ShadeableIntersection* intersection
 )
 {
@@ -189,7 +324,7 @@ __device__ bool util_bvh_leaf_intersect(
             const glm::vec3& v0 = dev_sceneInfo.modelInfo.dev_vertices[tri[0]];
             const glm::vec3& v1 = dev_sceneInfo.modelInfo.dev_vertices[tri[1]];
             const glm::vec3& v2 = dev_sceneInfo.modelInfo.dev_vertices[tri[2]];
-            t = triangleIntersectionTest(obj.Transform, v0, v1, v2, ray, tmp_intersect, tmp_normal, tmp_baryCoord);
+            t = triangleIntersectionTest(obj.Transform, v0, v1, v2, *ray, tmp_intersect, tmp_normal, tmp_baryCoord);
             if (dev_sceneInfo.modelInfo.dev_uvs)
             {
                 const glm::vec2& uv0 = dev_sceneInfo.modelInfo.dev_uvs[tri[0]];
@@ -216,11 +351,11 @@ __device__ bool util_bvh_leaf_intersect(
         }
         else if (obj.type == CUBE)
         {
-            t = boxIntersectionTest(obj, ray, tmp_intersect, tmp_normal);
+            t = boxIntersectionTest(obj, *ray, tmp_intersect, tmp_normal);
         }
         else if (obj.type == SPHERE)
         {
-            t = util_geometry_ray_sphere_intersection(obj, ray, tmp_intersect, tmp_normal);
+            t = util_geometry_ray_sphere_intersection(obj, *ray, tmp_intersect, tmp_normal);
         }
 
         if (t > 0.0 && t < intersection->t)
@@ -236,6 +371,13 @@ __device__ bool util_bvh_leaf_intersect(
             intersected = true;
         }
 
+    }
+    const Primitive& prim = dev_sceneInfo.dev_primitives[intersection->primitiveId];
+    int objID = prim.objID;
+    const Object& obj = dev_sceneInfo.dev_objs[objID];
+    if (obj.mediumIn != obj.mediumOut)
+    {
+        ray->medium = glm::dot(ray->direction, intersection->surfaceNormal) > 0 ? obj.mediumIn : obj.mediumOut;
     }
     return intersected;
 }

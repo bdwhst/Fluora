@@ -19,7 +19,7 @@ EMITTANCE   0
 // Diffuse red
 MATERIAL 2
 TYPE diffuse
-RGB         .98 .98 .98
+RGB         .85 .35 .35
 ROUGHNESS   0.0
 METALLIC    0
 REFRIOR     0
@@ -28,7 +28,7 @@ EMITTANCE   0
 // Diffuse green
 MATERIAL 3
 TYPE diffuse
-RGB         .98 .98 .98
+RGB         .35 .85 .35
 ROUGHNESS   0.0
 METALLIC    0
 REFRIOR     0
@@ -42,14 +42,12 @@ METALLIC    0
 REFRIOR     0
 EMITTANCE   0
 
-// Glass
+// Au
 MATERIAL 5
-TYPE frenselSpecular
-RGB         0.99 0.99 0.99
-ROUGHNESS   0.0
-METALLIC    0
-REFRIOR     1.6
-EMITTANCE   0
+TYPE conductor
+ROUGHNESS   0.05
+REFRIOR_REAL_NAMED metal-Au-eta
+REFRIOR_IMAG_NAMED metal-Au-k
 
 
 // Camera
@@ -120,10 +118,3 @@ TRANS       -2 4 -2
 ROTAT       0 0 0
 SCALE       3 3 3
 
-// Sphere
-OBJECT 7
-geometry sphere
-material 5
-TRANS       2 5 2
-ROTAT       0 0 0
-SCALE       4 4 4

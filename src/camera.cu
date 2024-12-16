@@ -197,7 +197,7 @@ static const float swatchReflectances_23[] = { 380.0, 0.031, 390.0, 0.032, 400.0
          710.0, 0.032, 720.0, 0.032, 730.0, 0.033 };
 
 
-Spectrum PixelSensor::swatchReflectances[nSwatchReflectances]{
+SpectrumPtr PixelSensor::swatchReflectances[nSwatchReflectances]{
         FROM_INTERLEAVED_FLT_ARRAY(swatchReflectances_0, false, Allocator()),
         FROM_INTERLEAVED_FLT_ARRAY(swatchReflectances_1, false, Allocator()),
         FROM_INTERLEAVED_FLT_ARRAY(swatchReflectances_2, false, Allocator()),
@@ -223,7 +223,7 @@ Spectrum PixelSensor::swatchReflectances[nSwatchReflectances]{
         FROM_INTERLEAVED_FLT_ARRAY(swatchReflectances_22, false, Allocator()),
         FROM_INTERLEAVED_FLT_ARRAY(swatchReflectances_23, false, Allocator())
      };
-PixelSensor::PixelSensor(Spectrum r, Spectrum g, Spectrum b, const RGBColorSpace* outputSpace, Spectrum sensorIllum, float imagingRatio, Allocator alloc):r_bar(r, alloc),g_bar(g, alloc),b_bar(b, alloc),imagingRatio(imagingRatio)
+PixelSensor::PixelSensor(SpectrumPtr r, SpectrumPtr g, SpectrumPtr b, const RGBColorSpace* outputSpace, SpectrumPtr sensorIllum, float imagingRatio, Allocator alloc):r_bar(r, alloc),g_bar(g, alloc),b_bar(b, alloc),imagingRatio(imagingRatio)
 {
     // Here white balance is handled by the matrix from rgb to xyz
     float rgbCamera[nSwatchReflectances][3];
@@ -258,15 +258,16 @@ PixelSensor::PixelSensor(Spectrum r, Spectrum g, Spectrum b, const RGBColorSpace
     XYZFromSensorRGB = glm::mat3(c0,c1,c2);
 }
 
-PixelSensor::PixelSensor(const RGBColorSpace* outputSpace, Spectrum sensorIllum, float imagingRatio, Allocator alloc) :r_bar(&spec::X(), alloc), g_bar(&spec::Y(), alloc), b_bar(&spec::Z(), alloc), imagingRatio(imagingRatio)
+PixelSensor::PixelSensor(const RGBColorSpace* outputSpace, SpectrumPtr sensorIllum, float imagingRatio, Allocator alloc) :r_bar(&spec::X(), alloc), g_bar(&spec::Y(), alloc), b_bar(&spec::Z(), alloc), imagingRatio(imagingRatio)
 {
     if (sensorIllum)
     {
         //TODO: white balance
+        throw std::runtime_error("Not implemented!");
     }
 }
 
-glm::vec3 PixelSensor::project_reflectance(Spectrum refl, Spectrum illum, Spectrum b1, Spectrum b2, Spectrum b3)
+glm::vec3 PixelSensor::project_reflectance(SpectrumPtr refl, SpectrumPtr illum, SpectrumPtr b1, SpectrumPtr b2, SpectrumPtr b3)
 {
     glm::vec3 res(0.0f);
     float g_int = 0;
@@ -289,5 +290,10 @@ __device__ void RGBFilm::add_radiance(const glm::vec3& xyz, int pixelIndex)
     {
         rgb *= threshold / maxc;
     }
+    image[pixelIndex] += rgb;
+}
+
+__device__ void RGBFilm::add_rgb(const glm::vec3& rgb, int pixelIndex)
+{
     image[pixelIndex] += rgb;
 }

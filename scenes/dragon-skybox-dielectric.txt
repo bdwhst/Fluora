@@ -10,7 +10,7 @@ EMITTANCE   0
 
 // Camera
 CAMERA
-RES         1920 1300
+RES         3840 2160
 FOVY        45
 ITERATIONS  10000
 DEPTH       8
@@ -29,5 +29,5 @@ SCALE       18 18 18
 
 
 SKYBOX
-../scenes/environment/moonlit_golf_4k.hdr
+../scenes/environment/garden_nook_8k.hdr
 

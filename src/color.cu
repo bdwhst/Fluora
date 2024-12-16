@@ -125,7 +125,7 @@ void RGBToSpectrumTable::init(Allocator alloc)
     checkCUDAError("RGBToSpectrumTable init");
 }
 
-RGBColorSpace::RGBColorSpace(const glm::vec2& r, const glm::vec2& g, const glm::vec2& b, Spectrum illuminant, const RGBToSpectrumTable* rgbToSpectrumTable, Allocator alloc)
+RGBColorSpace::RGBColorSpace(const glm::vec2& r, const glm::vec2& g, const glm::vec2& b, SpectrumPtr illuminant, const RGBToSpectrumTable* rgbToSpectrumTable, Allocator alloc)
     :r(r), g(g), b(b), illuminant(illuminant, alloc), rgbToSpectrumTable(rgbToSpectrumTable)
 {
     glm::vec3 W = spec::spectrum_to_xyz(illuminant);

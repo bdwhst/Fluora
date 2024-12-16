@@ -16,6 +16,7 @@
 #include "pathtrace.h"
 #include "intersections.h"
 #include "interactions.h"
+#include "media.h"
 //#include "materials.h"
 
 
@@ -44,6 +45,7 @@ __global__ void sendImageToPBO(uchar4* pbo, glm::ivec2 resolution,
 		glm::vec3 color;
 #if TONEMAPPING
 		color = pix / (float)iter;
+		color = max(color, glm::vec3(0.0f));
 		color = util_postprocess_ACESFilm(color);
 		color = color * 255.0f;
 #else
@@ -74,8 +76,8 @@ static Scene* hst_scene = NULL;
 static GuiDataContainer* guiData = NULL;
 static glm::vec3* dev_image = NULL;
 static Object* dev_objs = NULL;
-static Material* dev_materials = NULL;
-static BVHGPUNode* dev_bvhArray = NULL;
+static MaterialPtr* dev_materials = NULL;
+static MediumPtr* dev_media = NULL;
 static MTBVHGPUNode* dev_mtbvhArray = NULL;
 static Primitive* dev_primitives = NULL;
 static glm::ivec3* dev_triangles = NULL;
@@ -87,12 +89,8 @@ static float* dev_fsigns = NULL;
 static Primitive* dev_lights = NULL;
 static PathSegment* dev_paths1 = NULL;
 static PathSegment* dev_paths2 = NULL;
-static int* dev_rayValidCache = NULL;
-static glm::vec3* dev_imageCache = NULL;
-static ShadeableIntersection* dev_pathCache = NULL;
 static ShadeableIntersection* dev_intersections1 = NULL;
 static ShadeableIntersection* dev_intersections2 = NULL;
-static ShadeableIntersection* dev_intersectionCache = NULL;
 
 static PixelSensor* dev_pixelSensor = NULL;
 static RGBFilm* dev_film = NULL;
@@ -115,7 +113,7 @@ void pathtraceInit(Scene* scene, Allocator alloc) {
 	cudaMalloc(&dev_image, pixelcount * sizeof(glm::vec3));
 	cudaMemset(dev_image, 0, pixelcount * sizeof(glm::vec3));
 
-	dev_film = alloc.new_object<RGBFilm>(dev_image, RGBColorSpace::sRGB, 10.0f);
+	dev_film = alloc.new_object<RGBFilm>(dev_image, RGBColorSpace::sRGB, 100.0f);
 
 	cudaMalloc(&dev_paths1, pixelcount * sizeof(PathSegment));
 	cudaMalloc(&dev_paths2, pixelcount * sizeof(PathSegment));
@@ -167,8 +165,17 @@ void pathtraceInit(Scene* scene, Allocator alloc) {
 		cudaMemcpy(dev_lights, scene->lights.data(), scene->lights.size() * sizeof(Primitive), cudaMemcpyHostToDevice);
 	}
 
-	cudaMalloc(&dev_materials, scene->materials.size() * sizeof(Material));
-	cudaMemcpy(dev_materials, scene->materials.data(), scene->materials.size() * sizeof(Material), cudaMemcpyHostToDevice);
+	if (scene->materials.size())
+	{
+		cudaMalloc(&dev_materials, scene->materials.size() * sizeof(MaterialPtr));
+		cudaMemcpy(dev_materials, scene->materials.data(), scene->materials.size() * sizeof(MaterialPtr), cudaMemcpyHostToDevice);
+	}
+	
+	if (scene->media.size())
+	{
+		cudaMalloc(&dev_media, scene->media.size() * sizeof(MediumPtr));
+		cudaMemcpy(dev_media, scene->media.data(), scene->media.size() * sizeof(MediumPtr), cudaMemcpyHostToDevice);
+	}
 
 
 	cudaMalloc(&dev_intersections1, pixelcount * sizeof(ShadeableIntersection));
@@ -223,6 +230,7 @@ void pathtraceFree(Scene* scene) {
 	cudaFree(dev_bvhArray);
 #endif
 	cudaFree(dev_materials);
+	cudaFree(dev_media);
 	cudaFree(dev_intersections1);
 	cudaFree(dev_intersections2);
 #if !STOCHASTIC_SAMPLING && FIRST_INTERSECTION_CACHING
@@ -262,7 +270,7 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
 {
 	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
 	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
-	thrust::default_random_engine rng = makeSeededRandomEngine(x, y, iter);
+	thrust::default_random_engine rng = makeSeededRandomEngine(iter, x * cam.resolution.y + y, 0);
 	thrust::uniform_real_distribution<float> u01(0, 1);
 
 	if (x < cam.resolution.x && y < cam.resolution.y) {
@@ -274,7 +282,6 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
 		segment.lambda = SampledWavelengths::sample_visible(u01(rng));
 		//segment.lambda = SampledWavelengths::sample_uniform(u01(rng));
 #if STOCHASTIC_SAMPLING
-		// TODO: implement antialiasing by jittering the ray
 		glm::vec2 jitter = glm::vec2(0.5f * (u01(rng) * 2.0f - 1.0f), 0.5f * (u01(rng) * 2.0f - 1.0f));
 		segment.ray.direction = glm::normalize(cam.view
 			- cam.right * cam.pixelLength.x * ((float)x - (float)cam.resolution.x * 0.5f + jitter[0])
@@ -302,12 +309,15 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
 		segment.pixelIndex = index;
 		segment.remainingBounces = traceDepth;
 		segment.lastMatPdf = -1;
+		// TODO: change this to camera's medium
+		segment.ray.medium = -1;
+		segment.rng = rng;
 	}
 }
 
 
 
-__global__ void compute_intersection_bvh_stackless_mtbvh(
+__global__ void compute_intersection_bvh_no_volume(
 	int depth
 	, int num_paths
 	, PathSegment* pathSegments
@@ -330,7 +340,7 @@ __global__ void compute_intersection_bvh_stackless_mtbvh(
 	const MTBVHGPUNode* currArray = dev_sceneInfo.dev_mtbvhArray + d * dev_sceneInfo.bvhDataSize;
 	int curr = 0;
 	ShadeableIntersection tmpIntersection;
-	tmpIntersection.t = 1e37f;
+	tmpIntersection.t = FLT_MAX;
 	bool intersected = false;
 	while (curr >= 0 && curr < dev_sceneInfo.bvhDataSize)
 	{
@@ -342,7 +352,7 @@ __global__ void compute_intersection_bvh_stackless_mtbvh(
 			if (currArray[curr].startPrim != -1)//leaf node
 			{
 				int start = currArray[curr].startPrim, end = currArray[curr].endPrim;
-				bool intersect = util_bvh_leaf_intersect(start, end, dev_sceneInfo, ray, &tmpIntersection);
+				bool intersect = util_bvh_leaf_intersect(start, end, dev_sceneInfo, &ray, &tmpIntersection);
 				intersected = intersected || intersect;
 			}
 			curr = currArray[curr].hitLink;
@@ -373,6 +383,161 @@ __global__ void compute_intersection_bvh_stackless_mtbvh(
 		SampledSpectrum skyRadiance = illumSpec.sample(pathSegment.lambda);
 		glm::vec3 sensorRGB = dev_sceneInfo.pixelSensor->to_sensor_rgb(pathSegment.transport * skyRadiance, pathSegment.lambda);
 		dev_film->add_radiance(sensorRGB, pathSegment.pixelIndex);
+	}
+}
+
+
+// Does not handle surface intersection
+__global__ void compute_intersection_bvh_volume_naive(
+	int iter
+	, int depth
+	, int num_paths
+	, PathSegment* pathSegments
+	, SceneInfoDev dev_sceneInfo
+	, ShadeableIntersection* intersections
+	, int* rayValid
+	, RGBFilm* dev_film
+)
+{
+	int path_index = blockIdx.x * blockDim.x + threadIdx.x;
+	if (path_index >= num_paths) return;
+	PathSegment& pathSegment = pathSegments[path_index];
+	Ray& ray = pathSegment.ray;
+	glm::vec3 rayDir = pathSegment.ray.direction;
+	glm::vec3 rayOri = pathSegment.ray.origin;
+	float x = fabs(rayDir.x), y = fabs(rayDir.y), z = fabs(rayDir.z);
+	int axis = x > y && x > z ? 0 : (y > z ? 1 : 2);
+	int sgn = rayDir[axis] > 0 ? 0 : 1;
+	int d = (axis << 1) + sgn;
+	const MTBVHGPUNode* currArray = dev_sceneInfo.dev_mtbvhArray + d * dev_sceneInfo.bvhDataSize;
+	int curr = 0;
+	ShadeableIntersection tmpIntersection;
+	tmpIntersection.t = FLT_MAX;
+	tmpIntersection.materialId = -1;
+	bool intersected_surface = false;
+	while (curr >= 0 && curr < dev_sceneInfo.bvhDataSize)
+	{
+		bool outside = true;
+		float boxt = boundingBoxIntersectionTest(currArray[curr].bbox, ray, outside);
+		if (!outside) boxt = EPSILON;
+		if (boxt > 0 && boxt < tmpIntersection.t)
+		{
+			if (currArray[curr].startPrim != -1)//leaf node
+			{
+				int start = currArray[curr].startPrim, end = currArray[curr].endPrim;
+				bool intersect = util_bvh_leaf_intersect(start, end, dev_sceneInfo, &ray, &tmpIntersection);
+				intersected_surface = intersected_surface || intersect;
+			}
+			curr = currArray[curr].hitLink;
+		}
+		else
+		{
+			curr = currArray[curr].missLink;
+		}
+	}
+	pathSegment.lambda.terminate_secondary();
+	bool scattered_in_medium = false, absorbed_in_medium = false;
+
+	// FIXED: Triangle intersection is now watertight
+	if (intersected_surface && depth == 0 && ray.medium != -1)
+	{
+		assert(0);
+	}
+
+	if (ray.medium != -1)
+	{
+		thrust::default_random_engine& rng = pathSegment.rng;
+		thrust::uniform_int_distribution<int> int_dist;
+		thrust::default_random_engine tmaj_rng(int_dist(rng));
+
+		float t_max = intersected_surface ? tmpIntersection.t : FLT_MAX;
+		sample_Tmaj(dev_sceneInfo.dev_media, ray, t_max, tmaj_rng, pathSegment.lambda, [&](const glm::vec3& p, MediumProperties mp, SampledSpectrum sigma_maj, SampledSpectrum Tmaj) {
+			float pAbsorb = mp.sigma_a[0] / sigma_maj[0];
+			float pScatter = mp.sigma_s[0] / sigma_maj[0];
+			float pNull = math::max(0.0f, 1 - pAbsorb - pScatter);
+			if (pNull == 1.0f)
+			{
+				return true;
+			}
+			thrust::uniform_real_distribution<float> u01(0, 1);
+			float uMode = u01(tmaj_rng);
+			if (uMode < pAbsorb)
+			{
+				glm::vec3 sensorRGB = dev_sceneInfo.pixelSensor->to_sensor_rgb(pathSegment.transport * mp.Le, pathSegment.lambda);
+				dev_film->add_radiance(sensorRGB, pathSegment.pixelIndex);
+				absorbed_in_medium = true;
+				return false;
+			}
+			else if (uMode >= pAbsorb && uMode < pAbsorb + pScatter)
+			{
+				pathSegment.remainingBounces--;
+				int bounces = pathSegment.remainingBounces;
+				if (bounces == 0)
+				{
+					return false;
+				}
+
+				glm::vec2 u(u01(tmaj_rng), u01(tmaj_rng));
+				glm::vec3 wi;
+				float pdf = 0.0f;
+				float phase = mp.phase.sample_p(-ray.direction, u, &wi, &pdf);
+				if (pdf == 0) 
+				{
+					return false;
+				}
+				ray.origin = p;
+				ray.direction = wi;
+				
+				pathSegment.transport *= phase / pdf;
+				scattered_in_medium = true;
+				return false;
+			}
+			else
+			{
+				return true;
+			}
+			});
+	}
+	if (absorbed_in_medium)
+	{
+		rayValid[path_index] = false;
+		return;
+	}
+
+	// If real scatter occurs, mark materialId as -1
+	if (scattered_in_medium)
+	{
+		intersections[path_index].materialId = -1;
+		rayValid[path_index] = true;
+		return;
+	}
+	// If there is no real scatter and a intersection with surface occurs
+	// We are intersecting with a medium interface or a light surface
+	// Continue travese through the current ray dir, but change the origin to be the intersection point
+	if (intersected_surface)
+	{
+		intersections[path_index] = tmpIntersection;
+		ray.origin = tmpIntersection.worldPos + ray.direction * SCATTER_ORIGIN_OFFSETMULT;
+		rayValid[path_index] = true;
+		return;
+	}
+	// If there is no scatter in media and intersection with surface
+	// Try to read the radiance from skybox
+	if (dev_sceneInfo.skyboxObj)
+	{
+		glm::vec2 uv = util_sample_spherical_map(glm::normalize(rayDir));
+		float4 skyColorRGBA = tex2D<float4>(dev_sceneInfo.skyboxObj, uv.x, uv.y);
+#if WHITE_FURNANCE_TEST
+		glm::vec3 skyColor = glm::vec3(1.0, 1.0, 1.0);
+#else
+		glm::vec3 skyColor = glm::vec3(skyColorRGBA.x, skyColorRGBA.y, skyColorRGBA.z);
+#endif
+		const RGBColorSpace* colorSpace = RGBColorSpace_sRGB;
+		RGBIlluminantSpectrum illumSpec(*colorSpace, skyColor);
+		SampledSpectrum skyRadiance = illumSpec.sample(pathSegment.lambda);
+		glm::vec3 sensorRGB = dev_sceneInfo.pixelSensor->to_sensor_rgb(pathSegment.transport * skyRadiance, pathSegment.lambda);
+		dev_film->add_radiance(sensorRGB, pathSegment.pixelIndex);
+		rayValid[path_index] = false;
 	}
 }
 
@@ -459,17 +624,22 @@ __global__ void scatter_on_intersection(
 	extern __shared__ char sharedMemory[];
 	char* bxdfBufferLocal = sharedMemory;
 
-	Material* materials = sceneInfo.dev_materials;
+	MaterialPtr* materials = sceneInfo.dev_materials;
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
 	if (idx >= num_paths) return;
 	ShadeableIntersection intersection = shadeableIntersections[idx];
 	// Set up the RNG
 	// LOOK: this is how you use thrust's RNG! Please look at
 	// makeSeededRandomEngine as well.
-	thrust::default_random_engine rng = makeSeededRandomEngine(iter, idx, pathSegments[idx].remainingBounces);
+	thrust::default_random_engine& rng = pathSegments[idx].rng;
 	thrust::uniform_real_distribution<float> u01(0, 1);
-
-	Material material = materials[intersection.materialId];
+	// scattered in media
+	if (intersection.materialId == -1)
+	{
+		rayValid[idx] = 1;
+		return;
+	}
+	MaterialPtr material = materials[intersection.materialId];
 
 //#if VIS_NORMAL
 //	image[pathSegments[idx].pixelIndex] += (glm::normalize(intersection.surfaceNormal));
@@ -487,6 +657,8 @@ __global__ void scatter_on_intersection(
 		}
 	}
 	else {
+		// For now if we encounter some non-emissive surface while rendering volumetrics, just error exit
+		assert(sceneInfo.containsVolume == false);
 		glm::vec3& woInWorld = pathSegments[idx].ray.direction;
 		glm::vec3 nMap = glm::vec3(0, 0, 1);
 		
@@ -512,17 +684,16 @@ __global__ void scatter_on_intersection(
 		//}
 		//else
 		//{
-		util_math_get_TBN_pixar(N, &T, &B);
+		math::Frame frame = math::Frame::from_z(N);
 		//}
-		glm::mat3 TBN(T, B, N);
-		glm::vec3 wo = glm::transpose(TBN) * (-woInWorld);
+		glm::vec3 wo = frame.to_local(-woInWorld);
 		wo = glm::normalize(wo);
 		float pdf = 0;
 		glm::vec3 wi;
 
 		MaterialEvalInfo info(wo, intersection.uv, pathSegments[idx].lambda);
 
-		BxDF bxdf = material.get_bxdf(info, bxdfBufferLocal + threadIdx.x * BxDFMaxSize);
+		BxDFPtr bxdf = material.get_bxdf(info, bxdfBufferLocal + threadIdx.x * BxDFMaxSize);
 
 		SampledSpectrum f = bxdf.sample_f(wo, wi, pdf, rng);
 
@@ -601,7 +772,7 @@ __global__ void scatter_on_intersection(
 		if (pdf > 0)
 		{
 			pathSegments[idx].transport *= f / pdf;
-			glm::vec3 newDir = glm::normalize(TBN * wi);
+			glm::vec3 newDir = glm::normalize(frame.from_local(wi));
 			glm::vec3 offset = glm::dot(newDir, N) < 0 ? -N : N;
 			float offsetMult = !material.Is<DielectricMaterial>() ? SCATTER_ORIGIN_OFFSETMULT : SCATTER_ORIGIN_OFFSETMULT * 100.0f;
 			pathSegments[idx].ray.origin = intersection.worldPos + offset * offsetMult;
@@ -896,6 +1067,11 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 	// TODO: perform one iteration of path tracing
 	SceneInfoDev dev_sceneInfo{};
 	dev_sceneInfo.dev_materials = dev_materials;
+	if (dev_media)
+	{
+		dev_sceneInfo.dev_media = dev_media;
+		dev_sceneInfo.containsVolume = true;
+	}
 	dev_sceneInfo.dev_objs = dev_objs;
 	dev_sceneInfo.objectsSize = hst_scene->objects.size();
 	dev_sceneInfo.modelInfo.dev_triangles = dev_triangles;
@@ -921,7 +1097,7 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 	dev_sceneInfo.pixelSensor = dev_pixelSensor;
 
 
-	generateRayFromCamera << <blocksPerGrid2d, blockSize2d >> > (cam, iter, MAX_DEPTH, dev_paths1);
+	generateRayFromCamera << <blocksPerGrid2d, blockSize2d >> > (cam, iter, 32, dev_paths1);
 	checkCUDAError("generate camera ray");
 
 	int depth = 0;
@@ -937,11 +1113,12 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 	// --- PathSegment Tracing Stage ---
 	// Shoot ray into scene, bounce between objects, push shading chunks
 
-	bool iterationComplete = false;
-	while (numRays && depth < MAX_DEPTH) {
+	while (numRays && depth < 32) {
 
 		// clean shading chunks
+		depth++;
 		cudaMemset(dev_intersections1, 0, pixelcount * sizeof(ShadeableIntersection));
+		cudaMemset(rayValid, 0, sizeof(int) * pixelcount);
 		dim3 numblocksPathSegmentTracing = (numRays + blockSize1d - 1) / blockSize1d;
 #if !STOCHASTIC_SAMPLING && FIRST_INTERSECTION_CACHING
 		if (iter != 1 && depth == 0)
@@ -955,15 +1132,31 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 		{
 #endif
 			// tracing
-			compute_intersection_bvh_stackless_mtbvh << <numblocksPathSegmentTracing, blockSize1d >> > (
-				depth
-				, numRays
-				, dev_paths1
-				, dev_sceneInfo
-				, dev_intersections1
-				, rayValid
-				, dev_film
-				);
+			if (hst_scene->media.size() == 0)
+			{
+				compute_intersection_bvh_no_volume << <numblocksPathSegmentTracing, blockSize1d >> > (
+					depth
+					, numRays
+					, dev_paths1
+					, dev_sceneInfo
+					, dev_intersections1
+					, rayValid
+					, dev_film
+					);
+			}
+			else
+			{
+				compute_intersection_bvh_volume_naive << <numblocksPathSegmentTracing, blockSize1d >> > (
+					iter
+					, depth
+					, numRays
+					, dev_paths1
+					, dev_sceneInfo
+					, dev_intersections1
+					, rayValid
+					, dev_film
+					);
+			}
 
 #if !STOCHASTIC_SAMPLING && FIRST_INTERSECTION_CACHING
 		}
@@ -977,9 +1170,9 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 #endif
 
 		cudaDeviceSynchronize();
-		checkCUDAError("trace one bounce");
+		checkCUDAError("compute_intersection");
 
-		depth++;
+		
 
 #if SORT_BY_MATERIAL_TYPE
 		numRays = compact_rays(rayValid, rayIndex, numRays, true);

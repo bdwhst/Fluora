@@ -2,19 +2,7 @@
 
 #include "intersections.h"
 
-//http://marc-b-reynolds.github.io/quaternions/2016/07/06/Orthonormal.html
-//Get tangent space vectors
-__device__ inline void util_math_get_TBN_pixar(const glm::vec3& N, glm::vec3* T, glm::vec3* B)
-{
-	float x = N.x, y = N.y, z = N.z;
-	float sz = z < 0 ? -1 : 1;
-	float a = 1.0f / (sz + z);
-	float ya = y * a;
-	float b = x * ya;
-	float c = x * sz;
-	(*T) = glm::vec3(c * x * a - 1, sz * b, c);
-	(*B) = glm::vec3(b, y * ya - sz, y);
-}
+
 
 __device__ inline void util_math_get_TBN_naive(const glm::vec3& N, glm::vec3* T, glm::vec3* B)
 {

@@ -20,18 +20,16 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     SET_PROPERTY(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
 endif()
 
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(CMAKE_CUDA_FLAGS ${CMAKE_CUDA_FLAGS} "-g -G")  # enable cuda-gdb
+endif()
+
 ########################################
 # CUDA Setup
 ########################################
 find_package(CUDA 10 REQUIRED)
 include(${CMAKE_MODULE_PATH}/CUDAComputesList.cmake)
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
-
-list(APPEND CUDA_NVCC_FLAGS "-rdc=true")
-list(APPEND CUDA_NVCC_FLAGS ${CUDA_GENERATE_CODE})
-list(APPEND CUDA_NVCC_FLAGS_DEBUG "-g -G")
-list(APPEND CUDA_NVCC_FLAGS "--std=c++20")
-
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr --extended-lambda")
 set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
 set(CUDA_VERBOSE_BUILD ON)
 
@@ -91,6 +89,7 @@ set(sources
     src/spectrum.cu
     src/intersections.cu
     src/sampling.cu
+    src/media.cu
 	src/mikktspace/mikktspace.c
     src/ImGui/imgui.cpp 
     src/ImGui/imgui_demo.cpp 
@@ -104,6 +103,10 @@ set(sources
     src/SpectrumConsts/rgbspectrum_rec2020.cpp
     src/SpectrumConsts/rgbspectrum_srgb.cpp
     )
+
+
+set (NANOVDB_INCLUDE src/openvdb/nanovdb)
+include_directories(${NANOVDB_INCLUDE})
 
 list(SORT headers)
 list(SORT sources)

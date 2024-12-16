@@ -1,6 +1,6 @@
 #include "materials.h"
 
-Material Material::create(const std::string& name, const MaterialParams& params, Allocator alloc)
+MaterialPtr MaterialPtr::create(const std::string& name, const BundledParams& params, Allocator alloc)
 {
 	if (name == "diffuse")
 	{
@@ -25,14 +25,14 @@ Material Material::create(const std::string& name, const MaterialParams& params,
 	}
 }
 
-__device__ BxDF Material::get_bxdf(MaterialEvalInfo& info, void* localMem)
+__device__ BxDFPtr MaterialPtr::get_bxdf(MaterialEvalInfo& info, void* localMem)
 {
 	auto op = [&](auto ptr) { return ptr->get_bxdf(info, localMem); };
 	return Dispatch(op);
 }
 
 
-__device__ BxDF DiffuseMaterial::get_bxdf(MaterialEvalInfo& info, void* localMem)
+__device__ BxDFPtr DiffuseMaterial::get_bxdf(MaterialEvalInfo& info, void* localMem)
 {
 	DiffuseBxDF* bxdfPtr = (DiffuseBxDF*)localMem;
 	glm::vec3 rgb = albedo;

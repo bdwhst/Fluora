@@ -4,7 +4,8 @@ TYPE frenselSpecular
 RGB         0.99 0.99 0.99
 ROUGHNESS   0.0
 METALLIC    0
-REFRIOR     1.5
+//REFRIOR 1.6
+REFRIOR_NAMED  glass-BK7
 EMITTANCE   0
 
 // Camera

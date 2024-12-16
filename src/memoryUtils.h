@@ -33,6 +33,7 @@ public:
     }
     virtual void free_bytes(void* ptr, size_t bytes, size_t alignment) override
     {
+        if (!ptr) return;
         if (ptrs.count(ptr))
         {
             _aligned_free(ptr);
@@ -41,6 +42,7 @@ public:
         else
         {
             std::cout << "ERROR: FREEING A INVALID MEM ADDR " << ptr << std::endl;
+            throw std::runtime_error("Invalid free");
         }
     }
     static MainMemoryResourceBackend* getInstance()
@@ -73,6 +75,7 @@ public:
     }
     virtual void free_bytes(void* ptr, size_t bytes, size_t alignment) override
     {
+        if (!ptr) return;
         if (ptrs.count(ptr))
         {
             cudaError_t err = cudaFree(ptr);
@@ -84,6 +87,7 @@ public:
         else
         {
             std::cout << "ERROR: FREEING A INVALID MEM ADDR " << ptr << std::endl;
+            throw std::runtime_error("Invalid free");
         }
     }
     static CUDAMemoryResourceBackend* getInstance()
@@ -120,6 +124,7 @@ public:
     }
     virtual void free_bytes(void* ptr, size_t bytes, size_t alignment) override
     {
+        if (!ptr) return;
         if (bytes > mBlockSize) mUpstream->free_bytes(ptr, bytes, alignment);
     }
     ~MonotonicBlockMemoryResourceBackend() {
@@ -183,6 +188,10 @@ public:
     {
         if (size == 0) return nullptr;
         return mBackend->allocate_bytes(size, alignment);
+    }
+    void deallocate_bytes(void* ptr, size_t size, size_t alignment)
+    {
+        mBackend->free_bytes(ptr, size, alignment);
     }
     template<typename T>
     void deallocate(T* p, size_t count)

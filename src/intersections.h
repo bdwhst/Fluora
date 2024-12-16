@@ -22,7 +22,9 @@ __device__ inline glm::vec3 getPointOnRay(Ray r, float t) {
 __device__ inline  glm::vec3 multiplyMV(glm::mat4 m, glm::vec4 v) {
     return glm::vec3(m * v);
 }
-__device__ float util_geometry_ray_box_intersection(const glm::vec3& pMin, const glm::vec3& pMax, const Ray& r, bool& outside, glm::vec3* normal = nullptr);
+__device__ float util_geometry_ray_box_intersection(const glm::vec3& pMin, const glm::vec3& pMax, const Ray& r, bool* outside, glm::vec3* normal = nullptr);
+
+__device__ bool util_geometry_ray_box_intersection(const glm::vec3& pMin, const glm::vec3& pMax, const Ray& r, float t_max, float* t_min_p, float* t_max_p);
 // CHECKITOUT
 /**
  * Test intersection between a ray and a transformed cube. Untransformed,
@@ -37,7 +39,7 @@ __device__ float boxIntersectionTest(const Object& box, const Ray& r,
     glm::vec3& intersectionPoint, glm::vec3& normal);
 __device__ inline float boundingBoxIntersectionTest(const BoundingBox& bbox, const Ray& r, bool& outside)
 {
-    return util_geometry_ray_box_intersection(bbox.pMin, bbox.pMax, r, outside);
+    return util_geometry_ray_box_intersection(bbox.pMin, bbox.pMax, r, &outside);
 }
 // CHECKITOUT
 /**
@@ -68,7 +70,7 @@ __device__ bool util_bvh_leaf_intersect(
     int primsStart,
     int primsEnd,
     const SceneInfoDev& dev_sceneInfo,
-    const Ray& ray,
+    Ray* ray,
     ShadeableIntersection* intersection
 );
 __device__ inline float util_bvh_leaf_test_intersect(

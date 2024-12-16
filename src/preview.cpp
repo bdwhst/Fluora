@@ -12,7 +12,7 @@ GLuint displayImage;
 extern uint64_t sysTime;
 extern uint64_t delta_t;
 
-#define CAM_SPEED 0.1f;
+float camera_speed = 10.0f;
 
 GLFWwindow* window;
 GuiDataContainer* imguiData = NULL;
@@ -158,7 +158,7 @@ bool init() {
 		exit(EXIT_FAILURE);
 	}
 
-	window = glfwCreateWindow(width, height, "CIS 565 Path Tracer", NULL, NULL);
+	window = glfwCreateWindow(width, height, "Fluora", NULL, NULL);
 	if (!window) {
 		glfwTerminate();
 		throw std::runtime_error("Failed to create window");
@@ -242,11 +242,11 @@ void RenderImGui()
 		camchanged = true;
 	if(ImGui::SliderFloat("Phi", &phi, 0.0f, TWO_PI))
 		camchanged = true;
-	if(ImGui::SliderFloat("Pos x", &renderState->camera.position.x, -10.0f, 10.0f))
+	if(ImGui::SliderFloat("Pos x", &renderState->camera.position.x, -100.0f, 100.0f))
 		camchanged = true;
-	if (ImGui::SliderFloat("Pos y", &renderState->camera.position.y, -10.0f, 10.0f))
+	if (ImGui::SliderFloat("Pos y", &renderState->camera.position.y, -100.0f, 100.0f))
 		camchanged = true;
-	if (ImGui::SliderFloat("Pos z", &renderState->camera.position.z, -10.0f, 10.0f))
+	if (ImGui::SliderFloat("Pos z", &renderState->camera.position.z, -100.0f, 100.0f))
 		camchanged = true;
 	if (ImGui::SliderFloat("Lens Radius", &renderState->camera.lensRadius, 0.0f, 0.15f))
 		camchanged = true;
@@ -254,6 +254,7 @@ void RenderImGui()
 		camchanged = true;
 
 	ImGui::End();
+
 
 
 	ImGui::Render();
@@ -276,22 +277,22 @@ void mainLoop() {
 		if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
 		{
 			camchanged = true;
-			renderState->camera.position += renderState->camera.view * CAM_SPEED;
+			renderState->camera.position += renderState->camera.view * camera_speed;
 		}
 		if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
 		{
 			camchanged = true;
-			renderState->camera.position -= renderState->camera.view * CAM_SPEED;
+			renderState->camera.position -= renderState->camera.view * camera_speed;
 		}
 		if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
 		{
 			camchanged = true;
-			renderState->camera.position -= renderState->camera.right * CAM_SPEED;
+			renderState->camera.position -= renderState->camera.right * camera_speed;
 		}
 		if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
 		{
 			camchanged = true;
-			renderState->camera.position += renderState->camera.right * CAM_SPEED;
+			renderState->camera.position += renderState->camera.right * camera_speed;
 		}
 			
 		runCuda();

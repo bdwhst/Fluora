@@ -13,39 +13,203 @@
 #include <unordered_map>
 #include <queue>
 #include <numeric>
+#include <json.hpp>
 
 #include "memoryUtils.h"
 #include "materials.h"
 #include "scene.h"
 
-Scene::Scene(string filename) {
+Scene::Scene(std::string filename) {
+    using namespace std;
     cout << "Reading scene from " << filename << " ..." << endl;
     cout << " " << endl;
-    char* fname = (char*)filename.c_str();
-    fp_in.open(fname);
-    if (!fp_in.is_open()) {
-        cout << "Error reading from file - aborting!" << endl;
-        throw;
+    string ext = filename.substr(filename.find_last_of('.'));
+    if (ext == ".txt")
+    {
+        char* fname = (char*)filename.c_str();
+        fp_in.open(fname);
+        if (!fp_in.is_open()) {
+            cout << "Error reading from file - aborting!" << endl;
+            throw;
+        }
+        while (fp_in.good()) {
+            string line;
+            utilityCore::safeGetline(fp_in, line);
+            if (!line.empty()) {
+                vector<string> tokens = utilityCore::tokenizeString(line);
+                if (strcmp(tokens[0].c_str(), "MATERIAL") == 0) {
+                    loadMaterial(tokens[1]);
+                    cout << " " << endl;
+                }
+                else if (strcmp(tokens[0].c_str(), "OBJECT") == 0) {
+                    loadObject(tokens[1]);
+                    cout << " " << endl;
+                }
+                else if (strcmp(tokens[0].c_str(), "CAMERA") == 0) {
+                    loadCamera();
+                    cout << " " << endl;
+                }
+                else if (strcmp(tokens[0].c_str(), "SKYBOX") == 0) {
+                    loadSkybox();
+                    cout << " " << endl;
+                }
+            }
+        }
     }
-    while (fp_in.good()) {
-        string line;
-        utilityCore::safeGetline(fp_in, line);
-        if (!line.empty()) {
-            vector<string> tokens = utilityCore::tokenizeString(line);
-            if (strcmp(tokens[0].c_str(), "MATERIAL") == 0) {
-                loadMaterial(tokens[1]);
-                cout << " " << endl;
-            } else if (strcmp(tokens[0].c_str(), "OBJECT") == 0) {
-                loadObject(tokens[1]);
-                cout << " " << endl;
-            } else if (strcmp(tokens[0].c_str(), "CAMERA") == 0) {
-                loadCamera();
-                cout << " " << endl;
+    else if (ext == ".json")
+    {
+        loadJSON(filename);
+    }
+}
+
+void Scene::loadJSON(const std::string& name)
+{
+    using json = nlohmann::json;
+    std::ifstream f(name);
+    json data = json::parse(f);
+
+    const auto& cameraData = data["Camera"];
+    Camera& camera = state.camera;
+    RenderState& state = this->state;
+    camera.resolution.x = cameraData["RES"][0];
+    camera.resolution.y = cameraData["RES"][1];
+    float fovy = cameraData["FOVY"];
+    state.iterations = cameraData["ITERATIONS"];
+    state.traceDepth = cameraData["DEPTH"];
+    state.imageName = cameraData["FILE"];
+    const auto& pos = cameraData["EYE"];
+    const auto& lookat = cameraData["LOOKAT"];
+    const auto& up = cameraData["UP"];
+    camera.position = glm::vec3(pos[0], pos[1], pos[2]);
+    camera.lookAt = glm::vec3(lookat[0], lookat[1], lookat[2]);
+    camera.up = glm::vec3(up[0], up[1], up[2]);
+
+    //calculate fov based on resolution
+    float yscaled = tan(fovy * (PI / 180));
+    float xscaled = (yscaled * camera.resolution.x) / camera.resolution.y;
+    float fovx = (atan(xscaled) * 180) / PI;
+    camera.fov = glm::vec2(fovx, fovy);
+
+    camera.right = glm::normalize(glm::cross(camera.view, camera.up));
+    camera.pixelLength = glm::vec2(2 * xscaled / (float)camera.resolution.x,
+        2 * yscaled / (float)camera.resolution.y);
+
+    camera.view = glm::normalize(camera.lookAt - camera.position);
+
+    //set up render camera stuff
+    int arraylen = camera.resolution.x * camera.resolution.y;
+    state.image.resize(arraylen);
+    std::fill(state.image.begin(), state.image.end(), glm::vec3());
+
+
+    const auto& backgroundData = data["Background"];
+    if (backgroundData["TYPE"] == "skybox")
+        LoadTextureFromFileJobs.emplace_back(backgroundData["PATH"], -1);
+
+    // TODO: load materials here
+
+    std::unordered_map <std::string, std::pair<std::string, std::string>> mediumInterfaces;
+    for (const auto& [key, val] : data["MediumInterfaces"].items())
+    {
+        mediumInterfaces[key] = std::make_pair(val["INSIDE"], val["OUTSIDE"]);
+    }
+
+    std::unordered_map<std::string, int> mediaNameToID;
+    for (const auto& [key, val] : data["Media"].items())
+    {
+        BundledParams params;
+        const std::string& type = val["TYPE"];
+        if (type == "nanovdb")
+        {
+            params.insert_string("filename", val["PATH"]);
+            if(val.contains("TEMPSCALE"))
+                params.insert_float("temperaturescale", val["TEMPSCALE"]);
+        }
+        if (val.contains("LESCALE"))
+            params.insert_float("Lescale", val["LESCALE"]);
+        
+        // load rgb here, create spectrum later
+        params.insert_vec3("sigma_a_rgb", { val["SIGMA_A"]["VALUE"][0], val["SIGMA_A"]["VALUE"][1], val["SIGMA_A"]["VALUE"][2]});
+        params.insert_vec3("sigma_s_rgb", { val["SIGMA_S"]["VALUE"][0], val["SIGMA_S"]["VALUE"][1], val["SIGMA_S"]["VALUE"][2]});
+        params.insert_float("scale", val["SIGMA_SCALE"]);
+
+        if (val.contains("G"))
+        {
+            params.insert_float("g", val["G"]);
+        }
+
+        glm::mat4 world_from_medium;
+        if (val.contains("TRANS") || val.contains("ROTAT") || val.contains("SCALE"))
+        {
+            ObjectTransform modelTrans;
+            modelTrans.translation = glm::vec3(val["TRANS"][0], val["TRANS"][1], val["TRANS"][2]);
+            modelTrans.rotation = glm::vec3(val["ROTAT"][0], val["ROTAT"][1], val["ROTAT"][2]);
+            modelTrans.scale = glm::vec3(val["SCALE"][0], val["SCALE"][1], val["SCALE"][2]);
+
+            modelTrans.transform = utilityCore::buildTransformationMatrix(
+                modelTrans.translation, modelTrans.rotation, modelTrans.scale);
+            world_from_medium = modelTrans.transform;
+        }
+
+        mediaNameToID[key] = LoadMediumJobs.size();
+        LoadMediumJobs.emplace_back(type, params, world_from_medium);
+    }
+
+    for (const auto& ele : data["Objects"])
+    {
+        const std::string type = ele["TYPE"];
+        if (type == "model_inline")
+        {
+            Object new_obj;
+            new_obj.type = TRIANGLE_MESH;
+            int starting_index = verticies.size();
+            for (int i = 0; i < ele["VERTICES"].size(); i += 3)
+            {
+                glm::vec3 tmp_pos(ele["VERTICES"][i], ele["VERTICES"][i + 1], ele["VERTICES"][i + 2]);
+                verticies.emplace_back(tmp_pos);
             }
-            else if (strcmp(tokens[0].c_str(), "SKYBOX") == 0) {
-                loadSkybox();
-                cout << " " << endl;
+            new_obj.triangleStart = triangles.size();
+            for (int i = 0; i < ele["INDICES"].size(); i += 3)
+            {
+                glm::ivec3 tmp_idx(starting_index + ele["INDICES"][i], starting_index + ele["INDICES"][i + 1], starting_index + ele["INDICES"][i + 2]);
+                triangles.emplace_back(tmp_idx);
             }
+            new_obj.triangleEnd = triangles.size();
+
+            if (ele.contains("NORMALS"))
+            {
+                // TODO
+                assert(0);
+            }
+
+            // materialid == -1 is possible for pure interface for medium
+            if (ele.contains("MATERIAL"))
+            {
+                // TODO
+                assert(0);
+            }
+
+            if (ele.contains("MEDIUM_INTERFACE"))
+            {
+                const auto& interface = mediumInterfaces[ele["MEDIUM_INTERFACE"]];
+
+                new_obj.mediumIn = mediaNameToID.contains(interface.first) ? mediaNameToID[interface.first] : -1;
+                new_obj.mediumOut = mediaNameToID.contains(interface.second) ? mediaNameToID[interface.second] : -1;
+            }
+
+            ObjectTransform modelTrans;
+            modelTrans.translation = glm::vec3(ele["TRANS"][0], ele["TRANS"][1], ele["TRANS"][2]);
+            modelTrans.rotation = glm::vec3(ele["ROTAT"][0], ele["ROTAT"][1], ele["ROTAT"][2]);
+            modelTrans.scale = glm::vec3(ele["SCALE"][0], ele["SCALE"][1], ele["SCALE"][2]);
+
+            modelTrans.transform = utilityCore::buildTransformationMatrix(
+                modelTrans.translation, modelTrans.rotation, modelTrans.scale);
+            modelTrans.inverseTransform = glm::inverse(modelTrans.transform);
+            modelTrans.invTranspose = glm::inverseTranspose(modelTrans.transform);
+
+            new_obj.Transform = modelTrans;
+
+            objects.emplace_back(new_obj);
         }
     }
 }
@@ -55,7 +219,7 @@ void Scene::loadSkybox()
     std::string line;
     utilityCore::safeGetline(fp_in, line);
     if (!line.empty() && fp_in.good()) {
-        std::cout << "Loading Skybox " << line << " ..." << endl;
+        std::cout << "Loading Skybox " << line << " ..." << std::endl;
         LoadTextureFromFileJobs.emplace_back(line, -1);
     }
 }
@@ -117,13 +281,13 @@ void Scene::LoadAllMaterialsToGPU(Allocator alloc)
         {
             if (job.params.get_string("eta") != std::string())
             {
-                Spectrum eta = spec::get_named_spectrum(job.params.get_string("eta"));
+                SpectrumPtr eta = spec::get_named_spectrum(job.params.get_string("eta"));
                 job.params.insert_spectrum("eta", eta);
             }
             else if (job.params.get_vec3("eta") != glm::vec3(0.0f))
             {
                 glm::vec3 eta = job.params.get_vec3("eta");
-                job.params.insert_spectrum("eta", alloc.new_object<RGBUnboundedSpectrum>(*RGBColorSpace::ACES2065_1, eta));
+                job.params.insert_spectrum("eta", alloc.new_object<RGBUnboundedSpectrum>(*RGBColorSpace::sRGB, eta));
             }
             else if (job.params.get_float("eta") != 0.0f)
             {
@@ -133,13 +297,13 @@ void Scene::LoadAllMaterialsToGPU(Allocator alloc)
 
             if (job.params.get_string("k") != std::string())
             {
-                Spectrum k = spec::get_named_spectrum(job.params.get_string("k"));
+                SpectrumPtr k = spec::get_named_spectrum(job.params.get_string("k"));
                 job.params.insert_spectrum("k", k);
             }
             else if (job.params.get_vec3("k") != glm::vec3(0.0f))
             {
                 glm::vec3 k = job.params.get_vec3("k");
-                job.params.insert_spectrum("k", alloc.new_object<RGBUnboundedSpectrum>(*RGBColorSpace::ACES2065_1, k));
+                job.params.insert_spectrum("k", alloc.new_object<RGBUnboundedSpectrum>(*RGBColorSpace::sRGB, k));
             }
             else if (job.params.get_float("k") != 0.0f)
             {
@@ -148,7 +312,31 @@ void Scene::LoadAllMaterialsToGPU(Allocator alloc)
             }
         }
         job.params.insert_ptr("colorSpace", RGBColorSpace::sRGB);
-        materials.emplace_back(Material::create(job.type, job.params, alloc));
+        materials.emplace_back(MaterialPtr::create(job.type, job.params, alloc));
+    }
+}
+
+void Scene::LoadAllMediaToGPU(Allocator alloc)
+{
+    for (auto& job : LoadMediumJobs)
+    {
+        if (job.type == "nanovdb" || job.type == "homogeneous")
+        {
+            glm::vec3 sigma_a_rgb = job.params.get_vec3("sigma_a_rgb");
+            SpectrumPtr sigma_a = alloc.new_object<RGBUnboundedSpectrum>(*RGBColorSpace::ACES2065_1, sigma_a_rgb);
+            auto sigma_a__ = sigma_a.Cast<RGBUnboundedSpectrum>();
+            job.params.insert_spectrum("sigma_a", sigma_a__);
+
+            glm::vec3 sigma_s_rgb = job.params.get_vec3("sigma_s_rgb");
+            SpectrumPtr sigma_s = alloc.new_object<RGBUnboundedSpectrum>(*RGBColorSpace::ACES2065_1, sigma_s_rgb);
+            auto sigma_s__ = sigma_s.Cast<RGBUnboundedSpectrum>();
+            job.params.insert_spectrum("sigma_s", sigma_s__);
+        }
+        else
+        {
+            throw std::runtime_error("Not implemented!");
+        }
+        media.emplace_back(MediumPtr::create(job.type, job.params, job.world_from_medium, alloc));
     }
 }
 
@@ -372,8 +560,9 @@ void MikkTSpaceSetTSpaceBasic(const SMikkTSpaceContext* pContext, const float fv
 
 
 // load model using tinyobjloader and tinygltf
-bool Scene::loadModel(const string& modelPath, int objectid, bool useVertexNormal)
+bool Scene::loadModel(const std::string& modelPath, int objectid, bool useVertexNormal)
 {
+    using namespace std;
     cout << "Loading Model " << modelPath << " ..." << endl;
     string postfix = modelPath.substr(modelPath.find_last_of('.') + 1);
     if (postfix == "obj")//load obj
@@ -392,20 +581,21 @@ bool Scene::loadModel(const string& modelPath, int objectid, bool useVertexNorma
         if (!ret)  return false;
 
         int matOffset = materials.size();
-        /*
+        
         for (const auto& mat : aMaterials)
         {
-            Material newMat{};
-            newMat.color[0] = mat.diffuse[0];
-            newMat.color[1] = mat.diffuse[1];
-            newMat.color[2] = mat.diffuse[2];
+            std::string type = "diffuse";
+            BundledParams params;
+            params.insert_vec3("albedo", glm::vec3(mat.diffuse[0], mat.diffuse[1], mat.diffuse[2]));
+            // TODO
             if (!mat.diffuse_texname.empty())
             {
                 LoadTextureFromFileJobs.emplace_back(mtlPath + mat.diffuse_texname, materials.size());
             }
-            materials.emplace_back(newMat);
+            std::string line;
+            utilityCore::safeGetline(fp_in, line);
 
-        }*/
+        }
 
 
         std::unordered_map<std::pair<glm::vec3, glm::vec2>, unsigned> vertex_set;
@@ -820,8 +1010,9 @@ bool Scene::loadModel(const string& modelPath, int objectid, bool useVertexNorma
 
 
 
-bool Scene::loadGeometry(const string& type, int objectid)
+bool Scene::loadGeometry(const std::string& type, int objectid)
 {
+    using namespace std;
     string line;
     Object newGeom;
     //load geometry type
@@ -870,7 +1061,8 @@ bool Scene::loadGeometry(const string& type, int objectid)
     return true;
 }
 
-int Scene::loadObject(string objectid) {
+int Scene::loadObject(std::string objectid) {
+    using namespace std;
     int id = atoi(objectid.c_str());
     std::cout << "Loading Object " << id << "..." << endl;
     string line;
@@ -897,6 +1089,7 @@ int Scene::loadObject(string objectid) {
 
 
 int Scene::loadCamera() {
+    using namespace std;
     std::cout << "Loading Camera ..." << endl;
     RenderState &state = this->state;
     Camera &camera = state.camera;
@@ -957,7 +1150,8 @@ int Scene::loadCamera() {
     return 1;
 }
 
-int Scene::loadMaterial(string materialid) {
+int Scene::loadMaterial(std::string materialid) {
+    using namespace std;
     int id = atoi(materialid.c_str());
     if (id != LoadMaterialJobs.size()) {
         std::cout << "ERROR: MATERIAL ID does not match expected number of materials" << endl;
@@ -965,7 +1159,7 @@ int Scene::loadMaterial(string materialid) {
     } else {
         std::cout << "Loading Material " << id << "..." << endl;
         //Material newMaterial;
-        MaterialParams params;
+        BundledParams params;
         Allocator alloc;
         std::string type;
         //load static properties
@@ -1097,7 +1291,7 @@ void Scene::CreateLights()
     for (int i = 0; i < primitives.size(); i++)
     {
         const Object& obj = objects[primitives[i].objID];
-        if (materials[obj.materialid].Is<EmissiveMaterial>())
+        if (obj.materialid != -1 && materials[obj.materialid].Is<EmissiveMaterial>())
         {
             lights.emplace_back(primitives[i]);
         }
@@ -1130,7 +1324,7 @@ void InitAliasTable(const std::vector<float>& w, std::vector<AliasBin>& bins)
         size_t idx;
         Work(float ps, size_t i):pScaled(ps),idx(i){}
     };
-    queue<Work> qUnder, qOver;
+    std::queue<Work> qUnder, qOver;
     for (size_t i = 0; i < bins.size(); i++)
     {
         float pScaled = bins[i].p * bins.size();

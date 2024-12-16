@@ -9,6 +9,7 @@
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+// single precision floating point math library for ray tracing
 namespace math
 {
     constexpr float pi = 3.141592653589793f;
@@ -17,11 +18,22 @@ namespace math
     {
         return x != x;
     }
-
-    template<typename T>
-    __device__ __host__ inline float lerp(T x, T a, T b)
+    template<typename T, typename S>
+    __device__ __host__ inline T max(T x, S y)
     {
-        return (1 - x) * a + x * b;
+        return x > y ? x : (T)y;
+    }
+
+    template<typename T, typename S>
+    __device__ __host__ inline T min(T x, S y)
+    {
+        return y < x ? (T)y : x;
+    }
+
+    template<typename T, typename S>
+    __device__ __host__ inline S lerp(T x, S a, S b)
+    {
+        return (T(1.0f) - x) * a + x * b;
     }
     template<typename T>
     __device__ __host__ inline float sqr(T x){ return x*x; }
@@ -332,7 +344,7 @@ namespace math
     }
     __device__ inline float sin_cos_convert(float sincos)
     {
-        return sqrtf(fmaxf(0.0f, 1.0f - sqr(sincos)));
+        return sqrtf(max(0.0f, 1.0f - sqr(sincos)));
     }
 
     __device__ inline float cos_theta_vec(const glm::vec3& v)
@@ -345,7 +357,7 @@ namespace math
     }
     __device__ inline float sin2_theta_vec(const glm::vec3& v)
     {
-        return fmaxf(0.0f, 1.0f - cos2_theta_vec(v));
+        return max(0.0f, 1.0f - cos2_theta_vec(v));
     }
     __device__ inline float sin_theta_vec(const glm::vec3& v)
     {
@@ -431,6 +443,12 @@ namespace math
     }
 
     template <typename T>
+    __device__ __host__ float safe_sqrt(T x)
+    {
+        return sqrtf(max(0.0f, (float)x));
+    }
+
+    template <typename T>
     __device__ __host__ complex<T> sqrt(const complex<T>& z) {
         T n = abs(z), t1 = sqrtf(T(.5) * (n + abs(z.re))),
             t2 = T(.5) * z.im / t1;
@@ -480,12 +498,102 @@ namespace math
     __device__ inline bool geomerty_refract(const glm::vec3& wi, const glm::vec3& n, float eta, glm::vec3* wt)
     {
         float cosThetaI = glm::dot(wi, n);
-        float sin2ThetaI = fmaxf(0.0f, 1 - cosThetaI * cosThetaI);
+        float sin2ThetaI = max(0.0f, 1 - cosThetaI * cosThetaI);
         float sin2ThetaT = eta * eta * sin2ThetaI;
         if (sin2ThetaT >= 1) return false;
         float cosThetaT = sqrtf(1 - sin2ThetaT);
         *wt = eta * (-wi) + (eta * cosThetaI - cosThetaT) * n;
         return true;
+    }
+
+    __device__ inline glm::vec3 spherical_direction(float sinTheta, float cosTheta, float phi)
+    {
+        sinTheta = clamp(sinTheta, -1, 1);
+        cosTheta = clamp(cosTheta, -1, 1);
+        return glm::vec3(sinTheta * cosf(phi), sinTheta * sinf(phi), cosTheta);
+    }
+
+
+    //http://marc-b-reynolds.github.io/quaternions/2016/07/06/Orthonormal.html
+    //Get tangent space vectors
+    __device__ void get_tbn_pixar(const glm::vec3& N, glm::vec3* T, glm::vec3* B);
+
+    class Frame 
+    {
+        glm::vec3 x, y, z;
+    public:
+        __device__ Frame(const glm::vec3& x, const glm::vec3& y, const glm::vec3& z):x(x),y(y),z(z){}
+        __device__ static Frame from_z(const glm::vec3& z)
+        {
+            glm::vec3 x, y;
+            get_tbn_pixar(z, &x, &y);
+            return Frame(x, y, z);
+        }
+        __device__ glm::vec3 to_local(const glm::vec3& v)
+        {
+            return glm::vec3(glm::dot(v, x), glm::dot(v, y), glm::dot(v, z));
+        }
+        __device__ glm::vec3 from_local(const glm::vec3& v)
+        {
+            return v.x * x + v.y * y + v.z * z;
+        }
+    };
+
+    __device__ inline float sample_exponential(float u, float a)
+    {
+        assert(a > 0);
+        return -logf(max(1.0f - u, std::numeric_limits<float>::denorm_min())) / a;
+    }
+
+    __device__ inline glm::vec3 permute(const glm::vec3& input, const glm::ivec3& idx)
+    {
+        assert(idx.x >= 0 && idx.x < 3 && idx.y >= 0 && idx.y < 3 && idx.z >= 0 && idx.z < 3);
+        return { input[idx[0]], input[idx[1]], input[idx[2]] };
+    }
+
+    template <typename Ta, typename Tb, typename Tc, typename Td>
+    __device__ inline auto difference_of_products(Ta a, Tb b, Tc c, Td d)
+    {
+        auto cd = c * d;
+        auto ans = fma(a, b, -cd);
+        auto err = fma(-c, d, cd);
+        return ans + err;
+    }
+
+    __device__ inline int max_component_index(const glm::vec3& vec)
+    {
+        return (vec.x > vec.y && vec.x > vec.z) ? 0 : (vec.y > vec.z ? 1 : 2);
+    }
+
+    __device__ inline int max_component_value(const glm::vec3& vec)
+    {
+        return (vec.x > vec.y && vec.x > vec.z) ? vec.x : (vec.y > vec.z ? vec.y : vec.z);
+    }
+
+    constexpr float MachineEpsilon = std::numeric_limits<float>::epsilon() * 0.5;
+
+    constexpr float gamma(int n)
+    {
+        return (n * MachineEpsilon) / (1 - n * MachineEpsilon);
+    }
+
+    // Would be nice to allow Float to be a template type here, but it is tricky:
+    // https://stackoverflow.com/questions/5101516/why-function-template-cannot-be-partially-specialized
+    template <int n>
+    __device__ inline constexpr float pow(float v) {
+        if constexpr (n < 0)
+            return 1 / pow<-n>(v);
+        float n2 = pow<n / 2>(v);
+        return n2 * n2 * pow<n & 1>(v);
+    }
+
+    template <>
+    __device__ inline constexpr float pow<1>(float v) {
+        return v;
+    }
+    template <>
+    __device__ inline constexpr float pow<0>(float v) {
+        return 1;
     }
 };
 

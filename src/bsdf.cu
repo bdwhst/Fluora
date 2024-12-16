@@ -6,20 +6,20 @@
 #include <cuda_runtime.h>
 
 // Interface : Sample wi and return pdf & eval BSDF (cos wi premultiplied) 
-__device__ SampledSpectrum BxDF::sample_f(const glm::vec3& wo, glm::vec3& wi, float& pdf, thrust::default_random_engine& rng)
+__device__ SampledSpectrum BxDFPtr::sample_f(const glm::vec3& wo, glm::vec3& wi, float& pdf, thrust::default_random_engine& rng)
 {
 	auto op = [&](auto ptr) { return ptr->sample_f(wo, wi, pdf, rng); };
 	return Dispatch(op);
 }
 
 // Interface : Eval BSDF
-__device__ SampledSpectrum BxDF::eval(const glm::vec3& wo, const glm::vec3& wi, thrust::default_random_engine& rng)
+__device__ SampledSpectrum BxDFPtr::eval(const glm::vec3& wo, const glm::vec3& wi, thrust::default_random_engine& rng)
 {
 	auto op = [&](auto ptr) { return ptr->eval(wo, wi, rng); };
 	return Dispatch(op);
 }
 // Interface : Eval PDF
-__device__ float BxDF::pdf(const glm::vec3& wo, const glm::vec3& wi)
+__device__ float BxDFPtr::pdf(const glm::vec3& wo, const glm::vec3& wi)
 {
 	auto op = [&](auto ptr) { return ptr->pdf(wo, wi); };
 	return Dispatch(op);

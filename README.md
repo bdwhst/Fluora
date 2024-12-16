@@ -7,20 +7,27 @@ At present, ***Fluora*** supports unidirectional path tracing with multiple impo
 
 ## Usage
 
-Command line arguments: `.\cis565_path_tracer.exe scenefile.txt`
+Command line arguments: `.\Fluora.exe scenefile.txt`
 
 `w`,`a`,`s`,`d` to move camera in first person style, `q` save current picture, press `left mouse button` to rotate camera
 
 ## Showcase
 
+|   Ground Explosion (5000 spp)   |
+| :-----------------------------: |
+| ![](./img/ground_explosion.png) |
+
+|   Teapot Cloud (5000 spp)   |
+| :-------------------------: |
+| ![](./img/teapot_cloud.png) |
+
 | Wanna play chess? (1080*1080 10000spp) |
 | :------------------------------------: |
 |         ![](./img/chess0.png)          |
 
-| Spectral Varying IOR vs Constant IOR |
-| ------------------------------------ |
-| ![](./img/dragon_spec_1.png)         |
-| ![](./img/dragon_spec_0.png)         |
+|     Spectral Varying IOR     |
+| :--------------------------: |
+| ![](./img/dragon_garden.png) |
 
 
 

@@ -73,7 +73,7 @@ private:
 class RGBColorSpace
 {
 public:
-	RGBColorSpace(const glm::vec2& r, const glm::vec2& g, const glm::vec2& b, Spectrum illuminant, const RGBToSpectrumTable* rgbToSpectrumTable, Allocator alloc)
+	RGBColorSpace(const glm::vec2& r, const glm::vec2& g, const glm::vec2& b, SpectrumPtr illuminant, const RGBToSpectrumTable* rgbToSpectrumTable, Allocator alloc)
 		;
 
 	__device__ __host__
@@ -125,16 +125,16 @@ private:
 class RGBUnboundedSpectrum {
 public:
 	__device__ __host__
-		float operator()(float lambda) const { return rsp(lambda); }
+		float operator()(float lambda) const { return scale * rsp(lambda); }
 	__device__ __host__
-		float max_value() const { return rsp.max_value(); }
+		float max_value() const { return scale * rsp.max_value(); }
 
 	__device__ __host__
 		SampledSpectrum	sample(const SampledWavelengths& swl) const
 	{
 		SampledSpectrum s;
 		for (int i = 0; i < spec::NSpectrumSamples; ++i)
-			s[i] = rsp(swl[i]);
+			s[i] = scale * rsp(swl[i]);
 		return s;
 	}
 	__device__ __host__
