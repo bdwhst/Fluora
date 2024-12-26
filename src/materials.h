@@ -125,13 +125,16 @@ public:
 	//should not be called
 	__device__ BxDFPtr get_bxdf(MaterialEvalInfo& info, void* localMem)
 	{
+		assert(0);
 		return nullptr;
 	}
-	__device__ SampledSpectrum Le(SampledWavelengths& swl)
+	__device__ SampledSpectrum Le(const SampledWavelengths& swl)
 	{
 		RGBIlluminantSpectrum illum(*colorSpace, rgb);
 		return illum.sample(swl);
 	}
+	__device__ __host__ glm::vec3 get_rgb() const { return rgb; }
+	__device__ __host__ RGBColorSpace* get_colorspace(){ return colorSpace; }
 private:
 	glm::vec3 rgb;
 	RGBColorSpace* colorSpace;

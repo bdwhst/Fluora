@@ -19,7 +19,7 @@
 #include "materials.h"
 #include "scene.h"
 
-Scene::Scene(std::string filename) {
+Scene::Scene(std::string filename):sceneFilename(filename) {
     using namespace std;
     cout << "Reading scene from " << filename << " ..." << endl;
     cout << " " << endl;
@@ -340,6 +340,26 @@ void Scene::LoadAllMediaToGPU(Allocator alloc)
     }
 }
 
+void Scene::LoadAllLightsToGPU(Allocator alloc)
+{
+    for (int i=0;i<primitives.size();i++)
+    {
+        auto& prim = primitives[i];
+        int matID = objects[prim.objID].materialid;
+        if (materials[matID].Is<EmissiveMaterial>())
+        {
+            BundledParams params;
+            params.insert_int("primitiveID", i);
+            EmissiveMaterial* mat = materials[matID].Cast<EmissiveMaterial>();
+            // TODO: possible mem leak
+            SpectrumPtr spec = alloc.new_object<RGBIlluminantSpectrum>(*mat->get_colorspace(), mat->get_rgb());
+            params.insert_spectrum("Le_spec", spec);
+            prim.lightID = static_cast<uint32_t>(lights.size());
+            lights.emplace_back(DiffuseAreaLight::create(params, alloc));
+        }
+    }
+}
+
 
 Scene::~Scene()
 {
@@ -590,7 +610,7 @@ bool Scene::loadModel(const std::string& modelPath, int objectid, bool useVertex
             // TODO
             if (!mat.diffuse_texname.empty())
             {
-                LoadTextureFromFileJobs.emplace_back(mtlPath + mat.diffuse_texname, materials.size());
+                LoadTextureFromFileJobs.emplace_back(mtlPath + mat.diffuse_texname, static_cast<int>(materials.size()));
             }
             std::string line;
             utilityCore::safeGetline(fp_in, line);
@@ -1286,17 +1306,6 @@ void Scene::buildBVH()
     assert(checkBVHTreeFull(bvhroot));
 }
 
-void Scene::CreateLights()
-{
-    for (int i = 0; i < primitives.size(); i++)
-    {
-        const Object& obj = objects[primitives[i].objID];
-        if (obj.materialid != -1 && materials[obj.materialid].Is<EmissiveMaterial>())
-        {
-            lights.emplace_back(primitives[i]);
-        }
-    }
-}
 
 void Scene::buildStacklessBVH()
 {

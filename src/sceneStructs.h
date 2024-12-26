@@ -12,7 +12,6 @@
 
 
 #define USE_BVH 1
-#define USE_MIS 0
 #define MIS_POWER_2 1
 #define MTBVH 1
 #define DENOISE 0
@@ -24,7 +23,7 @@
 #define ALPHA_CUTOFF 0.01f
 #define STOCHASTIC_SAMPLING 1
 #define FIRST_INTERSECTION_CACHING 1
-#define MAX_DEPTH 8
+#define MAX_DEPTH 32
 #define SORT_BY_MATERIAL_TYPE 0
 #define MAX_NUM_PRIMS_IN_LEAF 2
 #define SAH_BUCKET_SIZE 20
@@ -32,6 +31,13 @@
 #define WHITE_FURNANCE_TEST 0
 #define NUM_MULTI_SCATTER_BOUNCE 16
 #define WATER_TIGHT_MESH_INTERSECTION 1
+
+enum IntegratorType {
+    naive,
+    mis
+};
+
+
 
 enum GeomType {
     SPHERE,
@@ -75,6 +81,7 @@ float BoxArea(const BoundingBox& b);
 struct Primitive {
     int objID;
     int offset;//offset for triangles in model
+    int lightID;
     BoundingBox bbox;
     Primitive(const Object& obj, int objID, int triangleOffset = -1, const glm::ivec3* triangles = nullptr, const glm::vec3* vertices = nullptr);
 };
@@ -111,9 +118,9 @@ const int dirs[] = {
 
 
 
-enum MaterialType {
-    diffuse, frenselSpecular, microfacet, metallicWorkflow, blinnphong, asymMicrofacet, emitting
-};
+//enum MaterialType {
+//    diffuse, frenselSpecular, microfacet, metallicWorkflow, blinnphong, asymMicrofacet, emitting
+//};
 
 enum AsymMicrofacetType {
     conductor, dielectric
@@ -184,11 +191,27 @@ struct RenderState {
 struct PathSegment {
     Ray ray;
     SampledSpectrum transport;
+    SampledSpectrum r_u, r_l;
     SampledWavelengths lambda;
     int pixelIndex;
     int remainingBounces;
     float lastMatPdf;
+    bool prevSpecular;
     thrust::default_random_engine rng;
+};
+
+struct ShadowRaySegment {
+    glm::vec3 pWorld;
+    glm::vec3 woWorld;
+    glm::vec3 normalWorld;
+    SampledSpectrum transport;
+    SampledSpectrum r_u, r_l;
+    SampledWavelengths lambda;
+    int pixelIndex;
+    thrust::default_random_engine rng;
+    uint32_t bsdfType;
+    // This is costing a bit more global memory
+    char bsdfData[BxDFMaxSize];
 };
 
 // Use with a corresponding PathSegment to do:
@@ -202,8 +225,8 @@ struct ShadeableIntersection {
     glm::vec3 worldPos = glm::vec3(0.0);
     int materialId = -1;
     int primitiveId = -1;
+    int lightId = -1;
     glm::vec2 uv = glm::vec2(0.0);
-    MaterialType type = diffuse;
 };
 
 struct ModelInfoDev {
@@ -227,12 +250,13 @@ struct SceneInfoDev {
         MTBVHGPUNode* dev_mtbvhArray;
     };
     int bvhDataSize;
-    Primitive* dev_lights;
-    int lightsSize;
     cudaTextureObject_t skyboxObj;
     PixelSensor* pixelSensor;
     bool containsVolume = false;
+    
 };
+
+
 
 struct SceneGbuffer {
     glm::vec3* dev_albedo;

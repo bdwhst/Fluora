@@ -262,8 +262,9 @@ PixelSensor::PixelSensor(const RGBColorSpace* outputSpace, SpectrumPtr sensorIll
 {
     if (sensorIllum)
     {
-        //TODO: white balance
-        throw std::runtime_error("Not implemented!");
+        glm::vec2 sourceWhite = glm::vec2(spec::spectrum_to_xyz(sensorIllum));
+        glm::vec2 targetWhite = outputSpace->w;
+        XYZFromSensorRGB = white_balance(sourceWhite, targetWhite);
     }
 }
 
@@ -281,10 +282,10 @@ glm::vec3 PixelSensor::project_reflectance(SpectrumPtr refl, SpectrumPtr illum, 
     return res / g_int;
 }
 
-__device__ void RGBFilm::add_radiance(const glm::vec3& xyz, int pixelIndex)
+__device__ void RGBFilm::add_radiance(const glm::vec3& sensorRGB, int pixelIndex)
 {
     // add linear rgb radiance
-    glm::vec3 rgb = outputSpace->to_rgb(xyz);
+    glm::vec3 rgb = outputRGBFromSensorRGB * sensorRGB;
     float maxc = max(rgb.x, max(rgb.y, rgb.z));
     if (maxc > threshold)
     {

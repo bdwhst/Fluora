@@ -24,8 +24,9 @@
 class GuiDataContainer
 {
 public:
-    GuiDataContainer() : TracedDepth(0) {}
-    int TracedDepth;
+    int TracedDepth = 0;
+	std::string integratorType = "";
+	double elapsedTime = 0.0;
 };
 
 namespace utilityCore {

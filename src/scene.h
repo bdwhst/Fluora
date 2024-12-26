@@ -11,6 +11,7 @@
 #include "sceneStructs.h"
 #include "bvh.h"
 #include "materials.h"
+#include "lights.h"
 
 
 struct MaterialLoadJobInfo
@@ -25,6 +26,12 @@ struct MediumLoadJobInfo
     BundledParams params;
     glm::mat4 world_from_medium;
 };
+
+//struct LightLoadJobInfo
+//{
+//    std::string type;
+//    BundledParams params;
+//};
 
 class Scene {
 
@@ -45,10 +52,10 @@ public:
     void LoadAllTexturesToGPU(); 
     void LoadAllMaterialsToGPU(Allocator alloc);
     void LoadAllMediaToGPU(Allocator alloc);
-    void CreateLights();
+    void LoadAllLightsToGPU(Allocator alloc);
     Scene(std::string filename);
     ~Scene();
-
+    std::string sceneFilename;
     std::vector<Object> objects;
     std::vector<MaterialPtr> materials;
     std::vector<MediumPtr> media;
@@ -59,7 +66,7 @@ public:
     std::vector<glm::vec3> tangents;
     std::vector<float> fSigns;
     std::vector<Primitive> primitives;
-    std::vector<Primitive> lights;
+    std::vector<LightPtr> lights;
     std::vector<BVHGPUNode> bvhArray;
     std::vector<MTBVHGPUNode> MTBVHArray;
     RenderState state;
@@ -73,6 +80,7 @@ public:
     std::vector<GLTFTextureLoadInfo> LoadTextureFromMemoryJobs;
     std::vector<MaterialLoadJobInfo>  LoadMaterialJobs;
     std::vector<MediumLoadJobInfo> LoadMediumJobs;
+    //std::vector<LightLoadJobInfo> LoadLightJobs;
 };
 
 struct MikkTSpaceHelper

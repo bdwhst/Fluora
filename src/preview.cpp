@@ -151,6 +151,9 @@ void errorCallback(int error, const char* description) {
 	fprintf(stderr, "%s\n", description);
 }
 
+static ImFont* appFont = nullptr;
+
+
 bool init() {
 	glfwSetErrorCallback(errorCallback);
 
@@ -179,9 +182,13 @@ bool init() {
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
 	io = &ImGui::GetIO(); (void)io;
+	float fontSize = 24.0f;
+	appFont = io->Fonts->AddFontFromFileTTF("..\\fonts\\cascadia-code\\Cascadia.ttf", fontSize);
 	ImGui::StyleColorsLight();
 	ImGui_ImplGlfw_InitForOpenGL(window, true);
 	ImGui_ImplOpenGL3_Init("#version 120");
+
+	
 
 	// Initialize other stuff
 	initVAO();
@@ -202,6 +209,7 @@ void InitImguiData(GuiDataContainer* guiData)
 }
 
 
+
 // LOOK: Un-Comment to check ImGui Usage
 void RenderImGui()
 {
@@ -217,6 +225,10 @@ void RenderImGui()
 	static float f = 0.0f;
 	static int counter = 0;
 
+	ImGuiIO& io = ImGui::GetIO();
+	
+	ImGui::PushFont(appFont);
+
 	ImGui::Begin("Path Tracer Analytics");                  // Create a window called "Hello, world!" and append into it.
 	
 	// LOOK: Un-Comment to check the output window and usage
@@ -231,8 +243,11 @@ void RenderImGui()
 	//	counter++;
 	//ImGui::SameLine();
 	//ImGui::Text("counter = %d", counter);
-	ImGui::Text("Traced Depth %d", imguiData->TracedDepth);
+	ImGui::Text("Scene Filename: %s", scene->sceneFilename.c_str());
+	ImGui::Text("Traced Depth: %d", imguiData->TracedDepth);
+	ImGui::Text("Integrator: %s", imguiData->integratorType.c_str());
 	ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
+	ImGui::Text("Elapsed time: %f sec", imguiData->elapsedTime);
 	ImGui::Text("Num triangles: %d", scene->triangles.size());
 	ImGui::Text("Num bvh nodes: %d", scene->bvhTreeSize);
 	ImGui::End();
@@ -240,9 +255,9 @@ void RenderImGui()
 	ImGui::Begin("Camera Settings");
 	if (ImGui::SliderFloat("Theta", &theta, 0.0f, PI))
 		camchanged = true;
-	if(ImGui::SliderFloat("Phi", &phi, 0.0f, TWO_PI))
+	if (ImGui::SliderFloat("Phi", &phi, 0.0f, TWO_PI))
 		camchanged = true;
-	if(ImGui::SliderFloat("Pos x", &renderState->camera.position.x, -100.0f, 100.0f))
+	if (ImGui::SliderFloat("Pos x", &renderState->camera.position.x, -100.0f, 100.0f))
 		camchanged = true;
 	if (ImGui::SliderFloat("Pos y", &renderState->camera.position.y, -100.0f, 100.0f))
 		camchanged = true;
@@ -252,6 +267,8 @@ void RenderImGui()
 		camchanged = true;
 	if (ImGui::SliderFloat("Focal Length", &renderState->camera.focalLength, 0.1f, 20.0f))
 		camchanged = true;
+
+	ImGui::PopFont();
 
 	ImGui::End();
 

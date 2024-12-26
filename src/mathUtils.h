@@ -18,6 +18,12 @@ namespace math
     {
         return x != x;
     }
+
+    __device__ __host__ inline bool is_nan(glm::vec3 v)
+    {
+        return is_nan(v.x) || is_nan(v.y) || is_nan(v.z);
+    }
+
     template<typename T, typename S>
     __device__ __host__ inline T max(T x, S y)
     {
@@ -379,7 +385,7 @@ namespace math
     }
 
     template<typename T>
-    __device__ inline bool is_inf(T x)
+    __host__ __device__ inline bool is_inf(T x)
     {
         return isinf(x);
     }
@@ -431,6 +437,9 @@ namespace math
 
     template<typename T>
     __device__ __host__ complex<T> sqr(const complex<T>& z) { return z * z; }
+
+    template<typename T>
+    __device__ __host__ int sgn(const T& x) { return x > 0 ? 1 : (x < 0 ? -1 : 0); }
 
     template <typename T>
     __device__ __host__  T norm(const complex<T>& z) {
@@ -527,6 +536,8 @@ namespace math
         {
             glm::vec3 x, y;
             get_tbn_pixar(z, &x, &y);
+            x = glm::normalize(x);
+            y = glm::normalize(y);
             return Frame(x, y, z);
         }
         __device__ glm::vec3 to_local(const glm::vec3& v)

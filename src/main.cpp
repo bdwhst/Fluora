@@ -4,6 +4,8 @@
 #include <chrono>
 #include <stb_image.h>
 #include <OpenImageDenoise/oidn.h>
+#include <string>
+#include "clock.h"
 static std::string startTimeString;
 
 // For camera controls
@@ -26,6 +28,7 @@ glm::vec3 ogLookAt; // for recentering the camera
 Scene* scene;
 GuiDataContainer* guiData;
 RenderState* renderState;
+PerformanceClock* perfClock = nullptr;
 int iteration;
 
 int width;
@@ -60,6 +63,7 @@ int main(int argc, char** argv) {
 	//Create Instance for ImGUIData
 	guiData = new GuiDataContainer();
 	sysTime = time(nullptr);
+	perfClock = new PerformanceClock();
 	
 
 	// Initialize CUDA and GL components
@@ -75,7 +79,7 @@ int main(int argc, char** argv) {
 
 	scene->LoadAllMaterialsToGPU(alloc);
 	scene->LoadAllMediaToGPU(Allocator(baseBackend));
-	scene->CreateLights();
+	scene->LoadAllLightsToGPU(alloc);
 
 	// Initialize ImGui Data
 	InitImguiData(guiData);
@@ -218,6 +222,7 @@ void runCuda() {
 	// No data is moved (Win & Linux). When mapped to CUDA, OpenGL should not use this buffer
 
 	if (iteration == 0) {
+		perfClock->reset();
 		pathtraceFree(scene);
 		Allocator alloc(mainBlockBackend);
 		pathtraceInit(scene, alloc);
@@ -234,6 +239,7 @@ void runCuda() {
 
 		// unmap buffer object
 		cudaGLUnmapBufferObject(pbo);
+		guiData->elapsedTime = perfClock->get_time_in_seconds();
 	}
 	else {
 		saveImage();

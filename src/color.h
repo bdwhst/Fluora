@@ -3,7 +3,7 @@
 #include "spectrum.h"
 #include "glm/glm.hpp"
 #include "memoryUtils.h"
-
+#include "glm/gtx/matrix_operation.hpp"
 
 __device__ __host__
 inline glm::vec3 xyY_to_XYZ(const glm::vec2& xy, float Y = 1)
@@ -11,6 +11,12 @@ inline glm::vec3 xyY_to_XYZ(const glm::vec2& xy, float Y = 1)
 	if (xy.y == 0)
 		return glm::vec3(0);
 	return glm::vec3(xy.x * Y / xy.y, Y, (1 - xy.x - xy.y) * Y / xy.y);
+}
+
+__device__ __host__ 
+inline glm::vec2 XYZ_to_xy(const glm::vec3& xyz)
+{
+	return { xyz.x / (xyz.x + xyz.y + xyz.z),xyz.y / (xyz.x + xyz.y + xyz.z) };
 }
 
 class RGBSigmoidPolynomial
@@ -194,3 +200,28 @@ __device__ extern const RGBColorSpace* RGBColorSpace_sRGB;
 __device__ extern const RGBColorSpace* RGBColorSpace_DCI_P3;
 __device__ extern const RGBColorSpace* RGBColorSpace_Rec2020;
 __device__ extern const RGBColorSpace* RGBColorSpace_ACES2065_1;
+
+
+// White Balance Definitions
+// clang-format off
+// These are the Bradford transformation matrices.
+const glm::mat3 LMSFromXYZ(0.8951, 0.2664, -0.1614,
+	-0.7502, 1.7135, 0.0367,
+	0.0389, -0.0685, 1.0296);
+const glm::mat3 XYZFromLMS(0.986993, -0.147054, 0.159963,
+	0.432305, 0.51836, 0.0492912,
+	-0.00852866, 0.0400428, 0.968487);
+// clang-format on
+
+inline glm::mat3 white_balance(glm::vec2 srcWhite, glm::vec2 targetWhite) {
+	// Find LMS coefficients for source and target white
+	glm::vec3 srcXYZ = xyY_to_XYZ(srcWhite), dstXYZ = xyY_to_XYZ(targetWhite);
+	auto srcLMS = LMSFromXYZ * srcXYZ, dstLMS = LMSFromXYZ * dstXYZ;
+
+	// Return white balancing matrix for source and target white
+	glm::mat3 LMScorrect;
+	LMScorrect[0][0] = dstLMS[0] / srcLMS[0];
+	LMScorrect[1][1] = dstLMS[1] / srcLMS[1];
+	LMScorrect[2][2] = dstLMS[2] / srcLMS[2];
+	return XYZFromLMS * LMScorrect * LMSFromXYZ;
+}

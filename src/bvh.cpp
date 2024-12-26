@@ -28,6 +28,7 @@ float BoxArea(const BoundingBox& b)
 
 Primitive::Primitive(const Object& obj, int objID, int triangleOffset, const glm::ivec3* triangles, const glm::vec3* vertices)
 {
+	this->lightID = -1;
 	this->objID = objID;
 	this->offset = triangleOffset;
 	if (obj.type == SPHERE || obj.type == CUBE)

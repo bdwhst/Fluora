@@ -14,6 +14,8 @@ public:
 	void insert_ptr(const std::string& key, void* value) { ptr_data.insert({ key,value }); }
 	void insert_spectrum(const std::string& key, SpectrumPtr value) { spec_data.insert({ key,value }); }
 	void insert_string(const std::string& key, const std::string& value) { str_data.insert({ key,value }); }
+	void insert_int(const std::string& key, int value) { int_data.insert({ key,value }); }
+	void insert_bool(const std::string& key, bool value) { bool_data.insert({ key,value }); }
 	float get_float(const std::string& key, float default_val = 0.0f) const
 	{
 		if (float_data.count(key))
@@ -66,7 +68,27 @@ public:
 	{
 		return spec_data;
 	}
+
+	int get_int(const std::string& key, int default_val = -1) const
+	{
+		if (int_data.count(key))
+		{
+			return int_data.at(key);
+		}
+		return default_val;
+	}
+
+	bool get_bool(const std::string& key, bool default_val = false) const
+	{
+		if (int_data.count(key))
+		{
+			return int_data.at(key);
+		}
+		return default_val;
+	}
 private:
+	std::unordered_map<std::string, bool> bool_data;
+	std::unordered_map<std::string, int> int_data;
 	std::unordered_map<std::string, float> float_data;
 	std::unordered_map<std::string, cudaTextureObject_t> tex_data;
 	std::unordered_map<std::string, glm::vec3> vec3_data;
@@ -142,7 +164,7 @@ public:
 	}
 
 	template <typename F>
-	__host__ auto max_value(const glm::vec3& pMin, const glm::vec3& pMax, F convert) const -> decltype(convert(T{})) {
+	__host__ __device__ auto max_value(const glm::vec3& pMin, const glm::vec3& pMax, F convert) const -> decltype(convert(T{})) {
 		glm::vec3 ps[2] = { glm::vec3(pMin.x * nx - .5f, pMin.y * ny - .5f,
 								 pMin.z * nz - .5f),
 						 glm::vec3(pMax.x * nx - .5f, pMax.y * ny - .5f,
@@ -159,7 +181,7 @@ public:
 
 		return maxValue;
 	}
-	__host__ T max_value(const glm::vec3& pMin, const glm::vec3& pMax) const {
+	__host__ __device__ T max_value(const glm::vec3& pMin, const glm::vec3& pMax) const {
 		auto convert = [] __host__ __device__ (T value) -> T { return value; };
 		
 		return max_value(pMin, pMax, convert);

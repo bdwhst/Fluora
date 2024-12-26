@@ -25,6 +25,7 @@ public:
     __device__ SampledSpectrum sample_f(const glm::vec3& wo, glm::vec3& wi, float& pdf, thrust::default_random_engine& rng);
     __device__ SampledSpectrum eval(const glm::vec3& wo, const glm::vec3& wi, thrust::default_random_engine& rng);
     __device__ float pdf(const glm::vec3& wo, const glm::vec3& wi);
+    __device__ uint32_t flags() const;
 };
 
 
@@ -35,6 +36,7 @@ public:
     __device__ SampledSpectrum sample_f(const glm::vec3& wo, glm::vec3& wi, float& pdf, thrust::default_random_engine& rng);
     __device__ SampledSpectrum eval(const glm::vec3& wo, const glm::vec3& wi, thrust::default_random_engine& rng);
     __device__ float pdf(const glm::vec3& wo, const glm::vec3& wi);
+    __device__ uint32_t flags() const;
     SampledSpectrum reflectance;
 };
 
@@ -46,6 +48,7 @@ public:
     __device__ SampledSpectrum sample_f(const glm::vec3& wo, glm::vec3& wi, float& pdf, thrust::default_random_engine& rng);
     __device__ SampledSpectrum eval(const glm::vec3& wo, const glm::vec3& wi, thrust::default_random_engine& rng);
     __device__ float pdf(const glm::vec3& wo, const glm::vec3& wi);
+    __device__ uint32_t flags() const;
     float eta;
 };
 
@@ -56,6 +59,16 @@ public:
     __device__ SampledSpectrum sample_f(const glm::vec3& wo, glm::vec3& wi, float& pdf, thrust::default_random_engine& rng);
     __device__ SampledSpectrum eval(const glm::vec3& wo, const glm::vec3& wi, thrust::default_random_engine& rng);
     __device__ float pdf(const glm::vec3& wo, const glm::vec3& wi);
+    __device__ uint32_t flags() const;
     SampledSpectrum eta, k;
     TRDistribution dist;
+};
+
+enum BxDFFlags
+{
+    reflection = 1 << 0,
+    refraction = 1 << 1,
+    diffuse = 1 << 2,
+    glossy = 1 << 3,
+    specular = 1 << 4,
 };

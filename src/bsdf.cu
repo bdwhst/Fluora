@@ -25,6 +25,12 @@ __device__ float BxDFPtr::pdf(const glm::vec3& wo, const glm::vec3& wi)
 	return Dispatch(op);
 }
 
+__device__ uint32_t BxDFPtr::flags() const
+{
+	auto op = [&](auto ptr) { return ptr->flags(); };
+	return Dispatch(op);
+}
+
 //__device__ inline glm::vec3 util_sample_hemisphere_uniform(const glm::vec2& random)
 //{
 //	float z = random.x;
@@ -58,21 +64,33 @@ __device__ SampledSpectrum DiffuseBxDF::sample_f(const glm::vec3& wo, glm::vec3&
 	glm::vec2 random = util_sample2D(rng);
 	//todo remove util_sample_hemisphere_cosine in intersection.h
     wi = math::sample_hemisphere_cosine(random);
-	pdf = abs(math::cos_theta_vec(wi)) * INV_PI;
-	float cosWi = abs(wi.z);
+	if (wi.z * wo.z < 0.0f)
+	{
+		pdf = 0;
+		return SampledSpectrum(0.0f);
+	}
+	pdf = math::max(math::cos_theta_vec(wi), 0.0f) * INV_PI;
+	float cosWi = math::max(wi.z, 0.0f);
 	SampledSpectrum f = reflectance * INV_PI * cosWi;
 	return f;
 }
 
 __device__ SampledSpectrum DiffuseBxDF::eval(const glm::vec3& wo, const glm::vec3& wi, thrust::default_random_engine& rng)
 {
-	float cosWi = abs(wi.z);
+	if (wo.z * wi.z < 0.0f) return SampledSpectrum(0.0f);
+	float cosWi = math::max(wi.z, 0.0f);
     return reflectance * INV_PI * cosWi;
 }
 
 __device__ float DiffuseBxDF::pdf(const glm::vec3& wo, const glm::vec3& wi)
 {
-    return abs(math::cos_theta_vec(wi)) * INV_PI;
+	if (wo.z * wi.z < 0.0f) return 0.0f;
+    return math::max(wi.z, 0.0f) * INV_PI;
+}
+
+__device__ uint32_t DiffuseBxDF::flags() const
+{
+	return BxDFFlags::diffuse | BxDFFlags::reflection;
 }
 
 //__device__ inline float util_math_sin_cos_convert(float sinOrCos)
@@ -135,6 +153,11 @@ __device__ SampledSpectrum DielectricBxDF::eval(const glm::vec3& wo, const glm::
 __device__ float DielectricBxDF::pdf(const glm::vec3& wo, const glm::vec3& wi)
 {
     return 0.0f;
+}
+
+__device__ uint32_t DielectricBxDF::flags() const
+{
+	return BxDFFlags::specular | BxDFFlags::reflection | BxDFFlags::refraction;
 }
 
 __device__ SampledSpectrum ConductorBxDF::sample_f(const glm::vec3& wo, glm::vec3& wi, float& pdf, thrust::default_random_engine& rng)
@@ -201,4 +224,16 @@ __device__ float ConductorBxDF::pdf(const glm::vec3& wo, const glm::vec3& wi)
 		return dist.pdf(wo, wm) / (4 * abs_dot(wo, wm));
 	}
 	return 0.0f;
+}
+
+__device__ uint32_t ConductorBxDF::flags() const
+{
+	if (dist.effectively_smooth())
+	{
+		return BxDFFlags::reflection | BxDFFlags::specular;
+	}
+	else
+	{
+		return BxDFFlags::reflection | BxDFFlags::glossy;
+	}
 }

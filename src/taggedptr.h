@@ -408,6 +408,12 @@ public:
         return *this;
     }
 
+    __device__ __host__ TaggedPointer(void* ptr, uint32_t tag)
+    {
+        uintptr_t iptr = reinterpret_cast<uintptr_t>(ptr);
+        bits = iptr | ((uintptr_t)tag << tagShift);
+    }
+
     __device__ __host__ bool operator==(const TaggedPointer &tp) const { return bits == tp.bits; }
     __device__ __host__ bool operator!=(const TaggedPointer &tp) const { return bits != tp.bits; }
     __device__ __host__ explicit operator bool() const { return (bits & ptrMask) != 0; }

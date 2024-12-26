@@ -27,7 +27,9 @@ private:
 class RGBFilm
 {
 public:
-	RGBFilm(glm::vec3* image, const RGBColorSpace* outputSpace, float threshold):image(image),outputSpace(outputSpace),threshold(threshold) {}
+	RGBFilm(PixelSensor* sensor, glm::vec3* image, const RGBColorSpace* outputSpace, float threshold):sensor(sensor), image(image),outputSpace(outputSpace),threshold(threshold) {
+		outputRGBFromSensorRGB = outputSpace->RGBFromXYZ * sensor->XYZFromSensorRGB;
+	}
 
 	__device__ void add_radiance(const glm::vec3& sensorRGB, int pixelIndex);
 	__device__ void add_rgb(const glm::vec3& rgb, int pixelIndex);
@@ -36,7 +38,9 @@ public:
 		return image;
 	}
 private:
+	const PixelSensor* sensor;
 	glm::vec3* image;
 	const RGBColorSpace* outputSpace;
 	float threshold;
+	glm::mat3 outputRGBFromSensorRGB;
 };

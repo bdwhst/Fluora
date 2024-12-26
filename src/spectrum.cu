@@ -2325,10 +2325,9 @@ PiecewiseLinearSpectrum* PiecewiseLinearSpectrum::from_interleaved(const float* 
 	}
 	PiecewiseLinearSpectrum* s = alloc.new_object<PiecewiseLinearSpectrum>(lambdas.size(), lambdas.data(), values.data(), alloc);
 
-    //todo: normalize
     if (normalize)
     {
-        s->scale(spec::CIE_Y_integral / inner_product(s, &spec::X()));
+        s->scale(spec::CIE_Y_integral / inner_product(s, &spec::Y()));
     }
     return s;
 }
@@ -2599,6 +2598,42 @@ namespace spec
         if (iter != namedSpectra.end())
             return iter->second;
         return nullptr;
+    }
+
+
+    DenselySampledSpectrum D(float temperature, Allocator alloc) {
+        // Convert temperature to CCT
+        float cct = temperature * 1.4388f / 1.4380f;
+        if (cct < 4000) {
+            // CIE D ill-defined, use blackbody
+            BlackbodySpectrum bb = BlackbodySpectrum(cct);
+            DenselySampledSpectrum blackbody = DenselySampledSpectrum::sample_function(
+                [=](float lambda) { return bb(lambda); });
+
+            return blackbody;
+        }
+
+        // Convert CCT to xy
+        float x;
+        if (cct <= 7000)
+            x = -4.607f * 1e9f / math::pow<3>(cct) + 2.9678f * 1e6f / math::sqr(cct) +
+            0.09911f * 1e3f / cct + 0.244063f;
+        else
+            x = -2.0064f * 1e9f / math::pow<3>(cct) + 1.9018f * 1e6f / math::sqr(cct) +
+            0.24748f * 1e3f / cct + 0.23704f;
+        float y = -3 * x * x + 2.870f * x - 0.275f;
+
+        // Interpolate D spectrum
+        float M = 0.0241f + 0.2562f * x - 0.7341f * y;
+        float M1 = (-1.3515f - 1.7703f * x + 5.9114f * y) / M;
+        float M2 = (0.0300f - 31.4424f * x + 30.0717f * y) / M;
+
+        std::vector<float> values(nCIES);
+        for (int i = 0; i < nCIES; ++i)
+            values[i] = (CIE_S0[i] + CIE_S1[i] * M1 + CIE_S2[i] * M2) * 0.01;
+
+        PiecewiseLinearSpectrum dpls(nCIES, (float*)CIE_S_lambda, values.data());
+        return DenselySampledSpectrum(&dpls, alloc);
     }
 }
 

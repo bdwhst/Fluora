@@ -1,8 +1,8 @@
 #pragma once
 
 #include "intersections.h"
-
-
+#include "mathUtils.h"
+#include "sampling.h"
 
 __device__ inline void util_math_get_TBN_naive(const glm::vec3& N, glm::vec3* T, glm::vec3* B)
 {
@@ -11,26 +11,7 @@ __device__ inline void util_math_get_TBN_naive(const glm::vec3& N, glm::vec3* T,
 	*B = glm::cross(N, *T);
 }
 
-__device__ inline glm::vec3 util_sample_hemisphere_uniform(const glm::vec2& random)
-{
-	float z = random.x;
-	float sq_1_z_2 = sqrt(max(1 - z * z, 0.0f));
-	float phi = TWO_PI * random.y;
-	return glm::vec3(cos(phi) * sq_1_z_2, sin(phi) * sq_1_z_2, z);
-}
 
-__device__ inline glm::vec2 util_sample_disk_uniform(const glm::vec2& random)
-{
-	float r = sqrt(random.x);
-	float theta = TWO_PI * random.y;
-	return glm::vec2(r * cos(theta), r * sin(theta));
-}
-
-__device__ inline glm::vec3 util_sample_hemisphere_cosine(const glm::vec2& random)
-{
-	glm::vec2 t = util_sample_disk_uniform(random);
-	return glm::vec3(t.x, t.y, sqrt(1 - t.x * t.x - t.y * t.y));
-}
 
 __device__ inline float util_math_tangent_space_clampedcos(const glm::vec3& w)
 {
@@ -64,15 +45,10 @@ __device__ inline bool util_geomerty_refract(const glm::vec3& wi, const glm::vec
 	return true;
 }
 
-__device__ inline float util_math_pow_5(float x)
-{
-	float x2 = x * x;
-	return x2 * x2 * x;
-}
 
 __device__ inline glm::vec3 util_math_fschlick(glm::vec3 f0, float HoV)
 {
-	return f0 + (1.0f - f0) * util_math_pow_5(1.0f - HoV);
+	return f0 + (1.0f - f0) * math::pow<5>(1.0f - HoV);
 }
 
 
@@ -98,7 +74,7 @@ __device__ inline float util_math_lambda(glm::vec3 w, float a2) {
 
 __device__ inline glm::vec3 util_math_fschlick_roughness(glm::vec3 f0, float roughness, float NoV)
 {
-	return f0 + util_math_pow_5(1.0f - NoV) * (glm::max(f0, glm::vec3(1.0f - roughness) - f0));
+	return f0 + math::pow<5>(1.0f - NoV) * (glm::max(f0, glm::vec3(1.0f - roughness) - f0));
 }
 
 __device__ inline float util_math_luminance(glm::vec3 col)

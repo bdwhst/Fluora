@@ -7,7 +7,6 @@
 #include "utilities.h"
 #include "bvh.h"
 
-
 // CHECKITOUT
 /**
  * Compute a point at parameter value `t` on ray `r`.

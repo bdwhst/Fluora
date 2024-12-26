@@ -368,6 +368,7 @@ __device__ bool util_bvh_leaf_intersect(
             intersection->fsign = tmp_fsign;
             intersection->uv = tmp_uv;
             intersection->primitiveId = i;
+            intersection->lightId = prim.lightID;
             intersected = true;
         }
 

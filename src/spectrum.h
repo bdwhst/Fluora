@@ -2,6 +2,7 @@
 #include "taggedptr.h"
 #include "mathUtils.h"
 #include "memoryUtils.h"
+#include "defines.h"
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include <cmath>
@@ -24,22 +25,27 @@ namespace spec
 class SampledSpectrum
 {
 public:
-	SampledSpectrum() = default;
+	__device__ __host__ SampledSpectrum()
+	{
+GPU_UNROLL
+		for (int i = 0; i < spec::NSpectrumSamples; ++i)
+			values[i] = 0.0f;
+	}
 	__device__ __host__ explicit SampledSpectrum(float* v)
 	{
-#pragma unroll
+GPU_UNROLL
 		for (int i = 0; i < spec::NSpectrumSamples; ++i)
 			values[i] = v[i];
 	}
 	__device__ __host__ explicit SampledSpectrum(float v)
 	{
-#pragma unroll
+GPU_UNROLL
 		for (int i = 0; i < spec::NSpectrumSamples; ++i)
 			values[i] = v;
 	}
 	__device__ __host__ SampledSpectrum& operator+=(const SampledSpectrum& s)
 	{
-#pragma unroll
+GPU_UNROLL
 		for (int i = 0; i < spec::NSpectrumSamples; i++)
 		{
 			values[i] += s.values[i];
@@ -48,7 +54,7 @@ public:
 	}
 	__device__ __host__ SampledSpectrum& operator-=(const SampledSpectrum& s)
 	{
-#pragma unroll
+GPU_UNROLL
 		for (int i = 0; i < spec::NSpectrumSamples; i++)
 		{
 			values[i] -= s.values[i];
@@ -57,7 +63,7 @@ public:
 	}
 	__device__ __host__ SampledSpectrum& operator*=(const SampledSpectrum& s)
 	{
-#pragma unroll
+GPU_UNROLL
 		for (int i = 0; i < spec::NSpectrumSamples; i++)
 		{
 			values[i] *= s.values[i];
@@ -66,7 +72,7 @@ public:
 	}
 	__device__ __host__ SampledSpectrum& operator/=(const SampledSpectrum& s)
 	{
-#pragma unroll
+GPU_UNROLL
 		for (int i = 0; i < spec::NSpectrumSamples; i++)
 		{
 			values[i] /= s.values[i];
@@ -97,7 +103,7 @@ public:
 
 	__device__ __host__ SampledSpectrum& operator*=(float a)
 	{
-#pragma unroll
+GPU_UNROLL
 		for (int i = 0; i < spec::NSpectrumSamples; ++i)
 			values[i] *= a;
 		return *this;
@@ -113,7 +119,7 @@ public:
 	__device__ __host__ SampledSpectrum operator/(float a) const
 	{
 		SampledSpectrum ans = *this;
-#pragma unroll
+GPU_UNROLL
 		for (int i = 0; i < spec::NSpectrumSamples; ++i)
 			ans.values[i] /= a;
 		return ans;
@@ -122,7 +128,7 @@ public:
 	__device__ __host__ float operator==(const SampledSpectrum& s)
 	{
 		bool eq = values[0] == s.values[0];
-#pragma unroll
+GPU_UNROLL
 		for (int i = 1; i < spec::NSpectrumSamples; i++)
 		{
 			eq &= values[i] == s.values[i];
@@ -133,7 +139,7 @@ public:
 	__device__ __host__ float operator!=(const SampledSpectrum& s)
 	{
 		bool ieq = values[0] != s.values[0];
-#pragma unroll
+GPU_UNROLL
 		for (int i = 1; i < spec::NSpectrumSamples; i++)
 		{
 			ieq |= values[i] != s.values[i];
@@ -153,7 +159,7 @@ public:
 
 	__device__ __host__ float average() const {
 		float ans = values[0];
-#pragma unroll
+GPU_UNROLL
 		for (int i = 1; i < spec::NSpectrumSamples; i++)
 		{
 			ans += values[i];
@@ -164,12 +170,30 @@ public:
 	__device__ __host__ bool is_nan() const
 	{
 		bool ans = false;
-#pragma unroll
+GPU_UNROLL
 		for (int i = 0; i < spec::NSpectrumSamples; i++)
 		{
 			ans = ans || math::is_nan(values[i]);
 		}
 		return ans;
+	}
+
+	__device__ __host__ bool is_inf() const
+	{
+		bool ans = false;
+GPU_UNROLL
+		for (int i = 0; i < spec::NSpectrumSamples; i++)
+		{
+			ans = ans || math::is_inf(values[i]);
+		}
+		return ans;
+	}
+
+	__device__ __host__ explicit operator bool() const {
+		for (int i = 0; i < spec::NSpectrumSamples; ++i)
+			if (values[i] != 0)
+				return true;
+		return false;
 	}
 
 	float values[spec::NSpectrumSamples];
@@ -180,7 +204,7 @@ __device__ __host__ inline SampledSpectrum operator*(float a, const SampledSpect
 __device__ __host__ inline SampledSpectrum safe_div(const SampledSpectrum& s0, const SampledSpectrum& s1)
 {
 	SampledSpectrum s;
-#pragma unroll
+GPU_UNROLL
 	for (int i = 0; i < spec::NSpectrumSamples; i++)
 	{
 		s[i] = s1[i] == 0 ? s0[i] : s0[i] / s1[i];
@@ -191,11 +215,22 @@ __device__ __host__ inline SampledSpectrum safe_div(const SampledSpectrum& s0, c
 __device__ __host__ inline SampledSpectrum exp(const SampledSpectrum& s)
 {
 	SampledSpectrum ans;
-#pragma unroll
+GPU_UNROLL
 	for (int i = 0; i < spec::NSpectrumSamples; i++)
 	{
 		ans[i] = expf(s[i]);
 	}
+	return ans;
+}
+
+__device__ __host__ inline SampledSpectrum clamp_zero(const SampledSpectrum& s)
+{
+	SampledSpectrum ans;
+GPU_UNROLL
+		for (int i = 0; i < spec::NSpectrumSamples; i++)
+		{
+			ans[i] = math::max(s[i], 0.0f);
+		}
 	return ans;
 }
 
@@ -207,11 +242,11 @@ public:
 	{
 		bool eq0 = m_lambda[0] == swl.m_lambda[0];
 		bool eq1 = m_pdf[1] == swl.m_pdf[1];
-#pragma unroll
+GPU_UNROLL
 		for (int i = 1; i < spec::NSpectrumSamples; i++)
 		{
 			eq0 &= m_lambda[i] == swl.m_lambda[i];
-			eq1 &= m_pdf[i] == swl.m_pdf[i];
+			eq1 &= m_pdf[i] == swl.m_pdf[i]; 
 		}
 		return eq0 && eq1;
 	}
@@ -220,7 +255,7 @@ public:
 	{
 		bool ieq0 = m_lambda[0] != swl.m_lambda[0];
 		bool ieq1 = m_pdf[1] != swl.m_pdf[1];
-#pragma unroll
+GPU_UNROLL
 		for (int i = 1; i < spec::NSpectrumSamples; i++)
 		{
 			ieq0 |= m_lambda[i] != swl.m_lambda[i];
@@ -233,7 +268,7 @@ public:
 		SampledWavelengths swl;
 		swl.m_lambda[0] = math::lerp(u, lmin, lmax);
 		float step = (lmax - lmin) / spec::NSpectrumSamples;
-#pragma unroll
+GPU_UNROLL
 		for (int i = 1; i < spec::NSpectrumSamples; i++)
 		{
 			swl.m_lambda[i] = swl.m_lambda[i - 1] + step;
@@ -266,7 +301,6 @@ public:
 
 	__device__ __host__ bool secondary_terminated() const
 	{
-#pragma unroll
 		for (int i = 1; i < spec::NSpectrumSamples; i++)
 			if (m_pdf[i] != 0) return false;
 		return true;
@@ -274,7 +308,7 @@ public:
 	__device__ __host__ void terminate_secondary()
 	{
 		if (secondary_terminated()) return;
-#pragma unroll
+GPU_UNROLL
 		for (int i = 1; i < spec::NSpectrumSamples; i++)
 			m_pdf[i] = 0;
 		m_pdf[0] /= spec::NSpectrumSamples;
@@ -348,7 +382,8 @@ class DenselySampledSpectrum
 	int32_t lambda_min = spec::gLambdaMin, lambda_max = spec::gLambdaMax;
 	float* values = nullptr;
 	Allocator alloc;
-	friend struct std::hash<DenselySampledSpectrum>;
+	friend struct DenselySampledSpectrumPtrHash;
+	friend struct DenselySampledSpectrumPtrEqual;
 public:
 	DenselySampledSpectrum(int lmin, int lmax, Allocator alloc={}):lambda_min(lmin),lambda_max(lmax),alloc(alloc)
 	{
@@ -416,7 +451,18 @@ public:
 		return values[offset];
 	}
 
-	__device__ __host__ bool operator==(const DenselySampledSpectrum& anotherS)
+	__device__ __host__ SampledSpectrum operator()(const SampledWavelengths& swl) const
+	{
+		SampledSpectrum s(0.0f);
+GPU_UNROLL
+		for (int i = 0; i < spec::NSpectrumSamples; i++)
+		{
+			s[i] = this->operator()(swl[i]);
+		}
+		return s;
+	}
+
+	__device__ __host__ bool operator==(const DenselySampledSpectrum& anotherS) const
 	{
 		if (lambda_min != anotherS.lambda_min || lambda_max != anotherS.lambda_max) return false;
 		for (int32_t i = lambda_min; i <= lambda_max; i++)
@@ -442,13 +488,19 @@ public:
 	}
 };
 
-template <>
-struct std::hash<DenselySampledSpectrum> {
-	__device__ __host__
-		size_t operator()(const DenselySampledSpectrum& s) const {
-		return math::HashBuffer(s.values, sizeof(float) * s.get_size());
+struct DenselySampledSpectrumPtrHash {
+		size_t operator()(const DenselySampledSpectrum* s) const {
+		return math::HashBuffer(s->values, sizeof(float) * s->get_size());
 	}
 };
+
+struct DenselySampledSpectrumPtrEqual {
+		bool operator()(const DenselySampledSpectrum* lhs, const DenselySampledSpectrum* rhs) const {
+		return *lhs == *rhs;
+	}
+};
+
+
 
 namespace spec
 {
@@ -478,6 +530,7 @@ namespace spec
 #endif
 	}
 
+	DenselySampledSpectrum D(float temperature, Allocator alloc);
 }
 
 class PiecewiseLinearSpectrum {

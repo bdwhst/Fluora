@@ -130,7 +130,7 @@ RGBColorSpace::RGBColorSpace(const glm::vec2& r, const glm::vec2& g, const glm::
 {
     glm::vec3 W = spec::spectrum_to_xyz(illuminant);
     glm::vec3 R = xyY_to_XYZ(r), G = xyY_to_XYZ(g), B = xyY_to_XYZ(b);
-    glm::vec2 w = glm::vec2(W.x,W.y);
+    w = XYZ_to_xy(W);
     glm::mat3 rgb;
     rgb[0][0] = R.x;
     rgb[0][1] = R.y;
