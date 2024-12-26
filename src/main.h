@@ -32,6 +32,7 @@ extern int iteration;
 
 extern int width;
 extern int height;
+extern bool lockControl;
 
 extern MemoryResourceBackend* mainBlockBackend;
 extern MemoryResourceBackend* baseBackend;

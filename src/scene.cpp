@@ -346,7 +346,7 @@ void Scene::LoadAllLightsToGPU(Allocator alloc)
     {
         auto& prim = primitives[i];
         int matID = objects[prim.objID].materialid;
-        if (materials[matID].Is<EmissiveMaterial>())
+        if (matID != -1 && materials[matID].Is<EmissiveMaterial>())
         {
             BundledParams params;
             params.insert_int("primitiveID", i);

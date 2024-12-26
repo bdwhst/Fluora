@@ -23,6 +23,7 @@ extern RenderState* renderState;
 extern float zoom, theta, phi;
 extern bool camchanged;
 
+
 std::string currentTimeString() {
 	time_t now;
 	time(&now);
@@ -182,9 +183,9 @@ bool init() {
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
 	io = &ImGui::GetIO(); (void)io;
-	float fontSize = 24.0f;
+	const float fontSize = 22.0f;
 	appFont = io->Fonts->AddFontFromFileTTF("..\\fonts\\cascadia-code\\Cascadia.ttf", fontSize);
-	ImGui::StyleColorsLight();
+	ImGui::StyleColorsDark();
 	ImGui_ImplGlfw_InitForOpenGL(window, true);
 	ImGui_ImplOpenGL3_Init("#version 120");
 
@@ -229,7 +230,7 @@ void RenderImGui()
 	
 	ImGui::PushFont(appFont);
 
-	ImGui::Begin("Path Tracer Analytics");                  // Create a window called "Hello, world!" and append into it.
+	ImGui::Begin("General");                  // Create a window called "Hello, world!" and append into it.
 	
 	// LOOK: Un-Comment to check the output window and usage
 	//ImGui::Text("This is some useful text.");               // Display some text (you can use a format strings too)
@@ -243,16 +244,19 @@ void RenderImGui()
 	//	counter++;
 	//ImGui::SameLine();
 	//ImGui::Text("counter = %d", counter);
-	ImGui::Text("Scene Filename: %s", scene->sceneFilename.c_str());
+	ImGui::Text("Scene Path: %s", scene->sceneFilename.c_str());
 	ImGui::Text("Traced Depth: %d", imguiData->TracedDepth);
 	ImGui::Text("Integrator: %s", imguiData->integratorType.c_str());
-	ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
-	ImGui::Text("Elapsed time: %f sec", imguiData->elapsedTime);
+	ImGui::Text("%.3f ms/iter (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
+	ImGui::Text("Elapsed time: %.2f sec", imguiData->elapsedTime);
 	ImGui::Text("Num triangles: %d", scene->triangles.size());
 	ImGui::Text("Num bvh nodes: %d", scene->bvhTreeSize);
+	ImGui::Checkbox("Lock Controls", &lockControl);
 	ImGui::End();
 
 	ImGui::Begin("Camera Settings");
+	ImGui::SliderFloat("Cam Speed", &camera_speed, 0.1f, 20.0f);
+
 	if (ImGui::SliderFloat("Theta", &theta, 0.0f, PI))
 		camchanged = true;
 	if (ImGui::SliderFloat("Phi", &phi, 0.0f, TWO_PI))
@@ -268,9 +272,9 @@ void RenderImGui()
 	if (ImGui::SliderFloat("Focal Length", &renderState->camera.focalLength, 0.1f, 20.0f))
 		camchanged = true;
 
-	ImGui::PopFont();
-
 	ImGui::End();
+
+	ImGui::PopFont();
 
 
 
@@ -286,30 +290,32 @@ bool MouseOverImGuiWindow()
 
 void mainLoop() {
 	while (!glfwWindowShouldClose(window)) {
-		
 		glfwPollEvents();
 		uint64_t currTime = time(nullptr);
 		delta_t = currTime - sysTime;
 		sysTime = currTime;
-		if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+		if (!lockControl)
 		{
-			camchanged = true;
-			renderState->camera.position += renderState->camera.view * camera_speed;
-		}
-		if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
-		{
-			camchanged = true;
-			renderState->camera.position -= renderState->camera.view * camera_speed;
-		}
-		if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
-		{
-			camchanged = true;
-			renderState->camera.position -= renderState->camera.right * camera_speed;
-		}
-		if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
-		{
-			camchanged = true;
-			renderState->camera.position += renderState->camera.right * camera_speed;
+			if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+			{
+				camchanged = true;
+				renderState->camera.position += renderState->camera.view * camera_speed;
+			}
+			if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
+			{
+				camchanged = true;
+				renderState->camera.position -= renderState->camera.view * camera_speed;
+			}
+			if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
+			{
+				camchanged = true;
+				renderState->camera.position -= renderState->camera.right * camera_speed;
+			}
+			if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+			{
+				camchanged = true;
+				renderState->camera.position += renderState->camera.right * camera_speed;
+			}
 		}
 			
 		runCuda();

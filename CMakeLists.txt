@@ -90,6 +90,10 @@ set(sources
     src/intersections.cu
     src/sampling.cu
     src/media.cu
+    src/lights.cu
+    src/lightSamplers.cu
+    src/naiveIntegrator.cu
+    src/misIntegrator.cu
 	src/mikktspace/mikktspace.c
     src/ImGui/imgui.cpp 
     src/ImGui/imgui_demo.cpp 

@@ -40,6 +40,7 @@ MemoryResourceBackend* mainBlockBackend = nullptr;
 MemoryResourceBackend* baseBackend = nullptr;
 
 const char* sceneFile = nullptr;
+bool lockControl = true;
 
 //-------------------------------
 //-------------MAIN--------------
@@ -271,7 +272,7 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
 }
 
 void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
-	if (MouseOverImGuiWindow())
+	if (MouseOverImGuiWindow()|| lockControl)
 	{
 		return;
 	}
@@ -281,6 +282,7 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
 }
 
 void mousePositionCallback(GLFWwindow* window, double xpos, double ypos) {
+	if (lockControl || MouseOverImGuiWindow()) goto update_last_pos;
 	if (xpos == lastX || ypos == lastY) return; // otherwise, clicking back into window causes re-start
 	if (leftMousePressed) {
 		// compute new camera parameters
@@ -308,6 +310,7 @@ void mousePositionCallback(GLFWwindow* window, double xpos, double ypos) {
 		cam.lookAt += (float)(ypos - lastY) * forward * 0.01f;
 		camchanged = true;
 	}
+update_last_pos:
 	lastX = xpos;
 	lastY = ypos;
 }

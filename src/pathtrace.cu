@@ -98,6 +98,8 @@ void InitDataContainer(GuiDataContainer* imGuiData)
 }
 
 void pathtraceInit(Scene* scene, Allocator alloc) {
+	//TODO: resolve mem leak by track every allocation, and avoid unnecessary resource recreation while moving camera
+
 	hst_scene = scene;
 
 	//DenselySampledSpectrum dIllum = spec::D(6500.f, {});
