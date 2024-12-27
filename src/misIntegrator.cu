@@ -3,6 +3,74 @@
 #include "media.h"
 __device__ cuda::atomic<int, cuda::thread_scope_device> numShadowRays{ 0 };
 
+__global__ void compute_intersection_bvh_no_volume_mis(
+	int depth
+	, int num_paths
+	, PathSegment* pathSegments
+	, SceneInfoDev dev_sceneInfo
+	, ShadeableIntersection* intersections
+	, int* rayValid
+	, RGBFilm* dev_film
+	, LightSamplerPtr lightSampler
+)
+{
+	int path_index = blockIdx.x * blockDim.x + threadIdx.x;
+	if (path_index >= num_paths) return;
+	PathSegment& pathSegment = pathSegments[path_index];
+	Ray& ray = pathSegment.ray;
+	glm::vec3 rayDir = pathSegment.ray.direction;
+	glm::vec3 rayOri = pathSegment.ray.origin;
+	float x = fabs(rayDir.x), y = fabs(rayDir.y), z = fabs(rayDir.z);
+	int axis = x > y && x > z ? 0 : (y > z ? 1 : 2);
+	int sgn = rayDir[axis] > 0 ? 0 : 1;
+	int d = (axis << 1) + sgn;
+	const MTBVHGPUNode* currArray = dev_sceneInfo.dev_mtbvhArray + d * dev_sceneInfo.bvhDataSize;
+	int curr = 0;
+	ShadeableIntersection tmpIntersection;
+	tmpIntersection.t = FLT_MAX;
+	bool intersected = false;
+	while (curr >= 0 && curr < dev_sceneInfo.bvhDataSize)
+	{
+		bool outside = true;
+		float boxt = boundingBoxIntersectionTest(currArray[curr].bbox, ray, outside);
+		if (!outside) boxt = EPSILON;
+		if (boxt > 0 && boxt < tmpIntersection.t)
+		{
+			if (currArray[curr].startPrim != -1)//leaf node
+			{
+				int start = currArray[curr].startPrim, end = currArray[curr].endPrim;
+				bool intersect = util_bvh_leaf_intersect(start, end, dev_sceneInfo, &ray, &tmpIntersection);
+				intersected = intersected || intersect;
+			}
+			curr = currArray[curr].hitLink;
+		}
+		else
+		{
+			curr = currArray[curr].missLink;
+		}
+	}
+
+	rayValid[path_index] = intersected;
+	if (intersected)
+	{
+		intersections[path_index] = tmpIntersection;
+		pathSegment.remainingBounces--;
+	}
+	else if (lightSampler.have_infinite_light())
+	{
+		LightPtr infLight = lightSampler.get_infinite_light();
+		SampledSpectrum L = infLight.L({}, {}, {}, rayDir, pathSegment.lambda) * pathSegment.transport;
+		if (!(depth == 0 || pathSegment.prevSpecular))
+		{
+			float p_l = lightSampler.pmf(infLight) * infLight.pdf_Li({}, rayDir, {});
+			float w_b = math::sqr(pathSegment.lastMatPdf) / (math::sqr(pathSegment.lastMatPdf) + math::sqr(p_l));
+			L *= w_b;
+		}
+		glm::vec3 sensorRGB = dev_sceneInfo.pixelSensor->to_sensor_rgb(pathSegment.transport * L, pathSegment.lambda);
+		dev_film->add_radiance(sensorRGB, pathSegment.pixelIndex);
+	}
+}
+
 
 __global__ void sample_Ld_volume()
 {
@@ -192,7 +260,7 @@ __global__ void compute_intersection_bvh_volume_mis(
 	// Try to read the radiance from skybox
 	if (dev_sceneInfo.skyboxObj)
 	{
-		glm::vec2 uv = util_sample_spherical_map(glm::normalize(rayDir));
+		glm::vec2 uv = math::equirectangular_dir_to_uv(glm::normalize(rayDir));
 		float4 skyColorRGBA = tex2D<float4>(dev_sceneInfo.skyboxObj, uv.x, uv.y);
 #if WHITE_FURNANCE_TEST
 		glm::vec3 skyColor = glm::vec3(1.0, 1.0, 1.0);
@@ -269,11 +337,6 @@ __global__ void sample_Ld(int numRays, ShadowRaySegment* shadowRaySegments, Ligh
 
 	SampledSpectrum L = liSample.L * f * shadowRaySegment.transport * w_l / p_l;
 
-	float threshold = 2.5f;
-	if (L[0] > threshold || L[1] > threshold || L[2] > threshold || L[3] > threshold)
-	{
-		assert(1.0);
-	}
 	if (!L.is_nan() && !L.is_inf())
 		dev_film->add_radiance(sceneInfo.pixelSensor->to_sensor_rgb(L, shadowRaySegment.lambda), shadowRaySegment.pixelIndex);
 }

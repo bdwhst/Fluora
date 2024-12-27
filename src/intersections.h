@@ -57,14 +57,7 @@ __device__ bool util_geometry_ray_triangle_intersection(
     const glm::vec3& A, const glm::vec3& B, const glm::vec3& C,
     float& t, glm::vec3& normal, glm::vec3& baryCoord);
 __device__ float triangleIntersectionTest(const ObjectTransform& Transform, const glm::vec3& v0, const glm::vec3& v1, const glm::vec3& v2, const Ray& r, glm::vec3& intersectionPoint, glm::vec3& normal, glm::vec3& baryCoord);
-__device__ inline glm::vec2 util_sample_spherical_map(glm::vec3 v)
-{
-    const glm::vec2 invAtan = glm::vec2(0.1591, 0.3183);
-    glm::vec2 uv = glm::vec2(atan2(v.z, v.x), asin(v.y));
-    uv *= invAtan;
-    uv += 0.5;
-    return uv;
-}
+
 __device__ bool util_bvh_leaf_intersect(
     int primsStart,
     int primsEnd,

@@ -4,6 +4,17 @@
 #include "sceneStructs.h"
 #include "lightSampler.h"
 
+__global__ void compute_intersection_bvh_no_volume_mis(
+	int depth
+	, int num_paths
+	, PathSegment* pathSegments
+	, SceneInfoDev dev_sceneInfo
+	, ShadeableIntersection* intersections
+	, int* rayValid
+	, RGBFilm* dev_film
+	, LightSamplerPtr lightSampler
+);
+
 extern __device__ cuda::atomic<int, cuda::thread_scope_device> numShadowRays;
 
 __global__ void sample_Ld(

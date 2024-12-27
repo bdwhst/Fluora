@@ -41,3 +41,21 @@ __device__ __device__ LightPtr LightSamplerPtr::get_light(int idx) const
 		};
 	return Dispatch(f);
 }
+
+__device__ __device__ LightPtr LightSamplerPtr::get_infinite_light() const
+{
+	auto f = [&](auto ptr)
+		{
+			return ptr->get_infinite_light();
+		};
+	return Dispatch(f);
+}
+
+__device__ __device__ bool LightSamplerPtr::have_infinite_light() const
+{
+	auto f = [&](auto ptr)
+		{
+			return ptr->have_infinite_light();
+		};
+	return Dispatch(f);
+}

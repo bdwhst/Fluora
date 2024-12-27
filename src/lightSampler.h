@@ -17,6 +17,8 @@ public:
     __device__ float pmf(const LightSampleContext& ctx, LightPtr light);
     __device__ float pmf(LightPtr light);
     __device__ LightPtr get_light(int idx) const;
+    __device__ LightPtr get_infinite_light() const;
+    __device__ bool have_infinite_light() const;
 };
 
 

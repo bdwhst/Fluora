@@ -3,6 +3,7 @@
 #include "intersections.h"
 #include "media.h"
 
+
 __global__ void compute_intersection_bvh_no_volume(
 	int depth
 	, int num_paths
@@ -11,6 +12,7 @@ __global__ void compute_intersection_bvh_no_volume(
 	, ShadeableIntersection* intersections
 	, int* rayValid
 	, RGBFilm* dev_film
+	, LightPtr dev_skyboxLight
 )
 {
 	int path_index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -55,18 +57,9 @@ __global__ void compute_intersection_bvh_no_volume(
 		intersections[path_index] = tmpIntersection;
 		pathSegment.remainingBounces--;
 	}
-	else if (dev_sceneInfo.skyboxObj)
+	else if (dev_skyboxLight)
 	{
-		glm::vec2 uv = util_sample_spherical_map(glm::normalize(rayDir));
-		float4 skyColorRGBA = tex2D<float4>(dev_sceneInfo.skyboxObj, uv.x, uv.y);
-#if WHITE_FURNANCE_TEST
-		glm::vec3 skyColor = glm::vec3(1.0, 1.0, 1.0);
-#else
-		glm::vec3 skyColor = glm::vec3(skyColorRGBA.x, skyColorRGBA.y, skyColorRGBA.z);
-#endif
-		const RGBColorSpace* colorSpace = RGBColorSpace_sRGB;
-		RGBIlluminantSpectrum illumSpec(*colorSpace, skyColor);
-		SampledSpectrum skyRadiance = illumSpec.sample(pathSegment.lambda);
+		SampledSpectrum skyRadiance = dev_skyboxLight.L({}, {}, {}, rayDir, pathSegment.lambda);
 		glm::vec3 sensorRGB = dev_sceneInfo.pixelSensor->to_sensor_rgb(pathSegment.transport * skyRadiance, pathSegment.lambda);
 		dev_film->add_radiance(sensorRGB, pathSegment.pixelIndex);
 	}
@@ -83,6 +76,7 @@ __global__ void compute_intersection_bvh_volume_naive(
 	, ShadeableIntersection* intersections
 	, int* rayValid
 	, RGBFilm* dev_film
+	, LightPtr dev_skyboxLight
 )
 {
 	int path_index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -209,21 +203,11 @@ __global__ void compute_intersection_bvh_volume_naive(
 	}
 	// If there is no scatter in media and intersection with surface
 	// Try to read the radiance from skybox
-	if (dev_sceneInfo.skyboxObj)
+	else if (dev_skyboxLight)
 	{
-		glm::vec2 uv = util_sample_spherical_map(glm::normalize(rayDir));
-		float4 skyColorRGBA = tex2D<float4>(dev_sceneInfo.skyboxObj, uv.x, uv.y);
-#if WHITE_FURNANCE_TEST
-		glm::vec3 skyColor = glm::vec3(1.0, 1.0, 1.0);
-#else
-		glm::vec3 skyColor = glm::vec3(skyColorRGBA.x, skyColorRGBA.y, skyColorRGBA.z);
-#endif
-		const RGBColorSpace* colorSpace = RGBColorSpace_sRGB;
-		RGBIlluminantSpectrum illumSpec(*colorSpace, skyColor);
-		SampledSpectrum skyRadiance = illumSpec.sample(pathSegment.lambda);
+		SampledSpectrum skyRadiance = dev_skyboxLight.L({}, {}, {}, rayDir, pathSegment.lambda);
 		glm::vec3 sensorRGB = dev_sceneInfo.pixelSensor->to_sensor_rgb(pathSegment.transport * skyRadiance, pathSegment.lambda);
 		dev_film->add_radiance(sensorRGB, pathSegment.pixelIndex);
-		rayValid[path_index] = false;
 	}
 }
 

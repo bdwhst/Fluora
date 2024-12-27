@@ -104,7 +104,7 @@ void Scene::loadJSON(const std::string& name)
 
     const auto& backgroundData = data["Background"];
     if (backgroundData["TYPE"] == "skybox")
-        LoadTextureFromFileJobs.emplace_back(backgroundData["PATH"], -1);
+        environmentMapPath = backgroundData["PATH"];
 
     // TODO: load materials here
 
@@ -220,7 +220,7 @@ void Scene::loadSkybox()
     utilityCore::safeGetline(fp_in, line);
     if (!line.empty() && fp_in.good()) {
         std::cout << "Loading Skybox " << line << " ..." << std::endl;
-        LoadTextureFromFileJobs.emplace_back(line, -1);
+        environmentMapPath = line;
     }
 }
 
@@ -238,18 +238,16 @@ namespace std {
 
 void Scene::LoadAllTexturesToGPU()
 {
+    cudaTextureObject_t* texObj = &skyboxTextureObj;
+    assert(!strToTextureObj.count(environmentMapPath));
+    
+    loadTextureFromFile(environmentMapPath, texObj, &environmentMapData);
+    strToTextureObj[environmentMapPath] = *texObj;
+
+
     for (auto& p : LoadTextureFromFileJobs)
     {
-        cudaTextureObject_t* texObj = &skyboxTextureObj;
-        if (!strToTextureObj.count(p.first))
-        {
-            loadTextureFromFile(p.first, texObj, p.second != -1);
-            strToTextureObj[p.first] = *texObj;
-        }
-        else
-        {
-            *texObj = strToTextureObj[p.first];
-        }
+        
     }
     /*
     for (auto& p : LoadTextureFromMemoryJobs)
@@ -342,6 +340,26 @@ void Scene::LoadAllMediaToGPU(Allocator alloc)
 
 void Scene::LoadAllLightsToGPU(Allocator alloc)
 {
+    if (environmentMapData.data.size() > 0)
+    {
+        assert(environmentMapData.channelBits = 32);
+        float* dataPtr = reinterpret_cast<float*>(environmentMapData.data.data());
+        std::vector<float> luminanceData;
+        int totalSize = environmentMapData.width * environmentMapData.height;
+        luminanceData.reserve(totalSize);
+        for (int i = 0; i < environmentMapData.width * environmentMapData.height * environmentMapData.channels; i += environmentMapData.channels)
+        {
+            luminanceData.emplace_back(math::simple_rgb_to_lumin(dataPtr[i], dataPtr[i + 1], dataPtr[i + 2]));
+        }
+        assert(luminanceData.size() == totalSize);
+        BundledParams params;
+        params.insert_ptr("illumFunc", luminanceData.data());
+        params.insert_int("width", environmentMapData.width);
+        params.insert_int("height", environmentMapData.height);
+        params.insert_texture("textureObject", strToTextureObj[environmentMapPath]);
+        skyboxLight = ImageInfiniteLight::create(params, alloc);
+        lights.emplace_back(skyboxLight);
+    }
     for (int i=0;i<primitives.size();i++)
     {
         auto& prim = primitives[i];
@@ -410,13 +428,23 @@ void Scene::LoadTextureFromMemory(void* data, int width, int height, int bits, i
     }
 }
 
-void Scene::loadTextureFromFile(const std::string& texturePath, cudaTextureObject_t* texObj, int type)
+void Scene::loadTextureFromFile(const std::string& texturePath, cudaTextureObject_t* texObj, RawTextureData* ret_data)
 {
     int width, height, channels;
     std::string ext = texturePath.substr(texturePath.find_last_of('.') + 1);
     if (ext != "hdr")
     {
         unsigned char* data = stbi_load(texturePath.c_str(), &width, &height, &channels, 4);
+        if (ret_data)
+        {
+            size_t dataSize = width * height * 4 * (8 >> 3);
+            ret_data->width = width;
+            ret_data->height = height;
+            ret_data->channels = 4;
+            ret_data->channelBits = 8;
+            ret_data->data.resize(dataSize);
+            memcpy(ret_data->data.data(), data, dataSize);
+        }
         if (data) {
             LoadTextureFromMemory(data, width, height, 8, 4, texObj);
             stbi_image_free(data);
@@ -428,7 +456,18 @@ void Scene::loadTextureFromFile(const std::string& texturePath, cudaTextureObjec
     else
     {
         float* data = stbi_loadf(texturePath.c_str(), &width, &height, &channels, 4);
+        if (ret_data)
+        {
+            size_t dataSize = width * height * 4 * (32 >> 3);
+            ret_data->width = width;
+            ret_data->height = height;
+            ret_data->channels = 4;
+            ret_data->channelBits = 32;
+            ret_data->data.resize(dataSize);
+            memcpy(ret_data->data.data(), data, dataSize);
+        }
         if (data) {
+            // TODO: we only need rgb instead of rgba
             LoadTextureFromMemory(data, width, height, 32, 4, texObj);
             stbi_image_free(data);
         }

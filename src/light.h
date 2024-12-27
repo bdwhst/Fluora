@@ -22,6 +22,7 @@ struct LightSampleContext {
 };
 
 struct LightLiSample {
+    GPU_FUNC LightLiSample() :L(0.0f), wi(0.0f), pdf(0.0f), pLight(0.0f) {}
     SampledSpectrum L;
     glm::vec3 wi;
     float pdf;
@@ -29,21 +30,22 @@ struct LightLiSample {
 };
 
 class DiffuseAreaLight;
+class ImageInfiniteLight;
 
-class LightPtr : public TaggedPointer<DiffuseAreaLight>
+class LightPtr : public TaggedPointer<DiffuseAreaLight, ImageInfiniteLight>
 {
 public:
     using TaggedPointer::TaggedPointer;
-    __device__ SampledSpectrum phi(SampledWavelengths lambda) const;
-    __device__ LightType type() const;
-    __device__ bool is_delta_light(LightType type) const
+    GPU_FUNC SampledSpectrum phi(SampledWavelengths lambda) const;
+    GPU_FUNC LightType type() const;
+    GPU_FUNC bool is_delta_light(LightType type) const
     {
         return (type == LightType::DeltaPosition || type == LightType::DeltaDirection);
     }
-    __device__ LightLiSample sample_Li(const LightSampleContext& ctx, glm::vec3 rand, SampledWavelengths lambda, bool allowIncompletePDF = false) const;
-    __device__ float pdf_Li(const LightSampleContext& ctx, const glm::vec3& pLight, const glm::vec3& nLight, bool allowIncompletePDF = false);
-    __device__ SampledSpectrum L(const glm::vec3& p, const glm::vec3& n, const glm::vec2& uv, const glm::vec3& w, const SampledWavelengths& lambda) const;
-    __device__ SampledSpectrum Le(const Ray& ray, const SampledWavelengths& lambda) const;
+    GPU_FUNC LightLiSample sample_Li(const LightSampleContext& ctx, glm::vec3 rand, SampledWavelengths lambda, bool allowIncompletePDF = false) const;
+    GPU_FUNC float pdf_Li(const LightSampleContext& ctx, const glm::vec3& pLight, const glm::vec3& nLight, bool allowIncompletePDF = false) const;
+    GPU_FUNC SampledSpectrum L(const glm::vec3& p, const glm::vec3& n, const glm::vec2& uv, const glm::vec3& w, const SampledWavelengths& lambda) const;
+    GPU_FUNC SampledSpectrum Le(const Ray& ray, const SampledWavelengths& lambda) const;
 };
 
 // Hash set for instance's ptr
@@ -84,9 +86,9 @@ class LightBase
 {
 public:
     LightBase(LightType type):m_type(type){}
-    __device__ LightType type() const { return m_type; }
-    __device__ SampledSpectrum L(const glm::vec3& p, const glm::vec3& n, const glm::vec2& uv, const glm::vec3& w, const SampledWavelengths& lambda) const { return SampledSpectrum(0.0f); }
-    __device__ SampledSpectrum Le(const Ray& ray, const SampledWavelengths& lambda) const { return SampledSpectrum(0.0f); }
+    GPU_FUNC LightType type() const { return m_type; }
+    GPU_FUNC SampledSpectrum L(const glm::vec3& p, const glm::vec3& n, const glm::vec2& uv, const glm::vec3& w, const SampledWavelengths& lambda) const { return SampledSpectrum(0.0f); }
+    GPU_FUNC SampledSpectrum Le(const Ray& ray, const SampledWavelengths& lambda) const { return SampledSpectrum(0.0f); }
     using SpectrumInstanceSet = InstanceSet<DenselySampledSpectrum, DenselySampledSpectrumPtrHash, DenselySampledSpectrumPtrEqual>;
 protected:
     static const DenselySampledSpectrum* lookup_spectrum(SpectrumPtr s)

@@ -112,7 +112,7 @@ void pathtraceInit(Scene* scene, Allocator alloc) {
 	cudaMalloc(&dev_image, pixelcount * sizeof(glm::vec3));
 	cudaMemset(dev_image, 0, pixelcount * sizeof(glm::vec3));
 
-	dev_film = alloc.new_object<RGBFilm>(dev_pixelSensor, dev_image, RGBColorSpace::sRGB, 100.0f);
+	dev_film = alloc.new_object<RGBFilm>(dev_pixelSensor, dev_image, RGBColorSpace::sRGB, 1000.0f);
 
 	cudaMalloc(&dev_paths1, pixelcount * sizeof(PathSegment));
 	cudaMalloc(&dev_paths2, pixelcount * sizeof(PathSegment));
@@ -165,10 +165,8 @@ void pathtraceInit(Scene* scene, Allocator alloc) {
 		cudaMalloc(&dev_lights, scene->lights.size() * sizeof(LightPtr));
 		cudaMemcpy(dev_lights, scene->lights.data(), scene->lights.size() * sizeof(LightPtr), cudaMemcpyHostToDevice);
 
-		dev_lightSampler = alloc.new_object<UniformLightSampler>(dev_lights, scene->lights.size());
+		dev_lightSampler = alloc.new_object<UniformLightSampler>(dev_lights, scene->lights.size(), scene->skyboxLight);
 	}
-
-
 
 	if (scene->materials.size())
 	{
@@ -446,34 +444,59 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 			cudaMemcpy(rayValid, dev_rayValidCache, sizeof(int) * pixelcount, cudaMemcpyHostToHost);
 			addBackground << < numblocksPathSegmentTracing, blockSize1d >> > (dev_image, dev_imageCache, pixelcount);
 		}
-		if (iter == 1||(iter!=1&&depth>0))
+		if (iter == 1 || (iter != 1 && depth > 0))
 		{
 #endif
 			// tracing
 			if (hst_scene->media.size() == 0)
 			{
-				compute_intersection_bvh_no_volume << <numblocksPathSegmentTracing, blockSize1d >> > (
-					depth
-					, numRays
-					, dev_paths1
-					, dev_sceneInfo
-					, dev_intersections1
-					, rayValid
-					, dev_film
-					);
+				if (mainIntegratorType == IntegratorType::naive)
+				{
+					compute_intersection_bvh_no_volume << <numblocksPathSegmentTracing, blockSize1d >> > (
+						depth
+						, numRays
+						, dev_paths1
+						, dev_sceneInfo
+						, dev_intersections1
+						, rayValid
+						, dev_film
+						, hst_scene->skyboxLight
+						);
+				}
+				else if (mainIntegratorType == IntegratorType::mis)
+				{
+					compute_intersection_bvh_no_volume_mis << <numblocksPathSegmentTracing, blockSize1d >> > (
+						depth
+						, numRays
+						, dev_paths1
+						, dev_sceneInfo
+						, dev_intersections1
+						, rayValid
+						, dev_film
+						, dev_lightSampler
+						);
+				}
 			}
 			else
 			{
-				compute_intersection_bvh_volume_naive << <numblocksPathSegmentTracing, blockSize1d >> > (
-					iter
-					, depth
-					, numRays
-					, dev_paths1
-					, dev_sceneInfo
-					, dev_intersections1
-					, rayValid
-					, dev_film
-					);
+				if (mainIntegratorType == IntegratorType::naive)
+				{
+					compute_intersection_bvh_volume_naive << <numblocksPathSegmentTracing, blockSize1d >> > (
+						iter
+						, depth
+						, numRays
+						, dev_paths1
+						, dev_sceneInfo
+						, dev_intersections1
+						, rayValid
+						, dev_film
+						, hst_scene->skyboxLight
+						);
+				}
+				else if (mainIntegratorType == IntegratorType::mis)
+				{
+					throw std::runtime_error("not implemented");
+				}
 			}
 
 #if !STOCHASTIC_SAMPLING && FIRST_INTERSECTION_CACHING

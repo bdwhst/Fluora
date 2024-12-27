@@ -1,9 +1,9 @@
 // Glass
 MATERIAL 0
 TYPE conductor
-ROUGHNESS   0.01
-REFRIOR_REAL_NAMED metal-Au-eta
-REFRIOR_IMAG_NAMED metal-Au-k
+ROUGHNESS   0.8
+REFRIOR_REAL_NAMED metal-Ag-eta
+REFRIOR_IMAG_NAMED metal-Ag-k
 
 // Camera
 CAMERA
@@ -26,5 +26,5 @@ SCALE       18 18 18
 
 
 SKYBOX
-../scenes/environment/garden_nook_8k.hdr
+../scenes/environment/Newport_Loft_Ref.hdr
 

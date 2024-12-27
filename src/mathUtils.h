@@ -606,5 +606,31 @@ namespace math
     __device__ inline constexpr float pow<0>(float v) {
         return 1;
     }
+
+    __device__ inline glm::vec2 equirectangular_dir_to_uv(glm::vec3 v)
+    {
+        const glm::vec2 invAtan = glm::vec2(0.1591, 0.3183);
+        glm::vec2 uv = glm::vec2(atan2(v.z, v.x), asin(v.y));
+        uv *= invAtan;
+        uv += 0.5;
+        return uv;
+    }
+
+    __device__ inline glm::vec3 equirectangular_uv_to_dir(glm::vec2 uv)
+    {
+        const glm::vec2 invAtan = glm::vec2(0.1591, 0.3183);
+        uv -= 0.5f;
+        uv /= invAtan;
+        float theta = uv[0], phi = uv[1];
+        float x = cosf(phi) * cosf(theta);
+        float y = sinf(phi);
+        float z = cosf(phi) * sinf(theta);
+        return glm::vec3(x, y, z);
+    }
+
+    __host__ __device__ inline float simple_rgb_to_lumin(float r, float g, float b)
+    {
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    }
 };
 

@@ -1,7 +1,7 @@
 #pragma once
 #include <cuda.h>
 #include "sceneStructs.h"
-
+#include "light.h"
 
 __global__ void compute_intersection_bvh_no_volume(
 	int depth
@@ -11,6 +11,7 @@ __global__ void compute_intersection_bvh_no_volume(
 	, ShadeableIntersection* intersections
 	, int* rayValid
 	, RGBFilm* dev_film
+	, LightPtr dev_skyboxLight
 );
 
 // Does not handle surface intersection
@@ -23,6 +24,7 @@ __global__ void compute_intersection_bvh_volume_naive(
 	, ShadeableIntersection* intersections
 	, int* rayValid
 	, RGBFilm* dev_film
+	, LightPtr dev_skyboxLight
 );
 
 __global__ void scatter_on_intersection(

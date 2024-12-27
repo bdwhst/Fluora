@@ -33,6 +33,15 @@ struct MediumLoadJobInfo
 //    BundledParams params;
 //};
 
+struct RawTextureData
+{
+    RawTextureData() = default;
+    int width, height;
+    int channelBits;
+    int channels;
+    std::vector<char> data;
+};
+
 class Scene {
 
 private:
@@ -42,7 +51,7 @@ private:
     int loadCamera();
     bool loadModel(const std::string&, int, bool);
     bool loadGeometry(const std::string&,int);
-    void loadTextureFromFile(const std::string& texturePath, cudaTextureObject_t* texObj, int type);
+    void loadTextureFromFile(const std::string& texturePath, cudaTextureObject_t* texObj, RawTextureData* ret_data = nullptr);
     void LoadTextureFromMemory(void* data, int width, int height, int bits, int channels, cudaTextureObject_t* texObj);
     void loadSkybox();
     void loadJSON(const std::string&);
@@ -67,6 +76,8 @@ public:
     std::vector<float> fSigns;
     std::vector<Primitive> primitives;
     std::vector<LightPtr> lights;
+    // for now we only support ONE skybox light
+    LightPtr skyboxLight = nullptr;
     std::vector<BVHGPUNode> bvhArray;
     std::vector<MTBVHGPUNode> MTBVHArray;
     RenderState state;
@@ -76,6 +87,8 @@ public:
     std::vector<char*> gltfTexTmpArrays;
     std::vector<cudaArray*> textureDataPtrs;
     std::unordered_map< std::string, cudaTextureObject_t> strToTextureObj;
+    std::string environmentMapPath;
+    RawTextureData environmentMapData;
     std::vector<std::pair<std::string, int> > LoadTextureFromFileJobs;//texture path, materialID
     std::vector<GLTFTextureLoadInfo> LoadTextureFromMemoryJobs;
     std::vector<MaterialLoadJobInfo>  LoadMaterialJobs;
