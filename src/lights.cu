@@ -207,6 +207,7 @@ GPU_FUNC LightLiSample ImageInfiniteLight::sample_Li(const LightSampleContext& c
 	sample.L = L({}, {}, {}, wi, lambda);
 	sample.pdf = pdf;
 	sample.wi = wi;
+	//TODO: change this to a more proper value (according to scene bounds)
 	sample.pLight = wi * 1e10f;
 	return sample;
 }
@@ -231,6 +232,6 @@ GPU_FUNC SampledSpectrum ImageInfiniteLight::L(const glm::vec3& p, const glm::ve
 	const RGBColorSpace* colorSpace = RGBColorSpace_sRGB;
 	RGBIlluminantSpectrum illumSpec(*colorSpace, skyColor);
 	SampledSpectrum skyRadiance = illumSpec.sample(lambda);
-	return skyRadiance;
+	return skyRadiance * m_scale;
 }
 

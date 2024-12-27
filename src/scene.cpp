@@ -105,6 +105,14 @@ void Scene::loadJSON(const std::string& name)
     const auto& backgroundData = data["Background"];
     if (backgroundData["TYPE"] == "skybox")
         environmentMapPath = backgroundData["PATH"];
+    if (backgroundData.contains("SCALE"))
+    {
+        environmentMapLuminScale = backgroundData["SCALE"];
+    }
+    else
+    {
+        environmentMapLuminScale = 1.0f;
+    }
 
     // TODO: load materials here
 
@@ -124,6 +132,8 @@ void Scene::loadJSON(const std::string& name)
             params.insert_string("filename", val["PATH"]);
             if(val.contains("TEMPSCALE"))
                 params.insert_float("temperaturescale", val["TEMPSCALE"]);
+            if (val.contains("TEMPOFFSET"))
+                params.insert_float("temperatureoffset", val["TEMPOFFSET"]);
         }
         if (val.contains("LESCALE"))
             params.insert_float("Lescale", val["LESCALE"]);
@@ -131,7 +141,8 @@ void Scene::loadJSON(const std::string& name)
         // load rgb here, create spectrum later
         params.insert_vec3("sigma_a_rgb", { val["SIGMA_A"]["VALUE"][0], val["SIGMA_A"]["VALUE"][1], val["SIGMA_A"]["VALUE"][2]});
         params.insert_vec3("sigma_s_rgb", { val["SIGMA_S"]["VALUE"][0], val["SIGMA_S"]["VALUE"][1], val["SIGMA_S"]["VALUE"][2]});
-        params.insert_float("scale", val["SIGMA_SCALE"]);
+        if(val.contains("SIGMA_SCALE"))
+            params.insert_float("scale", val["SIGMA_SCALE"]);
 
         if (val.contains("G"))
         {
@@ -353,6 +364,7 @@ void Scene::LoadAllLightsToGPU(Allocator alloc)
         }
         assert(luminanceData.size() == totalSize);
         BundledParams params;
+        params.insert_float("scale", environmentMapLuminScale);
         params.insert_ptr("illumFunc", luminanceData.data());
         params.insert_int("width", environmentMapData.width);
         params.insert_int("height", environmentMapData.height);

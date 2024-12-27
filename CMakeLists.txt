@@ -106,6 +106,7 @@ set(sources
     src/SpectrumConsts/rgbspectrum_dci_p3.cpp
     src/SpectrumConsts/rgbspectrum_rec2020.cpp
     src/SpectrumConsts/rgbspectrum_srgb.cpp
+    src/SpectrumConsts/spectrum_data.cu
     )
 
 
