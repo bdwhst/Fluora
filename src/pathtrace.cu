@@ -23,7 +23,7 @@
 #include "misIntegrator.h"
 //#include "materials.h"
 
-IntegratorType mainIntegratorType = IntegratorType::naive;
+IntegratorType mainIntegratorType = IntegratorType::mis;
 
 //Kernel that writes the image to the OpenGL PBO directly.
 __global__ void sendImageToPBO(uchar4* pbo, glm::ivec2 resolution,
@@ -112,7 +112,7 @@ void pathtraceInit(Scene* scene, Allocator alloc) {
 	cudaMalloc(&dev_image, pixelcount * sizeof(glm::vec3));
 	cudaMemset(dev_image, 0, pixelcount * sizeof(glm::vec3));
 
-	dev_film = alloc.new_object<RGBFilm>(dev_pixelSensor, dev_image, RGBColorSpace::sRGB, 1000.0f);
+	dev_film = alloc.new_object<RGBFilm>(dev_pixelSensor, dev_image, RGBColorSpace::sRGB, 1e6f);
 
 	cudaMalloc(&dev_paths1, pixelcount * sizeof(PathSegment));
 	cudaMalloc(&dev_paths2, pixelcount * sizeof(PathSegment));
@@ -495,7 +495,18 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 				}
 				else if (mainIntegratorType == IntegratorType::mis)
 				{
-					throw std::runtime_error("not implemented");
+					compute_intersection_bvh_volume_mis << <numblocksPathSegmentTracing, blockSize1d >> > (
+						iter
+						, depth
+						, numRays
+						, dev_paths1
+						, dev_sceneInfo
+						, dev_intersections1
+						, rayValid
+						, dev_film
+						, dev_lightSampler
+						, dev_shadowRayPaths
+						);
 				}
 			}
 
@@ -558,14 +569,30 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 			// mis light sampling
 			int currNumShadowRays = 0;
 			cudaMemcpyFromSymbol(&currNumShadowRays, numShadowRays, sizeof(int), 0, cudaMemcpyDeviceToHost);
-			dim3 numblocksShadowRay = (currNumShadowRays + blockSize1d - 1) / blockSize1d;
-			sample_Ld << < numblocksShadowRay, blockSize1d >> > (
-				currNumShadowRays,
-				dev_shadowRayPaths,
-				dev_lightSampler,
-				dev_sceneInfo,
-				dev_film
-				);
+			if (currNumShadowRays > 0)
+			{
+				dim3 numblocksShadowRay = (currNumShadowRays + blockSize1d - 1) / blockSize1d;
+				if (hst_scene->media.size() == 0)
+				{
+					sample_Ld << < numblocksShadowRay, blockSize1d >> > (
+						currNumShadowRays,
+						dev_shadowRayPaths,
+						dev_lightSampler,
+						dev_sceneInfo,
+						dev_film
+						);
+				}
+				else
+				{
+					sample_Ld_volume << < numblocksShadowRay, blockSize1d >> > (
+						currNumShadowRays,
+						dev_shadowRayPaths,
+						dev_lightSampler,
+						dev_sceneInfo,
+						dev_film
+						);
+				}
+			}
 		}
 
 		if (guiData != NULL)

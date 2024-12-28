@@ -183,7 +183,7 @@ __device__ SampledSpectrum ConductorBxDF::sample_f(const glm::vec3& wo, glm::vec
 		float cosTheta_o = abs(cos_theta_vec(wo)), cosTheta_i = abs(cos_theta_vec(wi));
 		if (cosTheta_o == 0 || cosTheta_i == 0) return SampledSpectrum(0.0f);
 		pdf = dist.pdf(wo, wm) / (4.0f * abs_dot(wo, wm));
-		SampledSpectrum F = fr_complex(abs_dot(wo, wm), eta, k);
+		SampledSpectrum F = clamp_zero(fr_complex(abs_dot(wo, wm), eta, k));
 		float D = dist.D(wm);
 		float G = dist.G(wo, wi);
 		SampledSpectrum f = D * F * G / (4 * cosTheta_o);//multipled by cos_wi
@@ -202,7 +202,7 @@ __device__ SampledSpectrum ConductorBxDF::eval(const glm::vec3& wo, const glm::v
 	wm = glm::normalize(wm);
 	if ((wi.z > 0.0f && glm::dot(wm, wi) > 0.0f) && !dist.effectively_smooth())
 	{
-		SampledSpectrum F = fr_complex(abs_dot(wo, wm), eta, k);
+		SampledSpectrum F = clamp_zero(fr_complex(abs_dot(wo, wm), eta, k));
 		float cosTheta_o = abs(cos_theta_vec(wo));
 		return dist.D(wm) * F * dist.G(wo, wi) / (4 * cosTheta_o);
 	}

@@ -113,6 +113,10 @@ void Scene::loadJSON(const std::string& name)
     {
         environmentMapLuminScale = 1.0f;
     }
+    if (backgroundData.contains("MAXRGB"))
+    {
+        environmentMapMaxLumin = glm::vec3(backgroundData["MAXRGB"][0], backgroundData["MAXRGB"][1], backgroundData["MAXRGB"][2]);
+    }
 
     // TODO: load materials here
 
@@ -360,7 +364,9 @@ void Scene::LoadAllLightsToGPU(Allocator alloc)
         luminanceData.reserve(totalSize);
         for (int i = 0; i < environmentMapData.width * environmentMapData.height * environmentMapData.channels; i += environmentMapData.channels)
         {
-            luminanceData.emplace_back(math::simple_rgb_to_lumin(dataPtr[i], dataPtr[i + 1], dataPtr[i + 2]));
+            glm::vec3 rgb(dataPtr[i], dataPtr[i + 1], dataPtr[i + 2]);
+            rgb = min(rgb * environmentMapLuminScale, environmentMapMaxLumin);
+            luminanceData.emplace_back(math::simple_rgb_to_lumin(rgb.r, rgb.g, rgb.b));
         }
         assert(luminanceData.size() == totalSize);
         BundledParams params;
@@ -369,6 +375,7 @@ void Scene::LoadAllLightsToGPU(Allocator alloc)
         params.insert_int("width", environmentMapData.width);
         params.insert_int("height", environmentMapData.height);
         params.insert_texture("textureObject", strToTextureObj[environmentMapPath]);
+        params.insert_vec3("maxRadiance", environmentMapMaxLumin);
         skyboxLight = ImageInfiniteLight::create(params, alloc);
         lights.emplace_back(skyboxLight);
     }

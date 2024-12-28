@@ -18,37 +18,8 @@ __global__ void compute_intersection_bvh_no_volume_mis(
 	if (path_index >= num_paths) return;
 	PathSegment& pathSegment = pathSegments[path_index];
 	Ray& ray = pathSegment.ray;
-	glm::vec3 rayDir = pathSegment.ray.direction;
-	glm::vec3 rayOri = pathSegment.ray.origin;
-	float x = fabs(rayDir.x), y = fabs(rayDir.y), z = fabs(rayDir.z);
-	int axis = x > y && x > z ? 0 : (y > z ? 1 : 2);
-	int sgn = rayDir[axis] > 0 ? 0 : 1;
-	int d = (axis << 1) + sgn;
-	const MTBVHGPUNode* currArray = dev_sceneInfo.dev_mtbvhArray + d * dev_sceneInfo.bvhDataSize;
-	int curr = 0;
 	ShadeableIntersection tmpIntersection;
-	tmpIntersection.t = FLT_MAX;
-	bool intersected = false;
-	while (curr >= 0 && curr < dev_sceneInfo.bvhDataSize)
-	{
-		bool outside = true;
-		float boxt = boundingBoxIntersectionTest(currArray[curr].bbox, ray, outside);
-		if (!outside) boxt = EPSILON;
-		if (boxt > 0 && boxt < tmpIntersection.t)
-		{
-			if (currArray[curr].startPrim != -1)//leaf node
-			{
-				int start = currArray[curr].startPrim, end = currArray[curr].endPrim;
-				bool intersect = util_bvh_leaf_intersect(start, end, dev_sceneInfo, &ray, &tmpIntersection);
-				intersected = intersected || intersect;
-			}
-			curr = currArray[curr].hitLink;
-		}
-		else
-		{
-			curr = currArray[curr].missLink;
-		}
-	}
+	bool intersected = intersect_surface_mtbvh(&ray, &tmpIntersection, dev_sceneInfo);
 
 	rayValid[path_index] = intersected;
 	if (intersected)
@@ -59,22 +30,153 @@ __global__ void compute_intersection_bvh_no_volume_mis(
 	else if (lightSampler.have_infinite_light())
 	{
 		LightPtr infLight = lightSampler.get_infinite_light();
-		SampledSpectrum L = infLight.L({}, {}, {}, rayDir, pathSegment.lambda) * pathSegment.transport;
+		SampledSpectrum L = infLight.L({}, {}, {}, ray.direction, pathSegment.lambda) * pathSegment.transport;
 		if (!(depth == 0 || pathSegment.prevSpecular))
 		{
-			float p_l = lightSampler.pmf(infLight) * infLight.pdf_Li({}, rayDir, {});
+			float p_l = lightSampler.pmf(infLight) * infLight.pdf_Li({}, ray.direction, {});
 			float w_b = math::sqr(pathSegment.lastMatPdf) / (math::sqr(pathSegment.lastMatPdf) + math::sqr(p_l));
 			L *= w_b;
 		}
-		glm::vec3 sensorRGB = dev_sceneInfo.pixelSensor->to_sensor_rgb(pathSegment.transport * L, pathSegment.lambda);
+		glm::vec3 sensorRGB = dev_sceneInfo.pixelSensor->to_sensor_rgb(L, pathSegment.lambda);
 		dev_film->add_radiance(sensorRGB, pathSegment.pixelIndex);
 	}
 }
 
 
-__global__ void sample_Ld_volume()
+__global__ void sample_Ld_volume(
+	int numRays,
+	ShadowRaySegment* shadowRaySegments,
+	LightSamplerPtr lightSampler,
+	SceneInfoDev sceneInfo,
+	RGBFilm* dev_film
+)
 {
+	int idx = blockIdx.x * blockDim.x + threadIdx.x;
+	if (idx >= numRays) return;
+	const ShadowRaySegment& shadowRaySegment = shadowRaySegments[idx];
+	assert(shadowRaySegment.bsdfType != -1 || shadowRaySegment.phaseFunc);
 
+	glm::vec3 pShading = shadowRaySegment.pWorld;
+	thrust::uniform_real_distribution<float> u01(0, 1);
+	thrust::default_random_engine& rng = shadowRaySegments[idx].rng;
+
+	LightSampleContext ctx;
+	ctx.pi = shadowRaySegment.pWorld;
+	ctx.dev_primitives = sceneInfo.dev_primitives;
+	ctx.dev_objects = sceneInfo.dev_objs;
+	ctx.modelInfo = sceneInfo.modelInfo;
+
+	SampledLight sampledLight = lightSampler.sample(ctx, u01(rng));
+	if (sampledLight.pdf == 0.0f)
+	{
+		return;
+	}
+	LightPtr light = sampledLight.light;
+	LightLiSample liSample = light.sample_Li(ctx, glm::vec3(u01(rng), u01(rng), u01(rng)), shadowRaySegment.lambda);
+
+	if (liSample.pdf <= 0.0f || !liSample.L)
+		return;
+
+	float p_l = liSample.pdf * sampledLight.pdf;
+
+	SampledSpectrum f(0.0f);
+	float scatterPdf = 0.0f;
+	math::Frame frame = math::Frame::from_z(shadowRaySegment.normalWorld);
+
+	glm::vec3 wo = glm::normalize(frame.to_local(shadowRaySegment.woWorld));
+	glm::vec3 wi = glm::normalize(frame.to_local(liSample.wi));
+	if (shadowRaySegment.bsdfType != -1)
+	{
+		BxDFPtr bxdfPtr = BxDFPtr((void*)shadowRaySegment.bsdfData, shadowRaySegment.bsdfType);
+		float NoL = math::sgn(glm::dot(shadowRaySegment.normalWorld, liSample.wi));
+		if (NoL < 0.0f && shadowRaySegment.bsdfType != -1 && !(bxdfPtr.flags() & refraction))
+		{
+			return;
+		}
+
+		pShading += shadowRaySegment.normalWorld * NoL * SCATTER_ORIGIN_OFFSETMULT;
+		f = bxdfPtr.eval(wo, wi, rng);
+		scatterPdf = bxdfPtr.pdf(wo, wi);
+	}
+	else
+	{
+		PhaseFunctionPtr phaseFPtr = shadowRaySegment.phaseFunc;
+		f = SampledSpectrum(phaseFPtr.p(wo, wi));
+		scatterPdf = phaseFPtr.pdf(wo, wi);
+	}
+
+	if (!f || scatterPdf <= 0.0f)
+	{
+		return;
+	}
+	// T_ray => transmittance / pdf
+	// r_l => pdf(lambda i of light sampling) / pdf(current path)
+	// r_u => pdf(lambda i of path sampling) / pdf(current path)
+	SampledSpectrum T_ray(1.0f), r_l(1.0f), r_u(1.0f);
+	thrust::uniform_int_distribution<int> int_dist;
+	glm::vec3 shadowRayOri = pShading;
+	int iter = 0;
+	// currently does not handle unbounded medium (medium outside of some closed surface)
+	while (true)
+	{
+		float dist2 = glm::distance2(shadowRayOri, liSample.pLight);
+		if (dist2 < 0.01f) break;
+		float dist = sqrt(dist2);
+		Ray shadowRay{ shadowRayOri , (liSample.pLight - shadowRayOri) / dist, -1 };
+		ShadeableIntersection tmpIntersection{};
+		bool intersected_surface = intersect_surface_mtbvh(&shadowRay, &tmpIntersection, sceneInfo);
+		// no intersection, handle environment mapping
+		if (!intersected_surface)
+		{
+			break;
+		}
+		if (intersected_surface)
+		{
+			// intersected with non-emissive material 
+			if(tmpIntersection.materialId != -1 && !sceneInfo.dev_materials[tmpIntersection.materialId].Is<EmissiveMaterial>())
+				return;
+			// intersected with light other than the chosen one
+			if (tmpIntersection.lightId != -1 && lightSampler.get_light(tmpIntersection.lightId) != light)
+				return;
+		}
+		// if current ray is in medium, do ratio tracking to find transmittance
+		if (shadowRay.medium != -1)
+		{
+			float t_max = intersected_surface ? tmpIntersection.t : FLT_MAX;
+			thrust::default_random_engine tmaj_rng(int_dist(rng) ^ (iter << 5));
+			SampledSpectrum T_maj = sample_Tmaj(sceneInfo.dev_media, shadowRay, t_max, tmaj_rng, shadowRaySegment.lambda, [&](const glm::vec3& p, MediumProperties mp, SampledSpectrum sigma_maj, SampledSpectrum Tmaj){
+				SampledSpectrum sigma_n = clamp_zero(sigma_maj - mp.sigma_a - mp.sigma_s);
+				float pdf = Tmaj[0] * sigma_maj[0];
+				// from pbrtv4 (11.13)
+				// it's actually the ratio tracking estimator of (11.17) 
+				// when we are tracing in multiple wavelengths so Tr and the pdf cannot be cancelled out
+				T_ray *= Tmaj * sigma_n / pdf;
+				// ratio tracking pdf
+				r_l *= Tmaj * sigma_maj / pdf;
+				// delta tracking pdf
+				r_u *= Tmaj * sigma_n / pdf;
+				if (T_ray.is_nan() || T_ray.is_inf())
+				{
+					return false;
+				}
+				if (!T_ray)
+					return false;
+				return true;
+			});
+			// add remaining transmittance and pdf
+			T_ray *= T_maj / T_maj[0];
+			r_l *= T_maj / T_maj[0];
+			r_u *= T_maj / T_maj[0];
+		}
+		shadowRayOri = tmpIntersection.worldPos + shadowRay.direction * SCATTER_ORIGIN_OFFSETMULT;
+		iter++;
+	}
+	r_l *= shadowRaySegment.r_p * p_l;
+	r_u *= shadowRaySegment.r_p * scatterPdf;
+	SampledSpectrum L = shadowRaySegment.transport * f * T_ray * liSample.L / (r_u + r_l).average();
+
+	if (!L.is_nan() && !L.is_inf())
+		dev_film->add_radiance(sceneInfo.pixelSensor->to_sensor_rgb(L, shadowRaySegment.lambda), shadowRaySegment.pixelIndex);
 }
 
 // Spectral & NEE MIS
@@ -90,48 +192,17 @@ __global__ void compute_intersection_bvh_volume_mis(
 	, ShadeableIntersection* intersections
 	, int* rayValid
 	, RGBFilm* dev_film
+	, LightSamplerPtr lightSampler
+	, ShadowRaySegment* shadowRaySegments
 )
 {
 	int path_index = blockIdx.x * blockDim.x + threadIdx.x;
 	if (path_index >= num_paths) return;
 	PathSegment& pathSegment = pathSegments[path_index];
 	Ray& ray = pathSegment.ray;
-	glm::vec3 rayDir = pathSegment.ray.direction;
-	glm::vec3 rayOri = pathSegment.ray.origin;
-	float x = fabs(rayDir.x), y = fabs(rayDir.y), z = fabs(rayDir.z);
-	int axis = x > y && x > z ? 0 : (y > z ? 1 : 2);
-	int sgn = rayDir[axis] > 0 ? 0 : 1;
-	int d = (axis << 1) + sgn;
-	const MTBVHGPUNode* currArray = dev_sceneInfo.dev_mtbvhArray + d * dev_sceneInfo.bvhDataSize;
-	int curr = 0;
 	ShadeableIntersection tmpIntersection;
-	tmpIntersection.t = FLT_MAX;
-	tmpIntersection.materialId = -1;
-	bool intersected_surface = false;
-	while (curr >= 0 && curr < dev_sceneInfo.bvhDataSize)
-	{
-		bool outside = true;
-		float boxt = boundingBoxIntersectionTest(currArray[curr].bbox, ray, outside);
-		if (!outside) boxt = EPSILON;
-		if (boxt > 0 && boxt < tmpIntersection.t)
-		{
-			if (currArray[curr].startPrim != -1)//leaf node
-			{
-				int start = currArray[curr].startPrim, end = currArray[curr].endPrim;
-				bool intersect = util_bvh_leaf_intersect(start, end, dev_sceneInfo, &ray, &tmpIntersection);
-				intersected_surface = intersected_surface || intersect;
-			}
-			curr = currArray[curr].hitLink;
-		}
-		else
-		{
-			curr = currArray[curr].missLink;
-		}
-	}
-
-
+	bool intersected_surface = intersect_surface_mtbvh(&ray, &tmpIntersection, dev_sceneInfo);
 	bool scattered_in_medium = false, absorbed_in_medium = false, ternminated = false;
-
 
 	if (ray.medium != -1)
 	{
@@ -150,6 +221,8 @@ __global__ void compute_intersection_bvh_volume_mis(
 			{
 				float pdf = sigma_maj[0] * T_maj[0];
 				SampledSpectrum transport_p = pathSegment.transport * T_maj / pdf;
+				// we will always sample emission here
+				// pdf for sample emission is just sigma_maj * T_maj
 				SampledSpectrum r_e = pathSegment.r_u * sigma_maj * T_maj / pdf;
 				if (r_e)
 				{
@@ -166,6 +239,7 @@ __global__ void compute_intersection_bvh_volume_mis(
 			float uMode = u01(tmaj_rng);
 			if (uMode < pAbsorb)
 			{
+				// do nothing since we've added emission before
 				absorbed_in_medium = true;
 				return false;
 			}
@@ -175,6 +249,7 @@ __global__ void compute_intersection_bvh_volume_mis(
 				int bounces = pathSegment.remainingBounces;
 				if (bounces == 0)
 				{
+					ternminated = true;
 					return false;
 				}
 
@@ -186,6 +261,17 @@ __global__ void compute_intersection_bvh_volume_mis(
 				{
 					int currNumShadowRays = numShadowRays.fetch_add(1);
 					// TODO: add shadow ray here
+					thrust::default_random_engine ld_rng(int_dist(tmaj_rng) ^ (bounces << 8));
+					shadowRaySegments[currNumShadowRays].transport = pathSegment.transport;
+					shadowRaySegments[currNumShadowRays].lambda = pathSegment.lambda;
+					shadowRaySegments[currNumShadowRays].normalWorld = glm::normalize(-ray.direction);
+					shadowRaySegments[currNumShadowRays].woWorld = glm::normalize(-ray.direction);
+					shadowRaySegments[currNumShadowRays].pWorld = p;
+					shadowRaySegments[currNumShadowRays].rng = ld_rng;
+					shadowRaySegments[currNumShadowRays].bsdfType = -1;
+					shadowRaySegments[currNumShadowRays].phaseFunc = mp.phase;
+					shadowRaySegments[currNumShadowRays].pixelIndex = pathSegment.pixelIndex;
+					shadowRaySegments[currNumShadowRays].r_p = pathSegment.r_u;
 
 					glm::vec2 u(u01(tmaj_rng), u01(tmaj_rng));
 					glm::vec3 wi;
@@ -214,6 +300,8 @@ __global__ void compute_intersection_bvh_volume_mis(
 				SampledSpectrum sigma_n = clamp_zero(sigma_maj - mp.sigma_a - mp.sigma_s);
 				float pdf = T_maj[0] * sigma_n[0];
 				pathSegment.transport *= T_maj * sigma_n / pdf;
+				if (pdf == 0)
+					pathSegment.transport = SampledSpectrum(0.f);
 				pathSegment.r_u *= T_maj * sigma_n / pdf;
 				// ratio tracking is used for light sampling
 				pathSegment.r_l *= T_maj * sigma_maj / pdf;
@@ -258,19 +346,21 @@ __global__ void compute_intersection_bvh_volume_mis(
 	}
 	// If there is no scatter in media and intersection with surface
 	// Try to read the radiance from skybox
-	if (dev_sceneInfo.skyboxObj)
+	if (lightSampler.have_infinite_light())
 	{
-		glm::vec2 uv = math::equirectangular_dir_to_uv(glm::normalize(rayDir));
-		float4 skyColorRGBA = tex2D<float4>(dev_sceneInfo.skyboxObj, uv.x, uv.y);
-#if WHITE_FURNANCE_TEST
-		glm::vec3 skyColor = glm::vec3(1.0, 1.0, 1.0);
-#else
-		glm::vec3 skyColor = glm::vec3(skyColorRGBA.x, skyColorRGBA.y, skyColorRGBA.z);
-#endif
-		const RGBColorSpace* colorSpace = RGBColorSpace_sRGB;
-		RGBIlluminantSpectrum illumSpec(*colorSpace, skyColor);
-		SampledSpectrum skyRadiance = illumSpec.sample(pathSegment.lambda);
-		glm::vec3 sensorRGB = dev_sceneInfo.pixelSensor->to_sensor_rgb(pathSegment.transport * skyRadiance, pathSegment.lambda);
+		LightPtr infLight = lightSampler.get_infinite_light();
+		SampledSpectrum L = infLight.L({}, {}, {}, ray.direction, pathSegment.lambda) * pathSegment.transport;
+		if (depth == 0 || pathSegment.prevSpecular)
+		{
+			L /= pathSegment.r_u.average();
+		}
+		else
+		{
+			float p_l = lightSampler.pmf(infLight) * infLight.pdf_Li({}, ray.direction, {});
+			SampledSpectrum r_l = pathSegment.r_l * p_l;
+			L /= (r_l + pathSegment.r_u).average();
+		}
+		glm::vec3 sensorRGB = dev_sceneInfo.pixelSensor->to_sensor_rgb(L, pathSegment.lambda);
 		dev_film->add_radiance(sensorRGB, pathSegment.pixelIndex);
 		rayValid[path_index] = false;
 	}
@@ -278,7 +368,13 @@ __global__ void compute_intersection_bvh_volume_mis(
 
 
 
-__global__ void sample_Ld(int numRays, ShadowRaySegment* shadowRaySegments, LightSamplerPtr lightSampler, SceneInfoDev sceneInfo, RGBFilm* dev_film)
+__global__ void sample_Ld(
+	int numRays, 
+	ShadowRaySegment* shadowRaySegments, 
+	LightSamplerPtr lightSampler, 
+	SceneInfoDev sceneInfo, 
+	RGBFilm* dev_film
+)
 {
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
 	if (idx >= numRays) return;
@@ -343,11 +439,11 @@ __global__ void sample_Ld(int numRays, ShadowRaySegment* shadowRaySegments, Ligh
 
 __device__ void gpu_memcpy(char* dst, char* src, const uint32_t size)
 {
-	GPU_UNROLL
-		for (uint32_t i = 0; i < size; i++)
-		{
-			dst[i] = src[i];
-		}
+GPU_UNROLL
+	for (uint32_t i = 0; i < size; i++)
+	{
+		dst[i] = src[i];
+	}
 }
 
 __global__ void scatter_on_intersection_mis(
@@ -373,6 +469,12 @@ __global__ void scatter_on_intersection_mis(
 	const PathSegment& pathSegment = pathSegments[idx];
 	thrust::default_random_engine& rng = pathSegments[idx].rng;
 	thrust::uniform_real_distribution<float> u01(0, 1);
+	// scattered in media
+	if (intersection.materialId == -1)
+	{
+		rayValid[idx] = true;
+		return;
+	}
 	MaterialPtr material = materials[intersection.materialId];
 
 	if (material.Is<EmissiveMaterial>()) {
@@ -659,6 +761,7 @@ __global__ void scatter_on_intersection_volume_mis(
 	, int* rayValid
 	, RGBFilm* dev_film
 	, LightSamplerPtr lightSampler
+	, ShadowRaySegment* shadowRaySegments
 )
 {
 	extern __shared__ char sharedMemory[];
@@ -684,10 +787,10 @@ __global__ void scatter_on_intersection_volume_mis(
 
 	// If the material indicates that the object was a light, "light" the ray
 	if (material.Is<EmissiveMaterial>()) {
-		SampledSpectrum L(0.0f);
+		SampledSpectrum L = pathSegment.transport * material.Cast<EmissiveMaterial>()->Le(pathSegment.lambda);
 		if (depth == 0 || pathSegment.prevSpecular)
 		{
-			L = pathSegment.transport * material.Cast<EmissiveMaterial>()->Le(pathSegment.lambda) / pathSegment.r_u.average();
+			L /= pathSegment.r_u.average();
 		}
 		else if (lightSampler)
 		{
@@ -700,7 +803,7 @@ __global__ void scatter_on_intersection_volume_mis(
 			LightPtr light = lightSampler.get_light(lightId);
 			float lightPdf = lightSampler.pmf(ctx, light) * light.pdf_Li(ctx, intersection.worldPos, intersection.surfaceNormal);
 			SampledSpectrum r_l = pathSegment.r_l * lightPdf;
-			L = pathSegment.transport * material.Cast<EmissiveMaterial>()->Le(pathSegment.lambda) / (pathSegment.r_u + r_l).average();
+			L /= (pathSegment.r_u + r_l).average();
 		}
 
 		rayValid[idx] = false;
@@ -726,15 +829,30 @@ __global__ void scatter_on_intersection_volume_mis(
 
 		BxDFPtr bxdf = material.get_bxdf(info, bxdfBufferLocal + threadIdx.x * BxDFMaxSize);
 
-		bool isDelta = bxdf.flags() & BxDFFlags::specular;
-		if (!isDelta)
+		bool isDeltaBSDF = bxdf.flags() & BxDFFlags::specular;
+		thrust::uniform_int_distribution<int> int_dist;
+		thrust::default_random_engine ld_rng(int_dist(rng));
+		if (!isDeltaBSDF)
 		{
 			int currNumShadowRays = numShadowRays.fetch_add(1);
 			// TODO: add shadow ray here
-
+			shadowRaySegments[currNumShadowRays].transport = pathSegment.transport;
+			shadowRaySegments[currNumShadowRays].lambda = pathSegment.lambda;
+			shadowRaySegments[currNumShadowRays].normalWorld = glm::normalize(intersection.surfaceNormal);
+			shadowRaySegments[currNumShadowRays].woWorld = -woInWorld;
+			shadowRaySegments[currNumShadowRays].pWorld = intersection.worldPos;
+			shadowRaySegments[currNumShadowRays].rng = ld_rng;
+			shadowRaySegments[currNumShadowRays].bsdfType = bxdf.Tag();
+			shadowRaySegments[currNumShadowRays].pixelIndex = pathSegment.pixelIndex;
+			shadowRaySegments[currNumShadowRays].r_p = pathSegment.r_u;
+			gpu_memcpy(shadowRaySegments[currNumShadowRays].bsdfData, bxdfBufferLocal + threadIdx.x * BxDFMaxSize, BxDFMaxSize);
+			pathSegments[idx].prevSpecular = false;
+		}
+		else
+		{
+			pathSegments[idx].prevSpecular = true;
 		}
 
-		thrust::uniform_int_distribution<int> int_dist;
 		thrust::default_random_engine bxdf_rng(int_dist(rng));
 		SampledSpectrum f = bxdf.sample_f(wo, wi, pdf, bxdf_rng);
 
@@ -742,7 +860,6 @@ __global__ void scatter_on_intersection_volume_mis(
 		{
 			pathSegments[idx].transport *= f / pdf;
 			pathSegments[idx].r_l = pathSegments[idx].r_u / pdf;
-			pathSegments[idx].prevSpecular = isDelta;
 			glm::vec3 newDir = glm::normalize(frame.from_local(wi));
 			glm::vec3 offset = glm::dot(newDir, N) < 0 ? -N : N;
 			float offsetMult = !material.Is<DielectricMaterial>() ? SCATTER_ORIGIN_OFFSETMULT : SCATTER_ORIGIN_OFFSETMULT * 100.0f;

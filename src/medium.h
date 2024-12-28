@@ -8,6 +8,7 @@ class HGPhaseFunction;
 class PhaseFunctionPtr :public TaggedPointer<HGPhaseFunction>
 {
 public:
+	using TaggedPointer::TaggedPointer;
 	__device__ float p(const glm::vec3& wo, const glm::vec3& wi) const;
 	__device__ float sample_p(const glm::vec3& wo, const glm::vec2& u, glm::vec3* wi, float* pdf) const;
 	__device__ float pdf(const glm::vec3& wo, const glm::vec3& wi) const;
@@ -17,6 +18,7 @@ class HGPhaseFunction
 {
 public:
 	__device__ HGPhaseFunction(float g) :g(g) {}
+	__device__ bool is_valid() const { return g > -1 && g < 1; }
 	__device__ float p(const glm::vec3& wo, const glm::vec3& wi) const;
 	__device__ float sample_p(const glm::vec3& wo, const glm::vec2& u, glm::vec3* wi, float* pdf) const;
 	__device__ float pdf(const glm::vec3& wo, const glm::vec3& wi) const;

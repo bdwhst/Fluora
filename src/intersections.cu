@@ -1,5 +1,40 @@
 #include "interactions.h"
 
+__device__ bool intersect_surface_mtbvh(Ray* ray, ShadeableIntersection* tmpIntersection, const SceneInfoDev& dev_sceneInfo)
+{
+    glm::vec3 rayDir = ray->direction;
+    glm::vec3 rayOri = ray->origin;
+    float x = fabs(rayDir.x), y = fabs(rayDir.y), z = fabs(rayDir.z);
+    int axis = x > y && x > z ? 0 : (y > z ? 1 : 2);
+    int sgn = rayDir[axis] > 0 ? 0 : 1;
+    int d = (axis << 1) + sgn;
+    const MTBVHGPUNode* currArray = dev_sceneInfo.dev_mtbvhArray + d * dev_sceneInfo.bvhDataSize;
+    int curr = 0;
+    tmpIntersection->t = FLT_MAX;
+    bool intersected = false;
+    while (curr >= 0 && curr < dev_sceneInfo.bvhDataSize)
+    {
+        bool outside = true;
+        float boxt = boundingBoxIntersectionTest(currArray[curr].bbox, *ray, outside);
+        if (!outside) boxt = EPSILON;
+        if (boxt > 0 && boxt < tmpIntersection->t)
+        {
+            if (currArray[curr].startPrim != -1)//leaf node
+            {
+                int start = currArray[curr].startPrim, end = currArray[curr].endPrim;
+                bool intersect = util_bvh_leaf_intersect(ray, tmpIntersection, start, end, dev_sceneInfo);
+                intersected = intersected || intersect;
+            }
+            curr = currArray[curr].hitLink;
+        }
+        else
+        {
+            curr = currArray[curr].missLink;
+        }
+    }
+    return intersected;
+}
+
 __device__ float util_geometry_ray_box_intersection(const glm::vec3& pMin, const glm::vec3& pMax, const Ray& r, bool* outside, glm::vec3* normal)
 {
     float tmin = 0;
@@ -300,11 +335,11 @@ __device__ float triangleIntersectionTest(const ObjectTransform& Transform, cons
 }
 
 __device__ bool util_bvh_leaf_intersect(
+    Ray* ray,
+    ShadeableIntersection* intersection,
     int primsStart,
     int primsEnd,
-    const SceneInfoDev& dev_sceneInfo,
-    Ray* ray,
-    ShadeableIntersection* intersection
+    const SceneInfoDev& dev_sceneInfo
 )
 {
     glm::vec3 tmp_intersect, tmp_normal, tmp_baryCoord, tmp_tangent;

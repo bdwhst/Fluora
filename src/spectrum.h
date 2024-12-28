@@ -109,6 +109,14 @@ GPU_UNROLL
 		return *this;
 	}
 
+	__device__ __host__ SampledSpectrum& operator/=(float a)
+	{
+		GPU_UNROLL
+			for (int i = 0; i < spec::NSpectrumSamples; ++i)
+				values[i] /= a;
+		return *this;
+	}
+
 	__device__ __host__ SampledSpectrum operator*(float a) const
 	{
 		SampledSpectrum ans = *this;

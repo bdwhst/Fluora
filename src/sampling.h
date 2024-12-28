@@ -47,7 +47,6 @@ struct Distribution1D
 			*off = offset;
 		float du = u - m_cdf[offset];
 		if ((m_cdf[offset + 1] - m_cdf[offset]) > 0) {
-			assert(m_cdf[offset + 1] > m_cdf[offset]);
 			du /= (m_cdf[offset + 1] - m_cdf[offset]);
 		}
 		assert(!math::is_nan(du));

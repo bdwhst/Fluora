@@ -205,20 +205,21 @@ struct ShadowRaySegment {
     glm::vec3 woWorld;
     glm::vec3 normalWorld;
     SampledSpectrum transport;
-    SampledSpectrum r_u, r_l;
+    SampledSpectrum r_p;
     SampledWavelengths lambda;
     int pixelIndex;
     thrust::default_random_engine rng;
-    uint32_t bsdfType;
+    int bsdfType = -1;
     // This is costing a bit more global memory
     char bsdfData[BxDFMaxSize];
+    PhaseFunctionPtr phaseFunc = nullptr;
 };
 
 // Use with a corresponding PathSegment to do:
 // 1) color contribution computation
 // 2) BSDF evaluation: generate a new ray
 struct ShadeableIntersection {
-    float t = -1.0;
+    float t = FLT_MAX;
     glm::vec3 surfaceNormal = glm::vec3(0.0);
     glm::vec3 surfaceTangent = glm::vec3(0.0);
     float fsign = 1.0;

@@ -55,7 +55,7 @@ private:
 class ImageInfiniteLight :public LightBase
 {
 public:
-	ImageInfiniteLight(cudaTextureObject_t texture, float scale, float* illumFunc, int width, int height, Allocator alloc):LightBase(LightType::Infinite), m_dist(nullptr), m_texture(texture), m_scale(scale)
+	ImageInfiniteLight(cudaTextureObject_t texture, const glm::vec3 max_radiance, float scale, float* illumFunc, int width, int height, Allocator alloc):LightBase(LightType::Infinite), m_dist(nullptr), m_texture(texture), m_scale(scale), m_max_radiance(max_radiance)
 	{
 		m_dist = alloc.new_object<Distribution2D>(illumFunc, width, height, alloc);
 	}
@@ -72,7 +72,9 @@ public:
 		if (width == 0 || height == 0)
 			throw std::runtime_error("width or height is 0");
 
-		return alloc.new_object<ImageInfiniteLight>(textureHandle, scale, illumFunc, width, height, alloc);
+		glm::vec3 max_radiance = params.get_vec3("maxRadiance", glm::vec3(1e5f));
+
+		return alloc.new_object<ImageInfiniteLight>(textureHandle, max_radiance, scale, illumFunc, width, height, alloc);
 	}
 	GPU_FUNC SampledSpectrum phi(SampledWavelengths lambda) const
 	{
@@ -92,4 +94,5 @@ private:
 	Distribution2D* m_dist;
 	cudaTextureObject_t m_texture;
 	float m_scale;
+	glm::vec3 m_max_radiance;
 };

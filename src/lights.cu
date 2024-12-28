@@ -229,9 +229,11 @@ GPU_FUNC SampledSpectrum ImageInfiniteLight::L(const glm::vec3& p, const glm::ve
 #else
 	glm::vec3 skyColor = glm::vec3(skyColorRGBA.x, skyColorRGBA.y, skyColorRGBA.z);
 #endif
+	skyColor *= m_scale;
+	skyColor = glm::min(skyColor, m_max_radiance);
 	const RGBColorSpace* colorSpace = RGBColorSpace_sRGB;
 	RGBIlluminantSpectrum illumSpec(*colorSpace, skyColor);
 	SampledSpectrum skyRadiance = illumSpec.sample(lambda);
-	return skyRadiance * m_scale;
+	return skyRadiance;
 }
 

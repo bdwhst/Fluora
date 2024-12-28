@@ -59,11 +59,11 @@ __device__ bool util_geometry_ray_triangle_intersection(
 __device__ float triangleIntersectionTest(const ObjectTransform& Transform, const glm::vec3& v0, const glm::vec3& v1, const glm::vec3& v2, const Ray& r, glm::vec3& intersectionPoint, glm::vec3& normal, glm::vec3& baryCoord);
 
 __device__ bool util_bvh_leaf_intersect(
+    Ray* ray,
+    ShadeableIntersection* intersection,
     int primsStart,
     int primsEnd,
-    const SceneInfoDev& dev_sceneInfo,
-    Ray* ray,
-    ShadeableIntersection* intersection
+    const SceneInfoDev& dev_sceneInfo
 );
 __device__ inline float util_bvh_leaf_test_intersect(
     int primsStart,
@@ -73,3 +73,5 @@ __device__ inline float util_bvh_leaf_test_intersect(
 );
 __device__ bool util_test_visibility(glm::vec3 p0, glm::vec3 p1, const SceneInfoDev& dev_sceneInfo);
 __device__ bool util_bvh_test_visibility(glm::vec3 p0, glm::vec3 p1, const SceneInfoDev& dev_sceneInfo);
+
+__device__ bool intersect_surface_mtbvh(Ray* ray, ShadeableIntersection* tmpIntersection, const SceneInfoDev& dev_sceneInfo);

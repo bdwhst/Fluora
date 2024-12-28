@@ -19,37 +19,8 @@ __global__ void compute_intersection_bvh_no_volume(
 	if (path_index >= num_paths) return;
 	PathSegment& pathSegment = pathSegments[path_index];
 	Ray& ray = pathSegment.ray;
-	glm::vec3 rayDir = pathSegment.ray.direction;
-	glm::vec3 rayOri = pathSegment.ray.origin;
-	float x = fabs(rayDir.x), y = fabs(rayDir.y), z = fabs(rayDir.z);
-	int axis = x > y && x > z ? 0 : (y > z ? 1 : 2);
-	int sgn = rayDir[axis] > 0 ? 0 : 1;
-	int d = (axis << 1) + sgn;
-	const MTBVHGPUNode* currArray = dev_sceneInfo.dev_mtbvhArray + d * dev_sceneInfo.bvhDataSize;
-	int curr = 0;
 	ShadeableIntersection tmpIntersection;
-	tmpIntersection.t = FLT_MAX;
-	bool intersected = false;
-	while (curr >= 0 && curr < dev_sceneInfo.bvhDataSize)
-	{
-		bool outside = true;
-		float boxt = boundingBoxIntersectionTest(currArray[curr].bbox, ray, outside);
-		if (!outside) boxt = EPSILON;
-		if (boxt > 0 && boxt < tmpIntersection.t)
-		{
-			if (currArray[curr].startPrim != -1)//leaf node
-			{
-				int start = currArray[curr].startPrim, end = currArray[curr].endPrim;
-				bool intersect = util_bvh_leaf_intersect(start, end, dev_sceneInfo, &ray, &tmpIntersection);
-				intersected = intersected || intersect;
-			}
-			curr = currArray[curr].hitLink;
-		}
-		else
-		{
-			curr = currArray[curr].missLink;
-		}
-	}
+	bool intersected = intersect_surface_mtbvh(&ray, &tmpIntersection, dev_sceneInfo);
 
 	rayValid[path_index] = intersected;
 	if (intersected)
@@ -59,7 +30,7 @@ __global__ void compute_intersection_bvh_no_volume(
 	}
 	else if (dev_skyboxLight)
 	{
-		SampledSpectrum skyRadiance = dev_skyboxLight.L({}, {}, {}, rayDir, pathSegment.lambda);
+		SampledSpectrum skyRadiance = dev_skyboxLight.L({}, {}, {}, ray.direction, pathSegment.lambda);
 		glm::vec3 sensorRGB = dev_sceneInfo.pixelSensor->to_sensor_rgb(pathSegment.transport * skyRadiance, pathSegment.lambda);
 		dev_film->add_radiance(sensorRGB, pathSegment.pixelIndex);
 	}
@@ -83,38 +54,9 @@ __global__ void compute_intersection_bvh_volume_naive(
 	if (path_index >= num_paths) return;
 	PathSegment& pathSegment = pathSegments[path_index];
 	Ray& ray = pathSegment.ray;
-	glm::vec3 rayDir = pathSegment.ray.direction;
-	glm::vec3 rayOri = pathSegment.ray.origin;
-	float x = fabs(rayDir.x), y = fabs(rayDir.y), z = fabs(rayDir.z);
-	int axis = x > y && x > z ? 0 : (y > z ? 1 : 2);
-	int sgn = rayDir[axis] > 0 ? 0 : 1;
-	int d = (axis << 1) + sgn;
-	const MTBVHGPUNode* currArray = dev_sceneInfo.dev_mtbvhArray + d * dev_sceneInfo.bvhDataSize;
-	int curr = 0;
 	ShadeableIntersection tmpIntersection;
-	tmpIntersection.t = FLT_MAX;
-	tmpIntersection.materialId = -1;
-	bool intersected_surface = false;
-	while (curr >= 0 && curr < dev_sceneInfo.bvhDataSize)
-	{
-		bool outside = true;
-		float boxt = boundingBoxIntersectionTest(currArray[curr].bbox, ray, outside);
-		if (!outside) boxt = EPSILON;
-		if (boxt > 0 && boxt < tmpIntersection.t)
-		{
-			if (currArray[curr].startPrim != -1)//leaf node
-			{
-				int start = currArray[curr].startPrim, end = currArray[curr].endPrim;
-				bool intersect = util_bvh_leaf_intersect(start, end, dev_sceneInfo, &ray, &tmpIntersection);
-				intersected_surface = intersected_surface || intersect;
-			}
-			curr = currArray[curr].hitLink;
-		}
-		else
-		{
-			curr = currArray[curr].missLink;
-		}
-	}
+	bool intersected_surface = intersect_surface_mtbvh(&ray, &tmpIntersection, dev_sceneInfo);
+
 	pathSegment.lambda.terminate_secondary();
 	bool scattered_in_medium = false, absorbed_in_medium = false;
 
@@ -205,7 +147,7 @@ __global__ void compute_intersection_bvh_volume_naive(
 	// Try to read the radiance from skybox
 	else if (dev_skyboxLight)
 	{
-		SampledSpectrum skyRadiance = dev_skyboxLight.L({}, {}, {}, rayDir, pathSegment.lambda);
+		SampledSpectrum skyRadiance = dev_skyboxLight.L({}, {}, {}, ray.direction, pathSegment.lambda);
 		glm::vec3 sensorRGB = dev_sceneInfo.pixelSensor->to_sensor_rgb(pathSegment.transport * skyRadiance, pathSegment.lambda);
 		dev_film->add_radiance(sensorRGB, pathSegment.pixelIndex);
 	}

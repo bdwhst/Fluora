@@ -88,7 +88,8 @@ public:
     std::vector<cudaArray*> textureDataPtrs;
     std::unordered_map< std::string, cudaTextureObject_t> strToTextureObj;
     std::string environmentMapPath;
-    float environmentMapLuminScale;
+    float environmentMapLuminScale = 1.0f;
+    glm::vec3 environmentMapMaxLumin = glm::vec3(1e5);
     RawTextureData environmentMapData;
     std::vector<std::pair<std::string, int> > LoadTextureFromFileJobs;//texture path, materialID
     std::vector<GLTFTextureLoadInfo> LoadTextureFromMemoryJobs;

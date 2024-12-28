@@ -27,6 +27,7 @@ __global__ void compute_intersection_bvh_volume_naive(
 	, LightPtr dev_skyboxLight
 );
 
+
 __global__ void scatter_on_intersection(
 	int iter
 	, int num_paths

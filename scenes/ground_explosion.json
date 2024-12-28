@@ -1,7 +1,7 @@
 {
     "Camera":
     {
-        "RES":[1080,1500],
+        "RES":[1500,1500],
         "FOVY":45.0,
         "ITERATIONS":5000,
         "DEPTH":8,
@@ -21,7 +21,8 @@
     "Background":
     {
         "TYPE":"skybox",
-        "PATH":"../scenes/environment/moonlit_golf_4k.hdr"
+        "PATH":"../scenes/environment/sunflowers_puresky_4k.hdr",
+        "SCALE":1.0
     },
     "Media":
     {
