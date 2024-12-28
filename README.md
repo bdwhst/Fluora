@@ -15,7 +15,7 @@ Command line arguments: `.\Fluora.exe scenefile.txt`
 
 |     Ground Explosion (4096 spp)     |
 | :---------------------------------: |
-| ![](./img/ground_explosion-mis.png) |
+| ![](./img/ground_explosion_mis.png) |
 
 |   Teapot Cloud (5000 spp)   |
 | :-------------------------: |
