@@ -21,206 +21,196 @@ Command line arguments: `.\Fluora.exe scenefile.txt`
 | :-------------------------: |
 | ![](./img/teapot_cloud.png) |
 
-| Wanna play chess? (1080*1080 10000spp) |
-| :------------------------------------: |
-|         ![](./img/chess0.png)          |
-
 |     Spectral Varying IOR     |
 | :--------------------------: |
 | ![](./img/dragon_garden.png) |
 
 
 
-| [SIGGRAPH-2023 Microfacet theory for non-uniform heightfields: Asymmetrically Blend of Microfacet NDF (Conductor And Dielectric)](https://research.nvidia.com/labs/rtr/microfacet-theory-non-uniform-heightfields/) |
-| :----------------------------------------------------------: |
-|                ![](./img/asym_conductor.png)                 |
-|                ![](./img/asym_dielectric.png)                |
-
-
-
-| Large `wavefront-obj` scene load and render (with alpha cutoff) (1920*1080 2000spp): |
-| :----------------------------------------------------------: |
-|                 ![](./img/rungholt-dof.png)                  |
-
-
-
-| Metallic Workflow PBR with normal mapping (1080*1080 5000spp): |
-| :----------------------------------------------------------: |
-|                 ![](./img/flighthelmet.png)                  |
-|                  ![](./img/helmet-pbr.png)                   |
-
-
-
-| Refraction and reflection (here I intentionally used per face normal) (1080*1080 5000spp): |
-| :----------------------------------------------------------: |
-|                   ![](./img/bunny-dof.png)                   |
-
-
-
-| Sponza(1080*1080 100spp with denoiser): |
-| :-------------------------------------: |
-|     ![](./img/sponza-w-denoise.png)     |
-
-
-
-| The good old cornel box (800*800 5000spp): |
-| :----------------------------------------: |
-|  ![](./img/reflection-and-refraction.png)  |
-
-
-
 ## Principles and Analysis
 
-### Path tracing basics
+### Wavelength Dependent Path tracing
 
-<img src="./img/Illustration-of-pt.jpg" style="zoom: 67%;" />
+Path tracers should use spectral tracing instead of RGB for **physical accuracy**. Light interacts with materials based on its **wavelength**, not RGB. This approach captures effects like dispersion, interference, fluorescence, and accurate material interactions, which RGB approximations cannot. While spectral tracing is computationally expensive, it ensures realism in scenes with complex lighting and materials.
 
-Path tracing, an intrinsic algorithm utilized in rendering high-quality images, navigates through the pixel plane, sending rays into a scene to detect object intersections and eventually determine pixel color based on the light interactions. This process, consisting of intersection testing and light scattering, can be greatly expedited by leveraging the parallel processing capabilities of Graphics Processing Units (GPUs). The process of ray tracing is shown below:
+In this approach, we perform **importance sampling** of light based on the **human eye's perception** by selecting **4 wavelengths** per iteration. These wavelengths are chosen to align with the sensitivity of the human visual system, ensuring efficient sampling where it matters most for perceived color.
 
-##### Step 1: Ray Emission and Intersection Testing
+For each sampled wavelength:
 
-- **Ray Emission**: Starting with a camera, rays are cast through each pixel into the scene.
+- We compute the **BSDFs** (Bidirectional Scattering Distribution Functions) and **emission properties** specific to that wavelength, accurately capturing the interaction of light with the materials in the scene.
+- These calculations account for wavelength-dependent effects, such as dispersion, absorption, and material reflectance.
 
-- **Intersection Testing**: Each ray is tested for intersections with all objects within the scene.
+After accumulating the contributions across iterations, the resulting spectral data is **converted to RGB** using a color-matching function that maps the sampled wavelengths to the RGB color space. This conversion ensures that the final image can be stored in the camera film or display device while preserving perceptual accuracy and realism.
 
-- **Nearest Intersection Detection**: Among all intersection points, the nearest one to the camera is chosen for subsequent calculations.
 
-##### Step 2: Ray Interaction with Material
 
-- **Material Interaction**: Upon reaching the intersection point, the ray undergoes interactions (reflection and refraction) determined by the material properties at that point.
+### Volumetric Rendering
 
-- **Emissive Material Check**: If the intersected material is emissive, the path terminates. The radiance is accumulated by multiplying the emissive color (irradiance) of the material and all transmissive factors (BSDF: Bidirectional Scattering Distribution Function) of the materials encountered along the path.
+In volumetric path tracing, light interacts with participating media (e.g., fog, smoke, or water) through **scattering events**. These events describe how light changes direction or energy within the medium. The main types of scattering are **absorption**, **scattering**, and **emission**.
 
-##### Step 3: Continuous Ray Path
 
-- **Path Continuation**: For non-emissive materials, the ray may proceed, reflecting or refracting based on the material properties until a termination condition is met (like reaching a maximum number of bounces or hitting an emissive material).
 
-#### GPU-Accelerated Path Tracing
+#### Absorption
+Absorption occurs when light energy is absorbed by the medium, reducing the intensity of light passing through it. This process is governed by the **Beer-Lambert law**.
 
-Leveraging GPU parallelism, each pixel’s path can be assigned to an individual GPU thread, optimizing the efficiency and speed of the path tracing process.
+##### Formula:
+$$
+L_{\text{out}}(x, \omega) = L_{\text{in}}(x, \omega) \cdot e^{-\sigma_a d}
+$$
+- $ L_{\text{in}}(x, \omega) $: Incident radiance at point $x$ in direction $\omega$.
+- $L_{\text{out}}(x, \omega)$: Transmitted radiance after traveling a distance $d$.
+- $\sigma_a$: Absorption coefficient of the medium (higher values mean stronger absorption).
+- $d$: Distance traveled through the medium.
 
-#### Parallelization Strategy:
+##### Intuition:
+Absorption reduces light intensity based on how much material the light passes through and how strongly the material absorbs light.
 
-- **Pixel-to-Thread Mapping**: Allocate each pixel's path to a distinct GPU thread to ensure concurrent processing of multiple rays.
 
-#### Kernel Separation:
 
-- **Intersection Kernel**: One kernel is dedicated to handling ray-object intersection tests and identifying the nearest intersection point.
+#### Scattering
+Scattering occurs when light interacts with particles in the medium and is redirected in a new direction. The new direction is determined probabilistically by the **phase function**.
 
-- **Scattering Kernel**: A separate kernel manages the reflection and refraction of rays at the intersection points.
+##### Formula for Scattering:
+$$
+L_s(x, \omega) = \sigma_s \int_{4\pi} L(x, \omega') \cdot p(\omega, \omega') \, d\omega'
+$$
+- $L_s(x, \omega)$: Scattered radiance at point $x$ in direction $\omega$.
+- $\sigma_s$: Scattering coefficient of the medium.
+- $p(\omega, \omega')$: Phase function, describing the probability of scattering from direction $\omega'$ to $\omega$.
 
-### Ray compaction and sorting by BSDF
+##### Common Phase Functions:
+- **Isotropic scattering**: $p(\omega, \omega') = \frac{1}{4\pi}$, uniform scattering in all directions.
+- **Henyey-Greenstein phase function**:
+$$
+p(\omega, \omega') = \frac{1}{4\pi} \frac{1-g^2}{(1+g^2 - 2g\cos\theta)^{3/2}}
+$$
+  - $g$: Asymmetry parameter ($g > 0$ for forward scattering, $g < 0$ for backward scattering).
 
-#### Section 1: Addressing Ray Termination through Stream Compaction
+  - $\theta$: Angle between $\omega$ and $\omega'$.
 
-##### Stream Compaction Overview
+    
 
-When conducting ray tracing on a GPU, certain rays might terminate earlier than others due to reaching an emissive material or exceeding the bounce limit. Stream compaction becomes an instrumental strategy in managing such diverse ray lifetimes efficiently.
+#### Emission
+Emission occurs when the medium itself emits light, adding energy into the system. This is common in glowing media like flames or phosphorescent fog.
 
-##### The Utility of Stream Compaction in Ray Tracing
+##### Formula:
+$$
+L_e(x, \omega) = \sigma_e(x, \omega) \cdot e(x, \omega)
+$$
+- $L_e(x, \omega)$: Emitted radiance at point $x$ in direction $\omega$.
 
-- **Efficiency Optimization**: Stream compaction ensures that threads in the GPU are utilized optimally by gathering and processing only the rays that are still active.
+- $\sigma_e(x, \omega)$: Emission coefficient.
 
-- **Reducing Idle Threads**: By relocating active rays to be contiguous in memory and computation, the algorithm reduces the number of idle GPU threads, which might otherwise be waiting due to terminated rays.
+- $e(x, \omega)$: Intrinsic emission function, describing how much light is emitted at $x$.
 
-##### Implementation of Stream Compaction
+  
 
-- **Identifying Active Rays**: The algorithm must discern between active and terminated rays.
-- **Memory Coalescing**: Actively traced rays are then repositioned contiguously in memory, ensuring efficient memory access patterns and reducing wasted computation.
+#### The Radiative Transfer Equation (RTE)
+The interaction of light with participating media is described by the **Radiative Transfer Equation (RTE)**, which combines all three processes.
 
-|                               | Cornell Sphere | stanford bunny (144046 triangles) | rungholt (6704264 triangles) |
-| ----------------------------- | -------------- | --------------------------------- | ---------------------------- |
-| Delay Without compaction (ms) | ~10            | ~17                               | ~4000                        |
-| Delay With compaction (ms)    | ~12            | ~13                               | ~91                          |
+##### Formula:
+$$
+\frac{dL(x, \omega)}{ds} = -\sigma_t L(x, \omega) + \sigma_s \int_{4\pi} L(x, \omega') p(\omega, \omega') d\omega' + \sigma_e e(x, \omega)
+$$
+- $\frac{dL}{ds}$: Rate of change of radiance along the ray.
 
-Compaction incurs a overhead of scanning and scattering, so when the scene is very simple, it's not very useful, but when the scene is more complex, we should definitely enable ray compaction.
+- $\sigma_t = \sigma_a + \sigma_s$: Extinction coefficient (total attenuation due to absorption and scattering).
 
-#### Section 2: Enhancing Performance via Material Consistency in Warp Execution
+- The terms correspond to:
+  - **Loss** due to extinction: $-\sigma_t L(x, \omega)$
+  
+  - **Gain** from in-scattering: $+\sigma_s \int_{4\pi} ...$
+  
+  - **Gain** from emission: $+\sigma_e e(x, \omega)$
+  
+    
 
-##### The Potential of Warp-Level Optimization
+#### Multiple Scattering
+When light scatters multiple times before leaving the medium, it contributes to the **indirect illumination**. This requires recursive computation or Monte Carlo integration:
 
-When dealing with light scattering in GPU-based ray tracing, ensuring that all threads within a warp handle the same material type could, theoretically, enhance computational performance and efficiency.
+$$
+L(x, \omega) = L_e(x, \omega) + \int_0^d \sigma_s \int_{4\pi} L(x', \omega') p(\omega, \omega') \, d\omega' e^{-\sigma_t d} \, dx'
+$$
+- $L(x, \omega)$: Total radiance, accounting for multiple scattering.
 
-##### Reasons for Improved Performance with Material Homogeneity
 
-- **Coherent Memory Access**: Threads within a warp accessing the same material properties can utilize cached data, reducing the latency of memory accesses.
 
-- **Reduced Divergence**: Uniform material processing across threads minimizes control flow divergence, facilitating simultaneous execution and enhancing warp efficiency.
+#### Null Scattering
+Null scattering is a technique used to improve sampling efficiency in heterogeneous media by introducing **virtual interactions** that don't affect light transport physically. This is especially useful when the medium's properties (e.g., absorption or scattering) vary significantly in space.
 
-##### Implementation of Ensuring Material Consistency
+##### Purpose:
+- To maintain a constant step size during sampling in complex media while still accounting for regions with no real interactions.
+- To balance sampling probability in highly scattering or absorbing media, where naive sampling may fail to capture light transport effectively.
 
-1. **Material Sorting**: Rays could be sorted based on intersected material types (BSDF function), thereby grouping rays that interact with the same material.
+##### How it Works:
+1. The extinction coefficient $\sigma_t$ is decomposed:
+   $$
+   \sigma_t = \sigma_s + \sigma_a + \sigma_n
+   $$
+   - $\sigma_s$: Scattering coefficient.
+   - $\sigma_a$: Absorption coefficient.
+   - $\sigma_n$: Null scattering coefficient (accounts for non-interactive scattering).
 
-*In practice, I didn't get a speedup by sorting the material, I think it's mainly because the sorting overhead outruns the gain of coherent access and reduced divergence. And I don't have a scene full of objects with diverse materials.*
+2. During ray marching:
+   - A null scattering event is sampled with probability proportional to $\sigma_n / \sigma_t$.
+   - Real scattering and absorption events are sampled based on their actual proportions.
 
-### Anti-aliasing and depth of field
+3. When a null scattering event occurs, the direction of light remains unchanged, and no energy is lost or scattered.
 
-|              No DOF               |              DOF               |
-| :-------------------------------: | :----------------------------: |
-| ![](./img/lost-empire-no-dof.png) | ![](./img/lost-empire-dof.png) |
+##### Benefit:
+Null scattering ensures that sampling remains unbiased, even in regions of the medium where no real interactions occur, thus improving efficiency and reducing variance.
 
-Nothing fancy about anti-aliasing, just added random jitter to each pixel location to get multiple samples inside a pixel and average them. 
 
-As for depth of field, I've used a simple thin lens model, that jitters the ray with focal length and lens radius.
 
-### GLTF loading
+#### Spectral Multiple Importance Sampling
+Spectral MIS is a technique used to balance sampling across different spectral (wavelength) contributions of light. It is particularly important for media with strong spectral variations, such as colored fog, gases, or materials with dispersion effects.
 
-GLTF (GL Transmission Format) is widely used for transmitting 3D models and scenes due to its ability to efficiently encapsulate complex hierarchical structures. In these structures, nodes can contain transformations and be parented in a hierarchy, meaning the transformation of each node is influenced by its ancestors.
+##### Problem:
+- Different wavelengths of light may interact with the medium differently (e.g., scattering and absorption vary by wavelength).
+- Simple sampling strategies may lead to poor convergence or color artifacts.
 
-When considering a GLTF scene, it's crucial to comprehend that the spatial properties (position, rotation, and scale) of each node are not only influenced by its local transformations but also by the transformations of all its ancestor nodes. Hence, to compute the global transformation of a node, one must traverse from the root of the hierarchy down to the node, accumulating transformations along the path.
+##### Spectral MIS:
+1. Use **multiple importance sampling** to combine sampling techniques for different wavelengths.
+2. Balance the contribution of each spectral component based on its probability density function (PDF) and importance to the final result.
 
-Topological sorting ensures that every parent node is processed before its children, guaranteeing that when a node’s transformation is computed, all its ancestors have already been processed, making their global transformations available.
+##### Formula:
+If $f(\lambda)$ is the spectral radiance and $p_1(\lambda)$, $p_2(\lambda)$ are PDFs of two sampling strategies:
+$$
+I = \int_\Lambda f(\lambda) \frac{w_1(\lambda) p_1(\lambda) + w_2(\lambda) p_2(\lambda)}{p_1(\lambda) + p_2(\lambda)} d\lambda
+$$
+- $w_i(\lambda)$: Weights for each sampling strategy, calculated using the MIS heuristic (e.g., balance heuristic).
+- $\Lambda$: Wavelength range.
 
-### Metallic workflow (with microfacet BSDF importance sampling)
+##### Benefit:
+Spectral MIS reduces noise and ensures better distribution of samples across the spectral domain, producing smooth and physically accurate results in media with complex spectral properties.
 
-Physically based shading is a shading model that aims to mimic the way light interacts with surfaces in the real world. The metallic workflow is one of the widely used approaches in PBS to achieve realistic materials and lighting in 3D graphics. 
 
-In a metallic workflow, materials are described primarily using three main properties:
 
-- **Base Color:** This denotes the inherent color of a material.
-- **Metallic:** This parameter indicates whether a material is metallic (value = 1) or non-metallic/dielectric (value = 0). Intermediate values are typically not physically accurate and are used sparingly for artistic purposes.
-- **Roughness:** This controls how smooth or rough a surface is, affecting how it scatters light.
+#### Next Event Estimation with Volumes
+Next Event Estimation (NEE) is a technique used to reduce noise when computing direct illumination in volumetric and surface path tracing.
 
-The formula for metallic workflow BSDF is as follow:
+##### Problem:
+In volumetric rendering, light from sources (e.g., point lights, area lights) must travel through the medium, interacting with scattering events. Naive sampling often fails to efficiently capture contributions from light sources due to high variance.
 
-![](./img/bsdf-formula.svg)
+##### How NEE Works:
+1. **Direct Sampling of Light Sources**:
+   - At each interaction point (e.g., a scattering event), the algorithm samples the contribution of light from the visible light sources.
+   - A shadow ray is traced toward the light to ensure no occlusion occurs.
 
-Here I choose to use frensel-schlick approximation, GGX-normal distribution and smith geometry term for F, D and G term.
+2. **Incorporating MIS**:
+   - Multiple importance sampling is often used to combine NEE with other light transport strategies, such as path tracing or photon mapping.
 
-#### Texture Maps:
+##### Formula for Light Contribution:
+For a light source with intensity $L_i$ at position $x$:
+$$
+L_{\text{direct}} = \frac{L_i(x, \omega)}{p(x)} T(x_0, x)
+$$
+- $L_{\text{direct}}$: Direct radiance contribution.
+- $p(x)$: PDF of sampling the light source.
+- $T(x_0, x)$: Transmittance (accounts for attenuation along the path from $x_0$ to $x$).
 
-In the metallic workflow, texture maps play a vital role in defining how a material looks. Artists will typically author or acquire the following maps:
-
-- **Base Color Map:** Contains the color information for the material.
-- **Metallic and Roughness Map:** Provides per-pixel control over the metallic and roughness of the material.
-- **Normal Map:** This is used to add surface detail without increasing the geometric complexity of the 3D model.
-
-For normal mapping, we need a proper way to generate tangents from existing normals and texture coordinates. The GLTF specification says: *When tangents are not specified, client implementations SHOULD calculate tangents using default [MikkTSpace](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#mikktspace) algorithms with the specified vertex positions, normals, and texture coordinates associated with the normal texture.*
-
-#### Importance sampling of GGX visible normal distribution
-
-Visible normals distribution are basically normals that are visible to a certain viewing angle.
-
-The importance sampling is based on pdf function of visible normals:
-
-![](./img/ggxvndf-formula.svg)
-
-This is a function which considers the shadowing and masking effect of microfacets, and if you plug it into the rendering equation with microfacet BSDF, you will find out that the denominator will have a more stable pdf than using just normal distribution, and thus the firefly artifacts are not likely to happen.
-
-### Multiple importance sampling
-
-Different sampling strategies can be beneficial in different scenarios within a rendering context:
-
-- **Light Sampling**: Aims at directly sampling light sources to gather direct illumination.
-- **BRDF Sampling**: Focuses on sampling according to the material properties of surfaces. (previous section)
-
-Different sampling techniques might be optimal for different scenarios, and the challenge lies in integrating these diverse strategies effectively. Multiple Importance Sampling amalgamates various sampling techniques, assigning weights to each technique based on its efficacy in a given scenario, and then amalgamating them in a way that minimizes variance.
-
-The following scene is tested with 10spp
-
-| Light sample only (10spp) | BRDF Sample Only (10spp) | Combined (10spp)            |
-| :-----------------------: | :----------------------: | --------------------------- |
-| ![](./img/mis_light.png)  | ![](./img/mis_brdf.png)  | ![](./img/mis_combined.png) |
+##### Benefit:
+NEE significantly reduces noise by directly sampling important light contributions, especially in scenes with small, bright light sources or complex media where indirect sampling would require many iterations to converge.
 
 
 
@@ -240,145 +230,48 @@ For comparison, we demonstrate that without importance sampling, the ground expl
 
 
 
-### BVH building and traversal
+### Timeline
 
-Computing each object when doing ray intersection is quite slow (takes O(N) time), so a great idea is to divide the objects by their spatial location (bounding box), and build a tree recursively from such partition, then traversal of a tree will only take O(logN) time. Here I choose surface area heuristic for objects partition. The basic idea is we can use an array to store all objects in the scene, at each partition step, compute the benefit of divide current array into two smaller array, if this benefit is greater than naively iterating over the current array, then we will perform a partition, and recursively divide the two smaller array.
+##### **July - September: Enabling Spectral Path Tracing**
 
-Due to limited numbers of registers and shared memory, we need to perform a stack-less traversal of the tree, here I implemented two different methods.
+During this period, I focused on transitioning the path tracer to support spectral path tracing. The work involved significant changes to existing code and the introduction of new components for handling spectral data efficiently:
 
-#### State machine traversal
+- **Tagged Pointer Implementation**:
+  Introduced a tagged pointer system to facilitate dynamic dispatch with minimal overhead, improving performance and flexibility in handling diverse scene objects.
+- **Efficient Memory Management**:
+  Implemented basic memory allocators tailored for path tracing needs, reducing memory fragmentation and improving overall efficiency.
+- **Spectrum Management**:
+  Designed and implemented classes for handling various spectrum representations, enabling accurate modeling of wavelength-dependent phenomena.
+- **Material Code Updates**:
+  Refactored and extended the material subsystem to accommodate spectral properties, ensuring seamless integration with the spectral path tracing pipeline.
 
-##### Determining Near and Far Child Nodes for Rays
+##### **October: Adding Support for Media**
 
-- Identify the ray's dominant direction to establish the maximum tracing axis.
-- Assign the 'near' child node based on the ray's origin and direction relative to the spatial division in the binary tree. Conversely, determine the 'far' child.
+The focus shifted towards integrating media into the renderer, enabling effects like volumetric scattering and absorption:
 
-##### Traversal States
+- **Medium Representation**:
+  Developed basic classes to represent different types of media, laying the groundwork for volumetric rendering.
+- **Majorant Grid System**:
+  Added support for iterating over majorant grid cells, which is critical for efficient volumetric path tracing by providing bounds for scattering densities.
+- **NanoVDB Integration**:
+  Incorporated NanoVDB for sparse volumetric data representation, enabling efficient storage and querying of high-resolution volumetric grids.
 
-1. **From Child**: Ascended from a child node.
-2. **From Parent**: Descended from a parent node.
-3. **From Sibling**: Navigated from a sibling node.
+##### **November - December: Supporting Volumetric Path Tracing**
 
-##### Node Navigation with Hit/Miss Data
+In the final phase, I focused on extending the integrator to handle volumetric effects and improving sampling techniques:
 
-- **Hit**: Move to near child, test intersections in leaf nodes.
-- **Miss**: Progress to far child or sibling.
-
-###### Pseudocode
-
-```
-void traverse(Ray ray, Node* node) {
-    int current = nearChild(root); // Initialize with the nearest child of the root
-    char state = FROM_PARENT; // Starting state is descending from the parent
-
-    while (true) {
-        switch (state) {
-            case FROM_CHILD:
-                if (current == root) return; // If back at root, traversal is complete
-
-                if (current == nearChild(parent(current))) {
-                    current = sibling(current);
-                    state = FROM_SIBLING; // (1a) Transition to checking the sibling
-                } else {
-                    current = parent(current);
-                    state = FROM_CHILD; // (1b) Go back to check the parent
-                }
-                break;
-
-            case FROM_SIBLING:
-                if (boxTest(ray, current) == MISSED) {
-                    current = parent(current);
-                    state = FROM_CHILD; // (2a) Ray missed, check the parent
-                } else if (isLeaf(current)) {
-                    processLeaf(ray, current); // Ray-primitive intersections for leaves
-                    current = parent(current);
-                    state = FROM_CHILD; // (2b) After processing, transition back to parent
-                } else {
-                    current = nearChild(current);
-                    state = FROM_PARENT; // (2c) Check the children of current node
-                }
-                break;
-
-            case FROM_PARENT:
-                if (boxTest(ray, current) == MISSED) {
-                    current = sibling(current);
-                    state = FROM_SIBLING; // (3a) Ray missed, check the sibling
-                } else if (isLeaf(current)) {
-                    processLeaf(ray, current); // Ray-primitive intersections for leaves
-                    current = sibling(current);
-                    state = FROM_SIBLING; // (3b) Transition to sibling after processing leaf
-                } else {
-                    current = nearChild(current);
-                    state = FROM_PARENT; // (3c) Check the children of current node
-                }
-                break;
-        }
-    }
-}
-
-```
-
-**Pros:** Only store extra parent link per node, memory efficient, a feasible solution for stack-less traversal
-
-**Cons:** A lot of divergence, not very performant
-
-#### Multi-threaded BVH
-
-Advances the idea of state machine, we can directly store nodes with hit link and miss link for each of the six direction (+X,-X,+Y,-Y,+Z,-Z)
-
-###### Pseudocode
-
-```
-void traverse(Ray ray, Node* node) {
-	int axis = chooseAxisFromRay(ray);
-	int curr = getStartingPointFromAxis(axis);
-	while(curr>=0&&curr<BVHArraySize)
-	{
-		bool intersected = boxTest(ray, curr);
-		if(intersected)
-		{
-			if(isLeaf(curr))
-				leafIntersect(ray, curr);
-			curr = hitNode(curr);
-		}
-		else
-		{
-			curr = missNode(curr);
-		}
-	}
-}
-```
-
-**Pros:** Simple and very performant
-
-**Cons:** Uses more memory than state machine method, but compared to texture memory usage, this is usually neglectable
-
-#### Comparisons of stack-less traversal
-
-statistics on the glass bunny scene (1080*1080, 144046 triangles)
-
-|                                              | Naive | State machine | MTBVH |
-| -------------------------------------------- | ----- | ------------- | ----- |
-| FPS                                          | ~0.4  | ~54           | ~77   |
-| Additional GPU Memory used (MB, theoretical) | 0     | ~8            | ~38   |
-
-### Denoise
-
-Used intel's open image denoiser, added normal and albedo information as auxiliary buffer.
-
-Sponza scene with 100 spp:
-
-|         No denoiser         |            Denoised             |
-| :-------------------------: | :-----------------------------: |
-| ![](./img/sponza-noisy.png) | ![](./img/sponza-w-denoise.png) |
-
-
+- **Naive Volume Path Tracing Integrator**:
+  Implemented a basic integrator for volume path tracing, allowing initial exploration of volumetric scattering effects.
+- **Environment Map Importance Sampling**:
+  Added importance sampling for environment maps, enhancing efficiency in rendering scenes with complex lighting setups.
+- **Advanced Volumetric Path Tracing**:
+  Developed a volumetric path tracing integrator incorporating spectral multiple importance sampling (MIS) and next-event estimation (NEE). This ensured physically accurate and efficient rendering of volumetric effects in spectral scenes.
 
 ## References
 
 - Ray tracing in one weekend: https://raytracing.github.io/
 - PBRT: https://pbr-book.org/
-- Efficient Stack-less BVH Traversal for Ray Tracing: https://www.researchgate.net/publication/255969699_Efficient_Stack-less_BVH_Traversal_for_Ray_Tracing
+- [A null-scattering path integral formulation of light transport](https://cs.dartmouth.edu/~wjarosz/publications/miller19null.html)
 - Implementing a Photorealistic Rendering System using GLSL: https://arxiv.org/abs/1505.06022
 - Ray Tracing Gems II: https://www.realtimerendering.com/raytracinggems/rtg2/index.html
 - McGuire Computer Graphics Archive: https://casual-effects.com/data/ 
