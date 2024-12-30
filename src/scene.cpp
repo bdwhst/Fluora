@@ -119,6 +119,30 @@ void Scene::loadJSON(const std::string& name)
     }
 
     // TODO: load materials here
+    std::unordered_map<std::string, int> materialNameToId;
+    if (data.contains("Materials"))
+    {
+        for (const auto& [key, val] : data["Materials"].items())
+        {
+            BundledParams params;
+            std::string type = val["TYPE"];
+            if (type == "diffuse")
+            {
+                params.insert_vec3("albedo", glm::vec3( val["RGB"][0], val["RGB"][1], val["RGB"][2]));
+            }
+            else if (type == "emissive")
+            {
+                float emittance = 1.0f;
+                if (val.contains("EMITTANCE"))
+                    emittance = val["EMITTANCE"];
+                params.insert_float("emittance", emittance);
+                params.insert_vec3("albedo", glm::vec3(val["RGB"][0], val["RGB"][1], val["RGB"][2]));
+            }
+            int id = (int)LoadMaterialJobs.size();
+            materialNameToId[key] = id;
+            LoadMaterialJobs.emplace_back(type, params);
+        }
+    }
 
     std::unordered_map <std::string, std::pair<std::string, std::string>> mediumInterfaces;
     for (const auto& [key, val] : data["MediumInterfaces"].items())
@@ -173,9 +197,10 @@ void Scene::loadJSON(const std::string& name)
     for (const auto& ele : data["Objects"])
     {
         const std::string type = ele["TYPE"];
+        Object new_obj;
+        ObjectTransform modelTrans;
         if (type == "model_inline")
         {
-            Object new_obj;
             new_obj.type = TRIANGLE_MESH;
             int starting_index = verticies.size();
             for (int i = 0; i < ele["VERTICES"].size(); i += 3)
@@ -202,30 +227,38 @@ void Scene::loadJSON(const std::string& name)
             {
                 // TODO
                 assert(0);
-            }
-
-            if (ele.contains("MEDIUM_INTERFACE"))
-            {
-                const auto& interface = mediumInterfaces[ele["MEDIUM_INTERFACE"]];
-
-                new_obj.mediumIn = mediaNameToID.contains(interface.first) ? mediaNameToID[interface.first] : -1;
-                new_obj.mediumOut = mediaNameToID.contains(interface.second) ? mediaNameToID[interface.second] : -1;
-            }
-
-            ObjectTransform modelTrans;
-            modelTrans.translation = glm::vec3(ele["TRANS"][0], ele["TRANS"][1], ele["TRANS"][2]);
-            modelTrans.rotation = glm::vec3(ele["ROTAT"][0], ele["ROTAT"][1], ele["ROTAT"][2]);
-            modelTrans.scale = glm::vec3(ele["SCALE"][0], ele["SCALE"][1], ele["SCALE"][2]);
-
-            modelTrans.transform = utilityCore::buildTransformationMatrix(
-                modelTrans.translation, modelTrans.rotation, modelTrans.scale);
-            modelTrans.inverseTransform = glm::inverse(modelTrans.transform);
-            modelTrans.invTranspose = glm::inverseTranspose(modelTrans.transform);
-
-            new_obj.Transform = modelTrans;
-
-            objects.emplace_back(new_obj);
+            }    
         }
+        else if (type == "geometry_cube")
+        {
+            new_obj.type = CUBE;
+        }
+
+        if (ele.contains("MEDIUM_INTERFACE"))
+        {
+            const auto& interface = mediumInterfaces[ele["MEDIUM_INTERFACE"]];
+
+            new_obj.mediumIn = mediaNameToID.contains(interface.first) ? mediaNameToID[interface.first] : -1;
+            new_obj.mediumOut = mediaNameToID.contains(interface.second) ? mediaNameToID[interface.second] : -1;
+        }
+
+        if (ele.contains("MATERIAL"))
+        {
+            new_obj.materialid = materialNameToId[ele["MATERIAL"]];
+        }
+
+        modelTrans.translation = glm::vec3(ele["TRANS"][0], ele["TRANS"][1], ele["TRANS"][2]);
+        modelTrans.rotation = glm::vec3(ele["ROTAT"][0], ele["ROTAT"][1], ele["ROTAT"][2]);
+        modelTrans.scale = glm::vec3(ele["SCALE"][0], ele["SCALE"][1], ele["SCALE"][2]);
+
+        modelTrans.transform = utilityCore::buildTransformationMatrix(
+            modelTrans.translation, modelTrans.rotation, modelTrans.scale);
+        modelTrans.inverseTransform = glm::inverse(modelTrans.transform);
+        modelTrans.invTranspose = glm::inverseTranspose(modelTrans.transform);
+
+        new_obj.Transform = modelTrans;
+
+        objects.emplace_back(new_obj);
     }
 }
 
@@ -253,11 +286,14 @@ namespace std {
 
 void Scene::LoadAllTexturesToGPU()
 {
-    cudaTextureObject_t* texObj = &skyboxTextureObj;
-    assert(!strToTextureObj.count(environmentMapPath));
-    
-    loadTextureFromFile(environmentMapPath, texObj, &environmentMapData);
-    strToTextureObj[environmentMapPath] = *texObj;
+    if (environmentMapPath != "")
+    {
+        cudaTextureObject_t* texObj = &skyboxTextureObj;
+        assert(!strToTextureObj.count(environmentMapPath));
+
+        loadTextureFromFile(environmentMapPath, texObj, &environmentMapData);
+        strToTextureObj[environmentMapPath] = *texObj;
+    }
 
 
     for (auto& p : LoadTextureFromFileJobs)

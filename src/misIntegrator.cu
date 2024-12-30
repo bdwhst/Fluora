@@ -469,12 +469,6 @@ __global__ void scatter_on_intersection_mis(
 	const PathSegment& pathSegment = pathSegments[idx];
 	thrust::default_random_engine& rng = pathSegments[idx].rng;
 	thrust::uniform_real_distribution<float> u01(0, 1);
-	// scattered in media
-	if (intersection.materialId == -1)
-	{
-		rayValid[idx] = true;
-		return;
-	}
 	MaterialPtr material = materials[intersection.materialId];
 
 	if (material.Is<EmissiveMaterial>()) {

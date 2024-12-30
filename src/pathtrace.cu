@@ -547,18 +547,36 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 		}
 		else if(mainIntegratorType == IntegratorType::mis)
 		{
-			scatter_on_intersection_mis << <numblocksPathSegmentTracing, blockSize1d, BxDFMaxSize* blockSize1d >> > (
-				iter,
-				depth,
-				numRays,
-				dev_intersections1,
-				dev_paths1,
-				dev_sceneInfo,
-				rayValid,
-				dev_film,
-				dev_lightSampler,
-				dev_shadowRayPaths
-				);
+			if (hst_scene->media.size())
+			{
+				scatter_on_intersection_volume_mis << <numblocksPathSegmentTracing, blockSize1d, BxDFMaxSize* blockSize1d >> > (
+					iter,
+					depth,
+					numRays,
+					dev_intersections1,
+					dev_paths1,
+					dev_sceneInfo,
+					rayValid,
+					dev_film,
+					dev_lightSampler,
+					dev_shadowRayPaths
+					);
+			}
+			else
+			{
+				scatter_on_intersection_mis << <numblocksPathSegmentTracing, blockSize1d, BxDFMaxSize* blockSize1d >> > (
+					iter,
+					depth,
+					numRays,
+					dev_intersections1,
+					dev_paths1,
+					dev_sceneInfo,
+					rayValid,
+					dev_film,
+					dev_lightSampler,
+					dev_shadowRayPaths
+					);
+			}
 		}
 		cudaDeviceSynchronize();
 		checkCUDAError("scatter_on_intersection");
