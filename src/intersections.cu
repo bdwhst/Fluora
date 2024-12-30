@@ -355,34 +355,37 @@ __device__ bool util_bvh_leaf_intersect(
 
         if (obj.type == TRIANGLE_MESH)
         {
-            const glm::ivec3& tri = dev_sceneInfo.modelInfo.dev_triangles[obj.triangleStart + prim.offset];
-            const glm::vec3& v0 = dev_sceneInfo.modelInfo.dev_vertices[tri[0]];
-            const glm::vec3& v1 = dev_sceneInfo.modelInfo.dev_vertices[tri[1]];
-            const glm::vec3& v2 = dev_sceneInfo.modelInfo.dev_vertices[tri[2]];
+            int meshID = obj.meshId;
+            TriangleMesh& mesh = dev_sceneInfo.m_dev_meshes[meshID];
+            const glm::ivec3& tri = mesh.m_triangles[prim.offset];
+            const glm::vec3& v0 = mesh.m_vertices[tri[0]];
+            const glm::vec3& v1 = mesh.m_vertices[tri[1]];
+            const glm::vec3& v2 = mesh.m_vertices[tri[2]];
             t = triangleIntersectionTest(obj.Transform, v0, v1, v2, *ray, tmp_intersect, tmp_normal, tmp_baryCoord);
-            if (dev_sceneInfo.modelInfo.dev_uvs)
+            if (mesh.m_uvs)
             {
-                const glm::vec2& uv0 = dev_sceneInfo.modelInfo.dev_uvs[tri[0]];
-                const glm::vec2& uv1 = dev_sceneInfo.modelInfo.dev_uvs[tri[1]];
-                const glm::vec2& uv2 = dev_sceneInfo.modelInfo.dev_uvs[tri[2]];
+                const glm::vec2& uv0 = mesh.m_uvs[tri[0]];
+                const glm::vec2& uv1 = mesh.m_uvs[tri[1]];
+                const glm::vec2& uv2 = mesh.m_uvs[tri[2]];
                 tmp_uv = uv0 * tmp_baryCoord[0] + uv1 * tmp_baryCoord[1] + uv2 * tmp_baryCoord[2];
             }
-            if (dev_sceneInfo.modelInfo.dev_normals)
+            if (mesh.m_normals)
             {
-                const glm::vec3& n0 = dev_sceneInfo.modelInfo.dev_normals[tri[0]];
-                const glm::vec3& n1 = dev_sceneInfo.modelInfo.dev_normals[tri[1]];
-                const glm::vec3& n2 = dev_sceneInfo.modelInfo.dev_normals[tri[2]];
+                const glm::vec3& n0 = mesh.m_normals[tri[0]];
+                const glm::vec3& n1 = mesh.m_normals[tri[1]];
+                const glm::vec3& n2 = mesh.m_normals[tri[2]];
                 tmp_normal = n0 * tmp_baryCoord[0] + n1 * tmp_baryCoord[1] + n2 * tmp_baryCoord[2];
                 tmp_normal = glm::vec3(obj.Transform.invTranspose * glm::vec4(tmp_normal, 0.0));//TODO: precompute transformation
             }
-            if (dev_sceneInfo.modelInfo.dev_tangents)
+            // TODO
+            /*if (dev_sceneInfo.modelInfo.dev_tangents)
             {
                 const glm::vec3& t0 = dev_sceneInfo.modelInfo.dev_tangents[tri[0]];
                 const glm::vec3& t1 = dev_sceneInfo.modelInfo.dev_tangents[tri[1]];
                 const glm::vec3& t2 = dev_sceneInfo.modelInfo.dev_tangents[tri[2]];
                 tmp_tangent = t0 * tmp_baryCoord[0] + t1 * tmp_baryCoord[1] + t2 * tmp_baryCoord[2];
                 tmp_tangent = glm::vec3(obj.Transform.invTranspose * glm::vec4(tmp_tangent, 0.0));
-            }
+            }*/
         }
         else if (obj.type == CUBE)
         {
@@ -408,12 +411,15 @@ __device__ bool util_bvh_leaf_intersect(
         }
 
     }
-    const Primitive& prim = dev_sceneInfo.dev_primitives[intersection->primitiveId];
-    int objID = prim.objID;
-    const Object& obj = dev_sceneInfo.dev_objs[objID];
-    if (obj.mediumIn != obj.mediumOut)
+    if (intersected)
     {
-        ray->medium = glm::dot(ray->direction, intersection->surfaceNormal) > 0 ? obj.mediumIn : obj.mediumOut;
+        const Primitive& prim = dev_sceneInfo.dev_primitives[intersection->primitiveId];
+        int objID = prim.objID;
+        const Object& obj = dev_sceneInfo.dev_objs[objID];
+        if (obj.mediumIn != obj.mediumOut)
+        {
+            ray->medium = glm::dot(ray->direction, intersection->surfaceNormal) > 0 ? obj.mediumIn : obj.mediumOut;
+        }
     }
     return intersected;
 }
@@ -434,10 +440,12 @@ __device__ inline float util_bvh_leaf_test_intersect(
         const Object& obj = dev_sceneInfo.dev_objs[objID];
         if (obj.type == TRIANGLE_MESH)
         {
-            const glm::ivec3& tri = dev_sceneInfo.modelInfo.dev_triangles[obj.triangleStart + prim.offset];
-            const glm::vec3& v0 = dev_sceneInfo.modelInfo.dev_vertices[tri[0]];
-            const glm::vec3& v1 = dev_sceneInfo.modelInfo.dev_vertices[tri[1]];
-            const glm::vec3& v2 = dev_sceneInfo.modelInfo.dev_vertices[tri[2]];
+            int meshID = obj.meshId;
+            TriangleMesh& mesh = dev_sceneInfo.m_dev_meshes[meshID];
+            const glm::ivec3& tri = mesh.m_triangles[prim.offset];
+            const glm::vec3& v0 = mesh.m_vertices[tri[0]];
+            const glm::vec3& v1 = mesh.m_vertices[tri[1]];
+            const glm::vec3& v2 = mesh.m_vertices[tri[2]];
             t = triangleIntersectionTest(obj.Transform, v0, v1, v2, ray, tmp_intersect, tmp_normal, tmp_baryCoord);
         }
         else if (obj.type == CUBE)
@@ -456,45 +464,45 @@ __device__ inline float util_bvh_leaf_test_intersect(
     return tmin;
 }
 
-__device__ bool util_test_visibility(glm::vec3 p0, glm::vec3 p1, const SceneInfoDev& dev_sceneInfo)
-{
-    glm::vec3 dir = p1 - p0;
-    if (glm::length(dir) < 0.001f) return true;
-    Ray ray;
-    ray.direction = glm::normalize(dir);
-    ray.origin = p0;
-    glm::vec3 t3 = (dir / ray.direction);
-    float t, tmax = max(t3.x, max(t3.y, t3.z)) - 0.001f;
-    glm::vec3 tmp_intersect, tmp_normal, tmp_baryCoord;
-    for (int i = 0; i < dev_sceneInfo.objectsSize; i++)
-    {
-        Object& obj = dev_sceneInfo.dev_objs[i];
-        if (obj.type == GeomType::CUBE)
-        {
-            t = boxIntersectionTest(obj, ray, tmp_intersect, tmp_normal);
-            if (t > 0.0 && t < tmax) return false;
-        }
-        else if (obj.type == GeomType::SPHERE)
-        {
-            t = util_geometry_ray_sphere_intersection(obj, ray, tmp_intersect, tmp_normal);
-            if (t > 0.0 && t < tmax) return false;
-        }
-        else
-        {
-            for (int j = obj.triangleStart; j != obj.triangleEnd; j++)
-            {
-                const glm::ivec3& tri = dev_sceneInfo.modelInfo.dev_triangles[j];
-                const glm::vec3& v0 = dev_sceneInfo.modelInfo.dev_vertices[tri[0]];
-                const glm::vec3& v1 = dev_sceneInfo.modelInfo.dev_vertices[tri[1]];
-                const glm::vec3& v2 = dev_sceneInfo.modelInfo.dev_vertices[tri[2]];
-                t = triangleIntersectionTest(obj.Transform, v0, v1, v2, ray, tmp_intersect, tmp_normal, tmp_baryCoord);
-                if (t > 0.0 && t < tmax) return false;
-            }
-        }
-
-    }
-    return true;
-}
+//__device__ bool util_test_visibility(glm::vec3 p0, glm::vec3 p1, const SceneInfoDev& dev_sceneInfo)
+//{
+//    glm::vec3 dir = p1 - p0;
+//    if (glm::length(dir) < 0.001f) return true;
+//    Ray ray;
+//    ray.direction = glm::normalize(dir);
+//    ray.origin = p0;
+//    glm::vec3 t3 = (dir / ray.direction);
+//    float t, tmax = max(t3.x, max(t3.y, t3.z)) - 0.001f;
+//    glm::vec3 tmp_intersect, tmp_normal, tmp_baryCoord;
+//    for (int i = 0; i < dev_sceneInfo.objectsSize; i++)
+//    {
+//        Object& obj = dev_sceneInfo.dev_objs[i];
+//        if (obj.type == GeomType::CUBE)
+//        {
+//            t = boxIntersectionTest(obj, ray, tmp_intersect, tmp_normal);
+//            if (t > 0.0 && t < tmax) return false;
+//        }
+//        else if (obj.type == GeomType::SPHERE)
+//        {
+//            t = util_geometry_ray_sphere_intersection(obj, ray, tmp_intersect, tmp_normal);
+//            if (t > 0.0 && t < tmax) return false;
+//        }
+//        else
+//        {
+//            for (int j = obj.triangleStart; j != obj.triangleEnd; j++)
+//            {
+//                const glm::ivec3& tri = dev_sceneInfo.modelInfo.dev_triangles[j];
+//                const glm::vec3& v0 = dev_sceneInfo.modelInfo.dev_vertices[tri[0]];
+//                const glm::vec3& v1 = dev_sceneInfo.modelInfo.dev_vertices[tri[1]];
+//                const glm::vec3& v2 = dev_sceneInfo.modelInfo.dev_vertices[tri[2]];
+//                t = triangleIntersectionTest(obj.Transform, v0, v1, v2, ray, tmp_intersect, tmp_normal, tmp_baryCoord);
+//                if (t > 0.0 && t < tmax) return false;
+//            }
+//        }
+//
+//    }
+//    return true;
+//}
 
 __device__ bool util_bvh_test_visibility(glm::vec3 p0, glm::vec3 p1, const SceneInfoDev& dev_sceneInfo)
 {

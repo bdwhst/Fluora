@@ -4,8 +4,7 @@
 __device__ cuda::atomic<int, cuda::thread_scope_device> numShadowRays{ 0 };
 
 __global__ void compute_intersection_bvh_no_volume_mis(
-	int depth
-	, int num_paths
+	int num_paths
 	, PathSegment* pathSegments
 	, SceneInfoDev dev_sceneInfo
 	, ShadeableIntersection* intersections
@@ -25,13 +24,12 @@ __global__ void compute_intersection_bvh_no_volume_mis(
 	if (intersected)
 	{
 		intersections[path_index] = tmpIntersection;
-		pathSegment.remainingBounces--;
 	}
 	else if (lightSampler.have_infinite_light())
 	{
 		LightPtr infLight = lightSampler.get_infinite_light();
 		SampledSpectrum L = infLight.L({}, {}, {}, ray.direction, pathSegment.lambda) * pathSegment.transport;
-		if (!(depth == 0 || pathSegment.prevSpecular))
+		if (!(pathSegment.depth == 0 || pathSegment.prevSpecular))
 		{
 			float p_l = lightSampler.pmf(infLight) * infLight.pdf_Li({}, ray.direction, {});
 			float w_b = math::sqr(pathSegment.lastMatPdf) / (math::sqr(pathSegment.lastMatPdf) + math::sqr(p_l));
@@ -64,7 +62,7 @@ __global__ void sample_Ld_volume(
 	ctx.pi = shadowRaySegment.pWorld;
 	ctx.dev_primitives = sceneInfo.dev_primitives;
 	ctx.dev_objects = sceneInfo.dev_objs;
-	ctx.modelInfo = sceneInfo.modelInfo;
+	ctx.dev_meshes = sceneInfo.m_dev_meshes;
 
 	SampledLight sampledLight = lightSampler.sample(ctx, u01(rng));
 	if (sampledLight.pdf == 0.0f)
@@ -185,7 +183,6 @@ __global__ void sample_Ld_volume(
 // rl => pdf(lambda i of light sampling) / pdf(current path)
 __global__ void compute_intersection_bvh_volume_mis(
 	int iter
-	, int depth
 	, int num_paths
 	, PathSegment* pathSegments
 	, SceneInfoDev dev_sceneInfo
@@ -208,7 +205,7 @@ __global__ void compute_intersection_bvh_volume_mis(
 	{
 		thrust::default_random_engine& rng = pathSegment.rng;
 		thrust::uniform_int_distribution<int> int_dist;
-		thrust::default_random_engine tmaj_rng(int_dist(rng));
+		thrust::default_random_engine tmaj_rng = makeSeededRandomEngine(iter, int_dist(rng), 0);
 
 		float t_max = intersected_surface ? tmpIntersection.t : FLT_MAX;
 		SampledSpectrum T_maj = sample_Tmaj(dev_sceneInfo.dev_media, ray, t_max, tmaj_rng, pathSegment.lambda, [&](const glm::vec3& p, MediumProperties mp, SampledSpectrum sigma_maj, SampledSpectrum T_maj) {
@@ -245,9 +242,8 @@ __global__ void compute_intersection_bvh_volume_mis(
 			}
 			else if (uMode >= pAbsorb && uMode < pAbsorb + pScatter)
 			{
-				pathSegment.remainingBounces--;
-				int bounces = pathSegment.remainingBounces;
-				if (bounces == 0)
+				int depth = ++pathSegment.depth;
+				if (depth >= MAX_DEPTH)
 				{
 					ternminated = true;
 					return false;
@@ -261,7 +257,7 @@ __global__ void compute_intersection_bvh_volume_mis(
 				{
 					int currNumShadowRays = numShadowRays.fetch_add(1);
 					// TODO: add shadow ray here
-					thrust::default_random_engine ld_rng(int_dist(tmaj_rng) ^ (bounces << 8));
+					thrust::default_random_engine ld_rng(int_dist(tmaj_rng) ^ (depth << 8));
 					shadowRaySegments[currNumShadowRays].transport = pathSegment.transport;
 					shadowRaySegments[currNumShadowRays].lambda = pathSegment.lambda;
 					shadowRaySegments[currNumShadowRays].normalWorld = glm::normalize(-ray.direction);
@@ -333,9 +329,8 @@ __global__ void compute_intersection_bvh_volume_mis(
 	}
 
 
-
 	// If there is no real scatter and a intersection with surface occurs
-	// We are intersecting with a medium interface or a light surface
+	// We are intersecting with a medium interface or a light surface or a material surface
 	// Continue travese through the current ray dir, but change the origin to be the intersection point
 	if (intersected_surface)
 	{
@@ -350,7 +345,7 @@ __global__ void compute_intersection_bvh_volume_mis(
 	{
 		LightPtr infLight = lightSampler.get_infinite_light();
 		SampledSpectrum L = infLight.L({}, {}, {}, ray.direction, pathSegment.lambda) * pathSegment.transport;
-		if (depth == 0 || pathSegment.prevSpecular)
+		if (pathSegment.depth == 0 || pathSegment.prevSpecular)
 		{
 			L /= pathSegment.r_u.average();
 		}
@@ -360,8 +355,12 @@ __global__ void compute_intersection_bvh_volume_mis(
 			SampledSpectrum r_l = pathSegment.r_l * p_l;
 			L /= (r_l + pathSegment.r_u).average();
 		}
-		glm::vec3 sensorRGB = dev_sceneInfo.pixelSensor->to_sensor_rgb(L, pathSegment.lambda);
-		dev_film->add_radiance(sensorRGB, pathSegment.pixelIndex);
+		// TODO: resolve this nan
+		if (!L.is_nan())
+		{
+			glm::vec3 sensorRGB = dev_sceneInfo.pixelSensor->to_sensor_rgb(L, pathSegment.lambda);
+			dev_film->add_radiance(sensorRGB, pathSegment.pixelIndex);
+		}
 		rayValid[path_index] = false;
 	}
 }
@@ -390,7 +389,7 @@ __global__ void sample_Ld(
 	ctx.pi = shadowRaySegment.pWorld;
 	ctx.dev_primitives = sceneInfo.dev_primitives;
 	ctx.dev_objects = sceneInfo.dev_objs;
-	ctx.modelInfo = sceneInfo.modelInfo;
+	ctx.dev_meshes = sceneInfo.m_dev_meshes;
 
 	SampledLight sampledLight = lightSampler.sample(ctx, u01(rng));
 	if (sampledLight.pdf == 0.0f)
@@ -448,7 +447,6 @@ GPU_UNROLL
 
 __global__ void scatter_on_intersection_mis(
 	int iter
-	, int depth
 	, int num_paths
 	, ShadeableIntersection* shadeableIntersections
 	, PathSegment* pathSegments
@@ -475,7 +473,7 @@ __global__ void scatter_on_intersection_mis(
 		SampledSpectrum Le = material.Cast<EmissiveMaterial>()->Le(pathSegment.lambda);
 		SampledSpectrum L = pathSegment.transport * Le;
 		rayValid[idx] = false;
-		if (depth == 0 || pathSegment.prevSpecular)
+		if (pathSegment.depth == 0 || pathSegment.prevSpecular)
 		{
 			dev_film->add_radiance(sceneInfo.pixelSensor->to_sensor_rgb(L, pathSegment.lambda), pathSegment.pixelIndex);
 		}
@@ -485,7 +483,7 @@ __global__ void scatter_on_intersection_mis(
 			ctx.pi = pathSegment.ray.origin;
 			ctx.dev_primitives = sceneInfo.dev_primitives;
 			ctx.dev_objects = sceneInfo.dev_objs;
-			ctx.modelInfo = sceneInfo.modelInfo;
+			ctx.dev_meshes = sceneInfo.m_dev_meshes;
 			LightPtr light = lightSampler.get_light(intersection.lightId);
 			float p_l = lightSampler.pmf(ctx, light) * light.pdf_Li(ctx, intersection.worldPos, intersection.surfaceNormal);
 			float w_b = math::sqr(pathSegment.lastMatPdf) / (math::sqr(pathSegment.lastMatPdf) + math::sqr(p_l));
@@ -496,6 +494,11 @@ __global__ void scatter_on_intersection_mis(
 	else {
 		// For now if we encounter some non-emissive surface while rendering volumetrics, just error exit
 		assert(sceneInfo.containsVolume == false);
+		if (++pathSegments[idx].depth >= MAX_DEPTH)
+		{
+			rayValid[idx] = false;
+			return;
+		}
 		glm::vec3& woInWorld = pathSegments[idx].ray.direction;
 		glm::vec3 N = glm::normalize(intersection.surfaceNormal);
 		math::Frame frame = math::Frame::from_z(N);
@@ -537,8 +540,7 @@ __global__ void scatter_on_intersection_mis(
 			pathSegments[idx].transport *= f / pdf;
 			glm::vec3 newDir = glm::normalize(frame.from_local(wi));
 			glm::vec3 offset = glm::dot(newDir, N) < 0 ? -N : N;
-			float offsetMult = !material.Is<DielectricMaterial>() ? SCATTER_ORIGIN_OFFSETMULT : SCATTER_ORIGIN_OFFSETMULT * 100.0f;
-			pathSegments[idx].ray.origin = intersection.worldPos + offset * offsetMult;
+			pathSegments[idx].ray.origin = intersection.worldPos + offset * SCATTER_ORIGIN_OFFSETMULT;
 			pathSegments[idx].ray.direction = newDir;
 			pathSegments[idx].lastMatPdf = pdf;
 			rayValid[idx] = true;
@@ -747,7 +749,6 @@ __global__ void scatter_on_intersection_mis(
 
 __global__ void scatter_on_intersection_volume_mis(
 	int iter
-	, int depth
 	, int num_paths
 	, ShadeableIntersection* shadeableIntersections
 	, PathSegment* pathSegments
@@ -782,7 +783,7 @@ __global__ void scatter_on_intersection_volume_mis(
 	// If the material indicates that the object was a light, "light" the ray
 	if (material.Is<EmissiveMaterial>()) {
 		SampledSpectrum L = pathSegment.transport * material.Cast<EmissiveMaterial>()->Le(pathSegment.lambda);
-		if (depth == 0 || pathSegment.prevSpecular)
+		if (pathSegment.depth == 0 || pathSegment.prevSpecular)
 		{
 			L /= pathSegment.r_u.average();
 		}
@@ -793,7 +794,7 @@ __global__ void scatter_on_intersection_volume_mis(
 			ctx.pi = pathSegment.ray.origin;
 			ctx.dev_primitives = sceneInfo.dev_primitives;
 			ctx.dev_objects = sceneInfo.dev_objs;
-			ctx.modelInfo = sceneInfo.modelInfo;
+			ctx.dev_meshes = sceneInfo.m_dev_meshes;
 			LightPtr light = lightSampler.get_light(lightId);
 			float lightPdf = lightSampler.pmf(ctx, light) * light.pdf_Li(ctx, intersection.worldPos, intersection.surfaceNormal);
 			SampledSpectrum r_l = pathSegment.r_l * lightPdf;
@@ -807,6 +808,11 @@ __global__ void scatter_on_intersection_volume_mis(
 		}
 	}
 	else {
+		if (++pathSegments[idx].depth >= MAX_DEPTH)
+		{
+			rayValid[idx] = false;
+			return;
+		}
 		glm::vec3& woInWorld = pathSegments[idx].ray.direction;
 		glm::vec3 nMap = glm::vec3(0, 0, 1);
 
@@ -856,8 +862,7 @@ __global__ void scatter_on_intersection_volume_mis(
 			pathSegments[idx].r_l = pathSegments[idx].r_u / pdf;
 			glm::vec3 newDir = glm::normalize(frame.from_local(wi));
 			glm::vec3 offset = glm::dot(newDir, N) < 0 ? -N : N;
-			float offsetMult = !material.Is<DielectricMaterial>() ? SCATTER_ORIGIN_OFFSETMULT : SCATTER_ORIGIN_OFFSETMULT * 100.0f;
-			pathSegments[idx].ray.origin = intersection.worldPos + offset * offsetMult;
+			pathSegments[idx].ray.origin = intersection.worldPos + offset * SCATTER_ORIGIN_OFFSETMULT;
 			pathSegments[idx].ray.direction = newDir;
 			rayValid[idx] = true;
 		}

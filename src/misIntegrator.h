@@ -5,8 +5,7 @@
 #include "lightSampler.h"
 
 __global__ void compute_intersection_bvh_no_volume_mis(
-	int depth
-	, int num_paths
+	int num_paths
 	, PathSegment* pathSegments
 	, SceneInfoDev dev_sceneInfo
 	, ShadeableIntersection* intersections
@@ -25,7 +24,6 @@ __global__ void sample_Ld_volume(
 
 __global__ void compute_intersection_bvh_volume_mis(
 	int iter
-	, int depth
 	, int num_paths
 	, PathSegment* pathSegments
 	, SceneInfoDev dev_sceneInfo
@@ -48,7 +46,6 @@ __global__ void sample_Ld(
 
 __global__ void scatter_on_intersection_mis(
 	int iter
-	, int depth
 	, int num_paths
 	, ShadeableIntersection* shadeableIntersections
 	, PathSegment* pathSegments
@@ -61,7 +58,6 @@ __global__ void scatter_on_intersection_mis(
 
 __global__ void scatter_on_intersection_volume_mis(
 	int iter
-	, int depth
 	, int num_paths
 	, ShadeableIntersection* shadeableIntersections
 	, PathSegment* pathSegments

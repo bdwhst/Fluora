@@ -122,32 +122,7 @@ void pathtraceInit(Scene* scene, Allocator alloc) {
 	cudaMalloc(&dev_objs, scene->objects.size() * sizeof(Object));
 	cudaMemcpy(dev_objs, scene->objects.data(), scene->objects.size() * sizeof(Object), cudaMemcpyHostToDevice);
 
-	if (scene->triangles.size())
-	{
-		cudaMalloc(&dev_triangles, scene->triangles.size() * sizeof(glm::ivec3));
-		cudaMemcpy(dev_triangles, scene->triangles.data(), scene->triangles.size() * sizeof(glm::ivec3), cudaMemcpyHostToDevice);
 
-		cudaMalloc(&dev_vertices, scene->verticies.size() * sizeof(glm::vec3));
-		cudaMemcpy(dev_vertices, scene->verticies.data(), scene->verticies.size() * sizeof(glm::vec3), cudaMemcpyHostToDevice);
-
-		cudaMalloc(&dev_uvs, scene->uvs.size() * sizeof(glm::vec2));
-		cudaMemcpy(dev_uvs, scene->uvs.data(), scene->uvs.size() * sizeof(glm::vec2), cudaMemcpyHostToDevice);
-		if (scene->normals.size())
-		{
-			cudaMalloc(&dev_normals, scene->normals.size() * sizeof(glm::vec3));
-			cudaMemcpy(dev_normals, scene->normals.data(), scene->normals.size() * sizeof(glm::vec3), cudaMemcpyHostToDevice);
-		}
-		if (scene->tangents.size())
-		{
-			cudaMalloc(&dev_tangents, scene->tangents.size() * sizeof(glm::vec3));
-			cudaMemcpy(dev_tangents, scene->tangents.data(), scene->tangents.size() * sizeof(glm::vec3), cudaMemcpyHostToDevice);
-		}
-		if (scene->fSigns.size())
-		{
-			cudaMalloc(&dev_fsigns, scene->fSigns.size() * sizeof(float));
-			cudaMemcpy(dev_fsigns, scene->fSigns.data(), scene->fSigns.size() * sizeof(float), cudaMemcpyHostToDevice);
-		}
-	}
 
 #if MTBVH
 	cudaMalloc(&dev_mtbvhArray, scene->MTBVHArray.size() * sizeof(MTBVHGPUNode));
@@ -212,24 +187,7 @@ void pathtraceFree(Scene* scene) {
 	cudaFree(dev_paths1);
 	cudaFree(dev_paths2);
 	cudaFree(dev_objs);
-	if (scene->triangles.size())
-	{
-		cudaFree(dev_triangles);
-		cudaFree(dev_vertices);
-		cudaFree(dev_uvs);
-		if (scene->normals.size())
-		{
-			cudaFree(dev_normals);
-		}
-		if (scene->tangents.size())
-		{
-			cudaFree(dev_tangents);
-		}
-		if (scene->fSigns.size())
-		{
-			cudaFree(dev_fsigns);
-		}
-	}
+	cudaFree(dev_shadowRayPaths);
 	cudaFree(dev_primitives);
 	if (scene->lights.size())
 	{
@@ -320,7 +278,7 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
 		);
 #endif
 		segment.pixelIndex = index;
-		segment.remainingBounces = traceDepth;
+		segment.depth = 0;
 		segment.lastMatPdf = -1;
 		// TODO: change this to camera's medium
 		segment.ray.medium = -1;
@@ -385,12 +343,7 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 	}
 	dev_sceneInfo.dev_objs = dev_objs;
 	dev_sceneInfo.objectsSize = hst_scene->objects.size();
-	dev_sceneInfo.modelInfo.dev_triangles = dev_triangles;
-	dev_sceneInfo.modelInfo.dev_vertices = dev_vertices;
-	dev_sceneInfo.modelInfo.dev_normals = dev_normals;
-	dev_sceneInfo.modelInfo.dev_uvs = dev_uvs;
-	dev_sceneInfo.modelInfo.dev_tangents = dev_tangents;
-	dev_sceneInfo.modelInfo.dev_fsigns = dev_fsigns;
+	dev_sceneInfo.m_dev_meshes = hst_scene->m_dev_triangleMeshes;
 	dev_sceneInfo.dev_primitives = dev_primitives;
 #if USE_BVH
 #if MTBVH
@@ -453,8 +406,7 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 				if (mainIntegratorType == IntegratorType::naive)
 				{
 					compute_intersection_bvh_no_volume << <numblocksPathSegmentTracing, blockSize1d >> > (
-						depth
-						, numRays
+						numRays
 						, dev_paths1
 						, dev_sceneInfo
 						, dev_intersections1
@@ -466,8 +418,7 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 				else if (mainIntegratorType == IntegratorType::mis)
 				{
 					compute_intersection_bvh_no_volume_mis << <numblocksPathSegmentTracing, blockSize1d >> > (
-						depth
-						, numRays
+						numRays
 						, dev_paths1
 						, dev_sceneInfo
 						, dev_intersections1
@@ -483,7 +434,6 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 				{
 					compute_intersection_bvh_volume_naive << <numblocksPathSegmentTracing, blockSize1d >> > (
 						iter
-						, depth
 						, numRays
 						, dev_paths1
 						, dev_sceneInfo
@@ -497,7 +447,6 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 				{
 					compute_intersection_bvh_volume_mis << <numblocksPathSegmentTracing, blockSize1d >> > (
 						iter
-						, depth
 						, numRays
 						, dev_paths1
 						, dev_sceneInfo
@@ -551,7 +500,6 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 			{
 				scatter_on_intersection_volume_mis << <numblocksPathSegmentTracing, blockSize1d, BxDFMaxSize* blockSize1d >> > (
 					iter,
-					depth,
 					numRays,
 					dev_intersections1,
 					dev_paths1,
@@ -566,7 +514,6 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 			{
 				scatter_on_intersection_mis << <numblocksPathSegmentTracing, blockSize1d, BxDFMaxSize* blockSize1d >> > (
 					iter,
-					depth,
 					numRays,
 					dev_intersections1,
 					dev_paths1,

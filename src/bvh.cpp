@@ -28,6 +28,7 @@ float BoxArea(const BoundingBox& b)
 
 Primitive::Primitive(const Object& obj, int objID, int triangleOffset, const glm::ivec3* triangles, const glm::vec3* vertices)
 {
+	assert(objID >= 0);
 	this->lightID = -1;
 	this->objID = objID;
 	this->offset = triangleOffset;
@@ -42,7 +43,7 @@ Primitive::Primitive(const Object& obj, int objID, int triangleOffset, const glm
 	}
 	else if (obj.type == TRIANGLE_MESH)
 	{
-		const glm::ivec3& tri = triangles[obj.triangleStart+offset];
+		const glm::ivec3& tri = triangles[offset];
 		for (int i = 0; i < 3; i++)
 		{
 			const glm::vec3& vert = vertices[tri[i]];
@@ -53,6 +54,11 @@ Primitive::Primitive(const Object& obj, int objID, int triangleOffset, const glm
 	bbox.pMin -= glm::vec3(BOUNDING_BOX_EXPAND);
 	bbox.pMax += glm::vec3(BOUNDING_BOX_EXPAND);
 	assert(bbox.pMin.x < bbox.pMax.x && bbox.pMin.y < bbox.pMax.y && bbox.pMin.z < bbox.pMax.z);
+	glm::vec3 diag = bbox.pMax - bbox.pMin;
+	/*if (diag.x < SCATTER_ORIGIN_OFFSETMULT || diag.y < SCATTER_ORIGIN_OFFSETMULT || diag.z < SCATTER_ORIGIN_OFFSETMULT)
+	{
+		std::cout << "Primitive bounding box size is less than SCATTER_ORIGIN_OFFSETMULT" << std::endl;
+	}*/
 }
 
 BVHNode* buildBVHTreeRecursiveSAH(std::vector<Primitive>& primitives, int start, int end, int* size)

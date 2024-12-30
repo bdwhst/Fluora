@@ -18,8 +18,8 @@
 #define VIS_NORMAL 0
 #define TONEMAPPING 1
 #define DOF_ENABLED 1
-#define SCATTER_ORIGIN_OFFSETMULT 0.001f
-#define BOUNDING_BOX_EXPAND 0.001f
+#define SCATTER_ORIGIN_OFFSETMULT 0.00035f
+#define BOUNDING_BOX_EXPAND 0.0001f
 #define ALPHA_CUTOFF 0.01f
 #define STOCHASTIC_SAMPLING 1
 #define FIRST_INTERSECTION_CACHING 1
@@ -63,10 +63,19 @@ struct ObjectTransform {
 struct Object {
     enum GeomType type;
     int materialid = -1;
-    int triangleStart, triangleEnd;
+    int meshId = -1;
     int mediumIn = -1, mediumOut = -1;
     ObjectTransform Transform;
 };
+
+struct TriangleMesh
+{
+    glm::vec3* m_vertices = nullptr;
+    glm::vec3* m_normals = nullptr;
+    glm::vec2* m_uvs = nullptr;
+    glm::ivec3* m_triangles = nullptr;
+};
+
 
 struct BoundingBox {
     glm::vec3 pMin, pMax;
@@ -194,7 +203,7 @@ struct PathSegment {
     SampledSpectrum r_u, r_l;
     SampledWavelengths lambda;
     int pixelIndex;
-    int remainingBounces;
+    int depth;
     float lastMatPdf;
     bool prevSpecular;
     thrust::default_random_engine rng;
@@ -230,21 +239,14 @@ struct ShadeableIntersection {
     glm::vec2 uv = glm::vec2(0.0);
 };
 
-struct ModelInfoDev {
-    glm::ivec3* dev_triangles;
-    glm::vec3* dev_vertices;
-    glm::vec2* dev_uvs;
-    glm::vec3* dev_normals;
-    glm::vec3* dev_tangents;
-    float* dev_fsigns;
-};
+
 
 struct SceneInfoDev {
     MaterialPtr* dev_materials;
     MediumPtr* dev_media;
     Object* dev_objs;
     int objectsSize;
-    ModelInfoDev modelInfo;
+    TriangleMesh* m_dev_meshes;
     Primitive* dev_primitives;
     union {
         BVHGPUNode* dev_bvhArray;

@@ -12,7 +12,7 @@ GLuint displayImage;
 extern uint64_t sysTime;
 extern uint64_t delta_t;
 
-float camera_speed = 10.0f;
+float camera_speed = 0.2f;
 
 GLFWwindow* window;
 GuiDataContainer* imguiData = NULL;
@@ -249,7 +249,7 @@ void RenderImGui()
 	ImGui::Text("Integrator: %s", imguiData->integratorType.c_str());
 	ImGui::Text("%.3f ms/iter (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
 	ImGui::Text("Elapsed time: %.2f sec", imguiData->elapsedTime);
-	ImGui::Text("Num triangles: %d", scene->triangles.size());
+	ImGui::Text("Num triangles: %d", scene->getTriangleSize());
 	ImGui::Text("Num bvh nodes: %d", scene->bvhTreeSize);
 	ImGui::Checkbox("Lock Controls", &lockControl);
 	ImGui::End();

@@ -5,8 +5,7 @@
 
 
 __global__ void compute_intersection_bvh_no_volume(
-	int depth
-	, int num_paths
+	int num_paths
 	, PathSegment* pathSegments
 	, SceneInfoDev dev_sceneInfo
 	, ShadeableIntersection* intersections
@@ -26,7 +25,6 @@ __global__ void compute_intersection_bvh_no_volume(
 	if (intersected)
 	{
 		intersections[path_index] = tmpIntersection;
-		pathSegment.remainingBounces--;
 	}
 	else if (dev_skyboxLight)
 	{
@@ -40,7 +38,6 @@ __global__ void compute_intersection_bvh_no_volume(
 // Does not handle surface intersection
 __global__ void compute_intersection_bvh_volume_naive(
 	int iter
-	, int depth
 	, int num_paths
 	, PathSegment* pathSegments
 	, SceneInfoDev dev_sceneInfo
@@ -60,11 +57,6 @@ __global__ void compute_intersection_bvh_volume_naive(
 	pathSegment.lambda.terminate_secondary();
 	bool scattered_in_medium = false, absorbed_in_medium = false;
 
-	// FIXED: Triangle intersection is now watertight
-	if (intersected_surface && depth == 0 && ray.medium != -1)
-	{
-		assert(0);
-	}
 
 	if (ray.medium != -1)
 	{
@@ -92,9 +84,8 @@ __global__ void compute_intersection_bvh_volume_naive(
 			}
 			else if (uMode >= pAbsorb && uMode < pAbsorb + pScatter)
 			{
-				pathSegment.remainingBounces--;
-				int bounces = pathSegment.remainingBounces;
-				if (bounces == 0)
+				int depth = ++pathSegment.depth;
+				if (depth >= MAX_DEPTH)
 				{
 					return false;
 				}
@@ -193,6 +184,11 @@ __global__ void scatter_on_intersection(
 	else {
 		// For now if we encounter some non-emissive surface while rendering volumetrics, just error exit
 		assert(sceneInfo.containsVolume == false);
+		if (++pathSegments[idx].depth >= MAX_DEPTH)
+		{
+			rayValid[idx] = false;
+			return;
+		}
 		glm::vec3& woInWorld = pathSegments[idx].ray.direction;
 		glm::vec3 N = glm::normalize(intersection.surfaceNormal);
 		math::Frame frame = math::Frame::from_z(N);
@@ -287,8 +283,7 @@ __global__ void scatter_on_intersection(
 			pathSegments[idx].transport *= f / pdf;
 			glm::vec3 newDir = glm::normalize(frame.from_local(wi));
 			glm::vec3 offset = glm::dot(newDir, N) < 0 ? -N : N;
-			float offsetMult = !material.Is<DielectricMaterial>() ? SCATTER_ORIGIN_OFFSETMULT : SCATTER_ORIGIN_OFFSETMULT * 100.0f;
-			pathSegments[idx].ray.origin = intersection.worldPos + offset * offsetMult;
+			pathSegments[idx].ray.origin = intersection.worldPos + offset * SCATTER_ORIGIN_OFFSETMULT;
 			pathSegments[idx].ray.direction = newDir;
 			rayValid[idx] = true;
 		}

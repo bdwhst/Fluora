@@ -18,7 +18,7 @@ struct LightSampleContext {
     glm::vec3 pi,n,ns;
     Primitive* dev_primitives;
     Object* dev_objects;
-    ModelInfoDev modelInfo;
+    TriangleMesh* dev_meshes;
 };
 
 struct LightLiSample {

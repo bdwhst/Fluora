@@ -9,6 +9,8 @@
 #include <tiny_gltf.h>
 #define TINYOBJLOADER_IMPLEMENTATION
 #include <tiny_obj_loader.h>
+#define TINYPLY_IMPLEMENTATION
+#include <tinyply.h>
 #include <mikktspace.h>
 #include <unordered_map>
 #include <queue>
@@ -138,6 +140,15 @@ void Scene::loadJSON(const std::string& name)
                 params.insert_float("emittance", emittance);
                 params.insert_vec3("albedo", glm::vec3(val["RGB"][0], val["RGB"][1], val["RGB"][2]));
             }
+            else if (type == "dielectric")
+            {
+                auto& eta = val["ETA"];
+                if (eta["TYPE"] == "const")
+                {
+                    params.insert_float("eta", eta["VALUE"]);
+                }
+                // TODO
+            }
             int id = (int)LoadMaterialJobs.size();
             materialNameToId[key] = id;
             LoadMaterialJobs.emplace_back(type, params);
@@ -202,32 +213,30 @@ void Scene::loadJSON(const std::string& name)
         if (type == "model_inline")
         {
             new_obj.type = TRIANGLE_MESH;
-            int starting_index = verticies.size();
+            TriangleMeshData newMesh;
             for (int i = 0; i < ele["VERTICES"].size(); i += 3)
             {
                 glm::vec3 tmp_pos(ele["VERTICES"][i], ele["VERTICES"][i + 1], ele["VERTICES"][i + 2]);
-                verticies.emplace_back(tmp_pos);
+                newMesh.m_vertices.emplace_back(tmp_pos);
             }
-            new_obj.triangleStart = triangles.size();
             for (int i = 0; i < ele["INDICES"].size(); i += 3)
             {
-                glm::ivec3 tmp_idx(starting_index + ele["INDICES"][i], starting_index + ele["INDICES"][i + 1], starting_index + ele["INDICES"][i + 2]);
-                triangles.emplace_back(tmp_idx);
+                glm::ivec3 tmp_idx(ele["INDICES"][i], ele["INDICES"][i + 1], ele["INDICES"][i + 2]);
+                newMesh.m_triangles.emplace_back(tmp_idx);
             }
-            new_obj.triangleEnd = triangles.size();
+            
 
             if (ele.contains("NORMALS"))
             {
                 // TODO
                 assert(0);
             }
-
-            // materialid == -1 is possible for pure interface for medium
-            if (ele.contains("MATERIAL"))
-            {
-                // TODO
-                assert(0);
-            }    
+            new_obj.meshId = static_cast<int>(m_triangleMeshes.size());
+            m_triangleMeshes.emplace_back(std::move(newMesh));
+        }
+        else if (type == "model_ply")
+        {
+            loadPly(&new_obj,ele["PATH"]);
         }
         else if (type == "geometry_cube")
         {
@@ -433,6 +442,30 @@ void Scene::LoadAllLightsToGPU(Allocator alloc)
     }
 }
 
+void Scene::LoadAllMeshesToGPU(Allocator alloc)
+{
+    m_dev_triangleMeshes = alloc.allocate<TriangleMesh>(m_triangleMeshes.size());
+    for (int i=0;i<m_triangleMeshes.size();i++)
+    {
+        const auto& mesh = m_triangleMeshes[i];
+        TriangleMesh& dev_mesh = m_dev_triangleMeshes[i];
+        dev_mesh.m_vertices = alloc.allocate<glm::vec3>(mesh.m_vertices.size());
+        memcpy(dev_mesh.m_vertices, mesh.m_vertices.data(), sizeof(glm::vec3) * mesh.m_vertices.size());
+        dev_mesh.m_triangles = alloc.allocate<glm::ivec3>(mesh.m_triangles.size());
+        memcpy(dev_mesh.m_triangles, mesh.m_triangles.data(), sizeof(glm::ivec3) * mesh.m_triangles.size());
+        if (mesh.m_normals.size())
+        {
+            dev_mesh.m_normals = alloc.allocate<glm::vec3>(mesh.m_normals.size());
+            memcpy(dev_mesh.m_normals, mesh.m_normals.data(), sizeof(glm::vec3) * mesh.m_normals.size());
+        }
+        if (mesh.m_uvs.size())
+        {
+            dev_mesh.m_uvs = alloc.allocate<glm::vec2>(mesh.m_uvs.size());
+            memcpy(dev_mesh.m_uvs, mesh.m_uvs.data(), sizeof(glm::vec2) * mesh.m_uvs.size());
+        }
+    }
+}
+
 
 Scene::~Scene()
 {
@@ -608,69 +641,69 @@ static void GLTFNodeGetGlobalTransform(std::vector<tinygltf::Node>& nodes, int c
     }
 }
 
-int MikkTSpaceGetNumFaces(const SMikkTSpaceContext* pContext)
-{
-    MikkTSpaceHelper* helperStruct = (MikkTSpaceHelper*)pContext->m_pUserData;
-    auto& obj = helperStruct->scene->objects[helperStruct->i];
-    return obj.triangleEnd - obj.triangleStart;
-}
-
-int MikkTSpaceGetNumVerticesOfFace(const SMikkTSpaceContext* pContext, const int iFace) {
-    // return the number of vertices for the i'th face.
-    return 3;
-}
-
-void MikkTSpaceGetPosition(const SMikkTSpaceContext* pContext, float fvPosOut[], const int iFace, const int iVert) {
-    // fill fvPosOut with the position of vertex iVert of face iFace
-    MikkTSpaceHelper* helperStruct = (MikkTSpaceHelper*)pContext->m_pUserData;
-    auto scene = helperStruct->scene;
-    auto& obj = scene->objects[helperStruct->i];
-    int triIdx = obj.triangleStart + iFace;
-    auto& tri = scene->triangles[triIdx];
-    auto& pos = helperStruct->scene->verticies[tri[iVert]];
-    fvPosOut[0] = pos[0];
-    fvPosOut[1] = pos[1];
-    fvPosOut[2] = pos[2];
-}
-
-void MikkTSpaceGetNormal(const SMikkTSpaceContext* pContext, float fvNormOut[], const int iFace, const int iVert) {
-    // fill fvNormOut with the normal of vertex iVert of face iFace
-    MikkTSpaceHelper* helperStruct = (MikkTSpaceHelper*)pContext->m_pUserData;
-    auto scene = helperStruct->scene;
-    auto& obj = scene->objects[helperStruct->i];
-    int triIdx = obj.triangleStart + iFace;
-    auto& tri = scene->triangles[triIdx];
-    auto& norm = scene->normals[tri[iVert]];
-    fvNormOut[0] = norm[0];
-    fvNormOut[1] = norm[1];
-    fvNormOut[2] = norm[2];
-}
-
-void MikkTSpaceGetTexCoord(const SMikkTSpaceContext* pContext, float fvTexcOut[], const int iFace, const int iVert) {
-    // fill fvTexcOut with the texture coordinate of vertex iVert of face iFace
-    MikkTSpaceHelper* helperStruct = (MikkTSpaceHelper*)pContext->m_pUserData;
-    auto scene = helperStruct->scene;
-    auto& obj = scene->objects[helperStruct->i];
-    int triIdx = obj.triangleStart + iFace;
-    auto& tri = scene->triangles[triIdx];
-    auto& uv = scene->uvs[tri[iVert]];
-    fvTexcOut[0] = uv[0];
-    fvTexcOut[1] = uv[1];
-}
-
-void MikkTSpaceSetTSpaceBasic(const SMikkTSpaceContext* pContext, const float fvTangent[], const float fSign, const int iFace, const int iVert) {
-    // store the tangent and sign to your mesh vertex
-    MikkTSpaceHelper* helperStruct = (MikkTSpaceHelper*)pContext->m_pUserData;
-    auto scene = helperStruct->scene;
-    auto& obj = scene->objects[helperStruct->i];
-    int triIdx = obj.triangleStart + iFace;
-    auto& tri = scene->triangles[triIdx];
-    auto& tangent = scene->tangents[tri[iVert]];
-    tangent[0] = fvTangent[0];
-    tangent[1] = fvTangent[1];
-    tangent[2] = fvTangent[2];
-    scene->fSigns[tri[iVert]] = fSign;
-}
+//int MikkTSpaceGetNumFaces(const SMikkTSpaceContext* pContext)
+//{
+//    MikkTSpaceHelper* helperStruct = (MikkTSpaceHelper*)pContext->m_pUserData;
+//    auto& obj = helperStruct->scene->objects[helperStruct->i];
+//    return obj.triangleEnd - obj.triangleStart;
+//}
+//
+//int MikkTSpaceGetNumVerticesOfFace(const SMikkTSpaceContext* pContext, const int iFace) {
+//    // return the number of vertices for the i'th face.
+//    return 3;
+//}
+//
+//void MikkTSpaceGetPosition(const SMikkTSpaceContext* pContext, float fvPosOut[], const int iFace, const int iVert) {
+//    // fill fvPosOut with the position of vertex iVert of face iFace
+//    MikkTSpaceHelper* helperStruct = (MikkTSpaceHelper*)pContext->m_pUserData;
+//    auto scene = helperStruct->scene;
+//    auto& obj = scene->objects[helperStruct->i];
+//    int triIdx = obj.triangleStart + iFace;
+//    auto& tri = scene->triangles[triIdx];
+//    auto& pos = helperStruct->scene->verticies[tri[iVert]];
+//    fvPosOut[0] = pos[0];
+//    fvPosOut[1] = pos[1];
+//    fvPosOut[2] = pos[2];
+//}
+//
+//void MikkTSpaceGetNormal(const SMikkTSpaceContext* pContext, float fvNormOut[], const int iFace, const int iVert) {
+//    // fill fvNormOut with the normal of vertex iVert of face iFace
+//    MikkTSpaceHelper* helperStruct = (MikkTSpaceHelper*)pContext->m_pUserData;
+//    auto scene = helperStruct->scene;
+//    auto& obj = scene->objects[helperStruct->i];
+//    int triIdx = obj.triangleStart + iFace;
+//    auto& tri = scene->triangles[triIdx];
+//    auto& norm = scene->m_normals[tri[iVert]];
+//    fvNormOut[0] = norm[0];
+//    fvNormOut[1] = norm[1];
+//    fvNormOut[2] = norm[2];
+//}
+//
+//void MikkTSpaceGetTexCoord(const SMikkTSpaceContext* pContext, float fvTexcOut[], const int iFace, const int iVert) {
+//    // fill fvTexcOut with the texture coordinate of vertex iVert of face iFace
+//    MikkTSpaceHelper* helperStruct = (MikkTSpaceHelper*)pContext->m_pUserData;
+//    auto scene = helperStruct->scene;
+//    auto& obj = scene->objects[helperStruct->i];
+//    int triIdx = obj.triangleStart + iFace;
+//    auto& tri = scene->triangles[triIdx];
+//    auto& uv = scene->uvs[tri[iVert]];
+//    fvTexcOut[0] = uv[0];
+//    fvTexcOut[1] = uv[1];
+//}
+//
+//void MikkTSpaceSetTSpaceBasic(const SMikkTSpaceContext* pContext, const float fvTangent[], const float fSign, const int iFace, const int iVert) {
+//    // store the tangent and sign to your mesh vertex
+//    MikkTSpaceHelper* helperStruct = (MikkTSpaceHelper*)pContext->m_pUserData;
+//    auto scene = helperStruct->scene;
+//    auto& obj = scene->objects[helperStruct->i];
+//    int triIdx = obj.triangleStart + iFace;
+//    auto& tri = scene->triangles[triIdx];
+//    auto& tangent = scene->tangents[tri[iVert]];
+//    tangent[0] = fvTangent[0];
+//    tangent[1] = fvTangent[1];
+//    tangent[2] = fvTangent[2];
+//    scene->fSigns[tri[iVert]] = fSign;
+//}
 
 
 // load model using tinyobjloader and tinygltf
@@ -710,11 +743,13 @@ bool Scene::loadModel(const std::string& modelPath, int objectid, bool useVertex
             utilityCore::safeGetline(fp_in, line);
 
         }
-
-
-        std::unordered_map<std::pair<glm::vec3, glm::vec2>, unsigned> vertex_set;
+        int modelStartIdx = objects.size();
         for (const auto& shape : aShapes)
         {
+            TriangleMeshData newMesh;
+            Object model;
+            // TODO: check if this is necessary
+            std::unordered_map<std::pair<glm::vec3, glm::vec2>, uint32_t> vertexSet;
             for (const auto& index : shape.mesh.indices)
             {
                 glm::vec3 tmp_pos;
@@ -731,50 +766,43 @@ bool Scene::loadModel(const std::string& modelPath, int objectid, bool useVertex
                     tmp_normal.y = index.normal_index >= 0 ? attrib.normals[3 * index.normal_index + 1] : -1.0;
                     tmp_normal.z = index.normal_index >= 0 ? attrib.normals[3 * index.normal_index + 2] : -1.0;
                 }
-                auto newVert = make_pair(tmp_pos, tmp_uv);
-                if (!vertex_set.count(newVert))
+                auto vertexInfo = std::make_pair(tmp_pos, tmp_uv);
+                if (!vertexSet.count(vertexInfo))
                 {
-                    vertex_set[newVert] = verticies.size();
-                    verticies.emplace_back(tmp_pos);
-                    uvs.emplace_back(tmp_uv);
-                    if (useVertexNormal) normals.emplace_back(tmp_normal);             
+                    vertexSet[vertexInfo] = (uint32_t)vertexSet.size();
+                    newMesh.m_vertices.emplace_back(tmp_pos);
+                    newMesh.m_uvs.emplace_back(tmp_uv);
+                    if (useVertexNormal) newMesh.m_normals.emplace_back(tmp_normal);
                 }
             }
-        }
-
-        int modelStartIdx = objects.size();
-
-        for (const auto& shape : aShapes) 
-        {
-            Object model;
-            model.type = TRIANGLE_MESH;
-            model.triangleStart = triangles.size();
-            model.materialid = shape.mesh.material_ids[0] + matOffset;//Assume per mesh material
             size_t index_offset = 0;
-            for (size_t f = 0; f < shape.mesh.num_face_vertices.size(); f++) 
+            for (size_t f = 0; f < shape.mesh.num_face_vertices.size(); f++)
             {
                 int fv = shape.mesh.num_face_vertices[f];
                 assert(fv == 3);
                 glm::ivec3 triangle;
                 for (size_t v = 0; v < fv; v++) {
                     tinyobj::index_t idx = shape.mesh.indices[index_offset + v];
-                    glm::vec3 tmp;
-                    tmp.x = attrib.vertices[3 * idx.vertex_index + 0];
-                    tmp.y = attrib.vertices[3 * idx.vertex_index + 1];
-                    tmp.z = attrib.vertices[3 * idx.vertex_index + 2];
+                    glm::vec3 tmp_pos;
+                    tmp_pos.x = attrib.vertices[3 * idx.vertex_index + 0];
+                    tmp_pos.y = attrib.vertices[3 * idx.vertex_index + 1];
+                    tmp_pos.z = attrib.vertices[3 * idx.vertex_index + 2];
                     glm::vec2 tmp_uv;
                     tmp_uv.x = idx.texcoord_index >= 0 ? attrib.texcoords[2 * idx.texcoord_index + 0] : -1.0;
                     tmp_uv.y = idx.texcoord_index >= 0 ? attrib.texcoords[2 * idx.texcoord_index + 1] : -1.0;
-                    int vIdx = vertex_set[make_pair(tmp, tmp_uv)];
-                    assert(vIdx >= 0 && vIdx < verticies.size());
-                    triangle[v] = vIdx;
+                    auto vertexInfo = std::make_pair(tmp_pos, tmp_uv);
+                    triangle[v] = vertexSet[vertexInfo];
                 }
-                triangles.emplace_back(triangle);
+                newMesh.m_triangles.emplace_back(triangle);
                 index_offset += fv;
             }
-            model.triangleEnd = triangles.size();
+            model.type = TRIANGLE_MESH;
+            model.meshId = static_cast<int>(m_triangleMeshes.size());
+            model.materialid = shape.mesh.material_ids[0] + matOffset;//Assume per mesh material
             objects.emplace_back(model);
+            m_triangleMeshes.emplace_back(std::move(newMesh));
         }
+
         int modelEndIdx = objects.size();
 
         std::string line;
@@ -1122,7 +1150,100 @@ bool Scene::loadModel(const std::string& modelPath, int objectid, bool useVertex
     return true;
 }
 
+bool Scene::loadPly(Object* newObj, const std::string& path)
+{
+    // TODO: preload the data if possible
+    // see https://github.com/ddiakopoulos/tinyply/blob/master/source/example.cpp
 
+    std::ifstream file_stream(path, std::ios::binary);
+
+    if (!file_stream.is_open() || !file_stream.good())
+    {
+        throw std::runtime_error("Failed to open" + path);
+    }
+
+    tinyply::PlyFile file;
+    file.parse_header(file_stream);
+
+    std::shared_ptr<tinyply::PlyData> vertices, normals, colors, texcoords, faces, tripstrip;
+
+    try { vertices = file.request_properties_from_element("vertex", { "x", "y", "z" }); }
+    catch (const std::exception& e) { 
+        std::cerr << "tinyply exception: " << e.what() << std::endl; 
+    }
+
+    try { normals = file.request_properties_from_element("vertex", { "nx", "ny", "nz" }); }
+    catch (const std::exception& e) { 
+        std::cerr << "tinyply exception: " << e.what() << std::endl; 
+    }
+
+    try { colors = file.request_properties_from_element("vertex", { "red", "green", "blue", "alpha" }); }
+    catch (const std::exception& e) { 
+        std::cerr << "tinyply exception: " << e.what() << std::endl; 
+    }
+
+    try { texcoords = file.request_properties_from_element("vertex", { "u", "v" }); }
+    catch (const std::exception& e) { 
+        std::cerr << "tinyply exception: " << e.what() << std::endl; 
+    }
+
+    // Providing a list size hint (the last argument) is a 2x performance improvement. If you have 
+    // arbitrary ply files, it is best to leave this 0. 
+    try { faces = file.request_properties_from_element("face", { "vertex_indices" }, 0); }
+    catch (const std::exception& e) { 
+        std::cerr << "tinyply exception: " << e.what() << std::endl; 
+    }
+
+    // Tristrips must always be read with a 0 list size hint (unless you know exactly how many elements
+    // are specifically in the file, which is unlikely); 
+    try { tripstrip = file.request_properties_from_element("tristrips", { "vertex_indices" }, 0); }
+    catch (const std::exception& e) {
+        std::cerr << "tinyply exception: " << e.what() << std::endl;
+    }
+
+    file.read(file_stream);
+
+    newObj->type = TRIANGLE_MESH;
+
+    TriangleMeshData newMesh;
+
+    const size_t numVerticesBytes = vertices->buffer.size_bytes();
+    assert(vertices->t == tinyply::Type::FLOAT32);
+    float* vert_buffer = (float*)vertices->buffer.get();
+    for (size_t i = 0; i < vertices->count; i++)
+    {
+        glm::vec3 vert(vert_buffer[3 * i], vert_buffer[3 * i + 1], vert_buffer[3 * i + 2]);
+        newMesh.m_vertices.emplace_back(vert);
+    }
+    
+    assert(normals->t == tinyply::Type::FLOAT32);
+    float* norm_buffer = (float*)normals->buffer.get();
+    for (size_t i = 0; i < normals->count; i++)
+    {
+        glm::vec3 norm(norm_buffer[3 * i], norm_buffer[3 * i + 1], norm_buffer[3 * i + 2]);
+        newMesh.m_normals.emplace_back(norm);
+    }
+
+    assert(texcoords->t == tinyply::Type::FLOAT32);
+    float* uv_buffer = (float*)texcoords->buffer.get();
+    for (size_t i = 0; i < texcoords->count; i++)
+    {
+        glm::vec2 uv(uv_buffer[2 * i], uv_buffer[2 * i + 1]);
+        newMesh.m_uvs.emplace_back(uv);
+    }
+
+    assert(faces->t == tinyply::Type::INT32);
+    uint32_t* idx_buffer = (uint32_t*)faces->buffer.get();
+    for (size_t i = 0; i < faces->count; i++)
+    {
+        glm::ivec3 tri(idx_buffer[3 * i], idx_buffer[3 * i + 1], idx_buffer[3 * i + 2]);
+        newMesh.m_triangles.emplace_back(tri);
+    }
+    newObj->meshId = static_cast<int>(m_triangleMeshes.size());
+    m_triangleMeshes.emplace_back(std::move(newMesh));
+
+    return true;
+}
 
 bool Scene::loadGeometry(const std::string& type, int objectid)
 {
@@ -1385,9 +1506,11 @@ void Scene::buildBVH()
         const Object& obj = objects[i];
         if (obj.type == TRIANGLE_MESH)
         {
-            for (int j = obj.triangleStart; j != obj.triangleEnd; j++)
+            int meshId = obj.meshId;
+            const TriangleMeshData& mesh = m_triangleMeshes[meshId];
+            for (int j = 0; j != mesh.m_triangles.size(); j++)
             {
-                primitives.emplace_back(obj, i, j - obj.triangleStart, &triangles[0], &verticies[0]);
+                primitives.emplace_back(obj, i, j, mesh.m_triangles.data(), mesh.m_vertices.data());
             }
             
         }

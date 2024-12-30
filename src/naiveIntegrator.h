@@ -4,8 +4,7 @@
 #include "light.h"
 
 __global__ void compute_intersection_bvh_no_volume(
-	int depth
-	, int num_paths
+	int num_paths
 	, PathSegment* pathSegments
 	, SceneInfoDev dev_sceneInfo
 	, ShadeableIntersection* intersections
@@ -17,7 +16,6 @@ __global__ void compute_intersection_bvh_no_volume(
 // Does not handle surface intersection
 __global__ void compute_intersection_bvh_volume_naive(
 	int iter
-	, int depth
 	, int num_paths
 	, PathSegment* pathSegments
 	, SceneInfoDev dev_sceneInfo

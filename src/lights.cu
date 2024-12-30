@@ -118,11 +118,12 @@ GPU_FUNC LightLiSample DiffuseAreaLight::sample_Li(const LightSampleContext& ctx
 	}
 	else //Triangle
 	{
-		glm::ivec3 tri = ctx.modelInfo.dev_triangles[lightObj.triangleStart + lightPrim.offset];
+		int meshId = lightObj.meshId;
+		glm::ivec3 tri = ctx.dev_meshes[meshId].m_triangles[lightPrim.offset];
 		glm::vec2 bary = util_math_uniform_sample_triangle(glm::vec2(rand.x, rand.y));
-		const glm::vec3& v0 = ctx.modelInfo.dev_vertices[tri[0]];
-		const glm::vec3& v1 = ctx.modelInfo.dev_vertices[tri[1]];
-		const glm::vec3& v2 = ctx.modelInfo.dev_vertices[tri[2]];
+		const glm::vec3& v0 = ctx.dev_meshes[meshId].m_vertices[tri[0]];
+		const glm::vec3& v1 = ctx.dev_meshes[meshId].m_vertices[tri[1]];
+		const glm::vec3& v2 = ctx.dev_meshes[meshId].m_vertices[tri[2]];
 		glm::vec3 v0w = multiplyMV(lightObj.Transform.transform, glm::vec4(v0, 1.0f));
 		glm::vec3 v1w = multiplyMV(lightObj.Transform.transform, glm::vec4(v1, 1.0f));
 		glm::vec3 v2w = multiplyMV(lightObj.Transform.transform, glm::vec4(v2, 1.0f));
@@ -173,10 +174,11 @@ GPU_FUNC float DiffuseAreaLight::pdf_Li(const LightSampleContext& ctx, const glm
 	}
 	else
 	{
-		glm::ivec3 tri = ctx.modelInfo.dev_triangles[lightObj.triangleStart + lightPrim.offset];
-		const glm::vec3& v0 = ctx.modelInfo.dev_vertices[tri[0]];
-		const glm::vec3& v1 = ctx.modelInfo.dev_vertices[tri[1]];
-		const glm::vec3& v2 = ctx.modelInfo.dev_vertices[tri[2]];
+		int meshId = lightObj.meshId;
+		glm::ivec3 tri = ctx.dev_meshes[meshId].m_triangles[lightPrim.offset];
+		const glm::vec3& v0 = ctx.dev_meshes[meshId].m_vertices[tri[0]];
+		const glm::vec3& v1 = ctx.dev_meshes[meshId].m_vertices[tri[1]];
+		const glm::vec3& v2 = ctx.dev_meshes[meshId].m_vertices[tri[2]];
 		glm::vec3 v0w = multiplyMV(lightObj.Transform.transform, glm::vec4(v0, 1.0f));
 		glm::vec3 v1w = multiplyMV(lightObj.Transform.transform, glm::vec4(v1, 1.0f));
 		glm::vec3 v2w = multiplyMV(lightObj.Transform.transform, glm::vec4(v2, 1.0f));

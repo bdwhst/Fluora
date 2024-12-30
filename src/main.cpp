@@ -78,6 +78,7 @@ int main(int argc, char** argv) {
 	RGBToSpectrumTable::init(alloc);
 	RGBColorSpace::init(alloc);
 
+	scene->LoadAllMeshesToGPU(alloc);
 	scene->LoadAllMaterialsToGPU(alloc);
 	scene->LoadAllMediaToGPU(Allocator(baseBackend));
 	scene->LoadAllLightsToGPU(alloc);
