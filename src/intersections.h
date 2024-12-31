@@ -75,3 +75,4 @@ __device__ bool util_test_visibility(glm::vec3 p0, glm::vec3 p1, const SceneInfo
 __device__ bool util_bvh_test_visibility(glm::vec3 p0, glm::vec3 p1, const SceneInfoDev& dev_sceneInfo);
 
 __device__ bool intersect_surface_mtbvh(Ray* ray, ShadeableIntersection* tmpIntersection, const SceneInfoDev& dev_sceneInfo);
+__device__ bool intersect_surface(Ray* ray, ShadeableIntersection* intersection, const SceneInfoDev& dev_sceneInfo);

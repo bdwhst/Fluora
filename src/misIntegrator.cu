@@ -115,7 +115,7 @@ __global__ void sample_Ld_volume(
 	glm::vec3 shadowRayOri = pShading;
 	int iter = 0;
 	// currently does not handle unbounded medium (medium outside of some closed surface)
-	while (true)
+	while (iter<64)
 	{
 		float dist2 = glm::distance2(shadowRayOri, liSample.pLight);
 		if (dist2 < 0.01f) break;
@@ -200,13 +200,13 @@ __global__ void compute_intersection_bvh_volume_mis(
 	ShadeableIntersection tmpIntersection;
 	bool intersected_surface = intersect_surface_mtbvh(&ray, &tmpIntersection, dev_sceneInfo);
 	bool scattered_in_medium = false, absorbed_in_medium = false, ternminated = false;
+	thrust::default_random_engine& rng = pathSegment.rng;
+	thrust::uniform_int_distribution<int> int_dist;
+	thrust::default_random_engine tmaj_rng = makeSeededRandomEngine(iter, int_dist(rng), 0);
+	thrust::default_random_engine ld_rng(int_dist(rng) ^ (pathSegment.depth << 8));
 
 	if (ray.medium != -1)
 	{
-		thrust::default_random_engine& rng = pathSegment.rng;
-		thrust::uniform_int_distribution<int> int_dist;
-		thrust::default_random_engine tmaj_rng = makeSeededRandomEngine(iter, int_dist(rng), 0);
-
 		float t_max = intersected_surface ? tmpIntersection.t : FLT_MAX;
 		SampledSpectrum T_maj = sample_Tmaj(dev_sceneInfo.dev_media, ray, t_max, tmaj_rng, pathSegment.lambda, [&](const glm::vec3& p, MediumProperties mp, SampledSpectrum sigma_maj, SampledSpectrum T_maj) {
 			if (!pathSegment.transport) {
@@ -255,9 +255,7 @@ __global__ void compute_intersection_bvh_volume_mis(
 
 				if (pathSegment.transport && pathSegment.r_u)
 				{
-					int currNumShadowRays = numShadowRays.fetch_add(1);
-					// TODO: add shadow ray here
-					thrust::default_random_engine ld_rng(int_dist(tmaj_rng) ^ (depth << 8));
+					int currNumShadowRays = numShadowRays.fetch_add(1);				
 					shadowRaySegments[currNumShadowRays].transport = pathSegment.transport;
 					shadowRaySegments[currNumShadowRays].lambda = pathSegment.lambda;
 					shadowRaySegments[currNumShadowRays].normalWorld = glm::normalize(-ray.direction);
@@ -284,8 +282,6 @@ __global__ void compute_intersection_bvh_volume_mis(
 					// here there is no need to update r_u, since the phase function sampling is the same for all wavelength
 					// r_l will be further multiplied by pdf of light sampling in scatter_on_intersection
 					pathSegment.r_l = pathSegment.r_u / pdf;
-
-					pathSegment.transport *= phase / pdf;
 					pathSegment.prevSpecular = false;
 					scattered_in_medium = true;
 					return false;
@@ -328,14 +324,18 @@ __global__ void compute_intersection_bvh_volume_mis(
 		pathSegment.r_l *= T_maj / T_maj[0];
 	}
 
-
-	// If there is no real scatter and a intersection with surface occurs
-	// We are intersecting with a medium interface or a light surface or a material surface
-	// Continue travese through the current ray dir, but change the origin to be the intersection point
+	
 	if (intersected_surface)
 	{
 		intersections[path_index] = tmpIntersection;
-		ray.origin = tmpIntersection.worldPos + ray.direction * SCATTER_ORIGIN_OFFSETMULT;
+		// If there is no real scatter and a intersection with surface occurs
+		// We are intersecting with a medium interface or a light surface or a material surface
+		// Continue travese through the current ray dir, but change the origin to be the intersection point
+		if (tmpIntersection.materialId == -1)
+		{
+			glm::vec3 offset = glm::dot(tmpIntersection.surfaceNormal, ray.direction) > 0.0f ? tmpIntersection.surfaceNormal : -tmpIntersection.surfaceNormal;
+			ray.origin = tmpIntersection.worldPos + offset * SCATTER_ORIGIN_OFFSETMULT;
+		}
 		rayValid[path_index] = true;
 		return;
 	}
@@ -361,8 +361,8 @@ __global__ void compute_intersection_bvh_volume_mis(
 			glm::vec3 sensorRGB = dev_sceneInfo.pixelSensor->to_sensor_rgb(L, pathSegment.lambda);
 			dev_film->add_radiance(sensorRGB, pathSegment.pixelIndex);
 		}
-		rayValid[path_index] = false;
 	}
+	rayValid[path_index] = false;
 }
 
 
@@ -814,9 +814,9 @@ __global__ void scatter_on_intersection_volume_mis(
 			return;
 		}
 		glm::vec3& woInWorld = pathSegments[idx].ray.direction;
-		glm::vec3 nMap = glm::vec3(0, 0, 1);
+		glm::vec3 nMap = material.normal_mapping(intersection.uv);
 
-		glm::vec3 N = glm::normalize(intersection.surfaceNormal);
+		glm::vec3 N = nMap == glm::vec3(0.0f) ? glm::normalize(intersection.surfaceNormal) : glm::normalize(nMap);
 		glm::vec3 B, T;
 
 		math::Frame frame = math::Frame::from_z(N);

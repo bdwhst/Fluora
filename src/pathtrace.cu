@@ -345,6 +345,7 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 	dev_sceneInfo.objectsSize = hst_scene->objects.size();
 	dev_sceneInfo.m_dev_meshes = hst_scene->m_dev_triangleMeshes;
 	dev_sceneInfo.dev_primitives = dev_primitives;
+	dev_sceneInfo.m_primitives_size = static_cast<int>(hst_scene->primitives.size());
 #if USE_BVH
 #if MTBVH
 	dev_sceneInfo.dev_mtbvhArray = dev_mtbvhArray;

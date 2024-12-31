@@ -27,6 +27,13 @@ struct MediumLoadJobInfo
     glm::mat4 world_from_medium;
 };
 
+struct TextureLoadJobInfo
+{
+    std::string path;
+    int matId;
+    std::string matTextureKey;
+};
+
 //struct LightLoadJobInfo
 //{
 //    std::string type;
@@ -111,7 +118,7 @@ public:
     float environmentMapLuminScale = 1.0f;
     glm::vec3 environmentMapMaxLumin = glm::vec3(1e5);
     RawTextureData environmentMapData;
-    std::vector<std::pair<std::string, int> > LoadTextureFromFileJobs;//texture path, materialID
+    std::vector<TextureLoadJobInfo> LoadTextureFromFileJobs;//texture path, materialID
     std::vector<GLTFTextureLoadInfo> LoadTextureFromMemoryJobs;
     std::vector<MaterialLoadJobInfo>  LoadMaterialJobs;
     std::vector<MediumLoadJobInfo> LoadMediumJobs;

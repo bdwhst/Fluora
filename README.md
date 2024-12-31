@@ -13,6 +13,10 @@ Command line arguments: `.\Fluora.exe scenefile.txt`
 
 ## Showcase
 
+|   Matchbulb (5000 spp)   |
+| :----------------------: |
+| ![](./img/matchbulb.png) |
+
 |     Ground Explosion (4096 spp)     |
 | :---------------------------------: |
 | ![](./img/ground_explosion_mis.png) |

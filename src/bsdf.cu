@@ -137,7 +137,11 @@ __device__ SampledSpectrum DielectricBxDF::sample_f(const glm::vec3& wo, glm::ve
 	{
 		glm::vec3 n = glm::dot(wo, glm::vec3(0, 0, 1)) > 0 ? glm::vec3(0, 0, 1) : glm::vec3(0, 0, -1);
 		glm::vec3 refractedRay;
-		if (!math::geomerty_refract(wo, n, 1 / eta, &refractedRay)) return SampledSpectrum(0.0f);
+		if (!math::geomerty_refract(wo, n, 1 / eta, &refractedRay))
+		{
+			pdf = 0.0f;
+			return SampledSpectrum(0.0f);
+		}
 		wi = refractedRay;
 		pdf = 1 - frensel;
 		SampledSpectrum val((1 - frensel) / (eta * eta));

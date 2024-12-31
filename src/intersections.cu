@@ -35,6 +35,92 @@ __device__ bool intersect_surface_mtbvh(Ray* ray, ShadeableIntersection* tmpInte
     return intersected;
 }
 
+__device__ bool intersect_surface(
+    Ray* ray, ShadeableIntersection* intersection, const SceneInfoDev& dev_sceneInfo
+)
+{
+    glm::vec3 tmp_intersect, tmp_normal, tmp_baryCoord, tmp_tangent;
+    float tmp_fsign;
+    glm::vec2	tmp_uv;
+    bool intersected = false;
+    float t = -1.0;
+    for (int i = 0; i != dev_sceneInfo.m_primitives_size; i++)
+    {
+        const Primitive& prim = dev_sceneInfo.dev_primitives[i];
+        int objID = prim.objID;
+        const Object& obj = dev_sceneInfo.dev_objs[objID];
+
+        if (obj.type == TRIANGLE_MESH)
+        {
+            int meshID = obj.meshId;
+            TriangleMesh& mesh = dev_sceneInfo.m_dev_meshes[meshID];
+            const glm::ivec3& tri = mesh.m_triangles[prim.offset];
+            const glm::vec3& v0 = mesh.m_vertices[tri[0]];
+            const glm::vec3& v1 = mesh.m_vertices[tri[1]];
+            const glm::vec3& v2 = mesh.m_vertices[tri[2]];
+            t = triangleIntersectionTest(obj.Transform, v0, v1, v2, *ray, tmp_intersect, tmp_normal, tmp_baryCoord);
+            if (mesh.m_uvs)
+            {
+                const glm::vec2& uv0 = mesh.m_uvs[tri[0]];
+                const glm::vec2& uv1 = mesh.m_uvs[tri[1]];
+                const glm::vec2& uv2 = mesh.m_uvs[tri[2]];
+                tmp_uv = uv0 * tmp_baryCoord[0] + uv1 * tmp_baryCoord[1] + uv2 * tmp_baryCoord[2];
+            }
+            if (mesh.m_normals)
+            {
+                const glm::vec3& n0 = mesh.m_normals[tri[0]];
+                const glm::vec3& n1 = mesh.m_normals[tri[1]];
+                const glm::vec3& n2 = mesh.m_normals[tri[2]];
+                tmp_normal = n0 * tmp_baryCoord[0] + n1 * tmp_baryCoord[1] + n2 * tmp_baryCoord[2];
+                tmp_normal = glm::vec3(obj.Transform.invTranspose * glm::vec4(tmp_normal, 0.0));//TODO: precompute transformation
+            }
+            // TODO
+            /*if (dev_sceneInfo.modelInfo.dev_tangents)
+            {
+                const glm::vec3& t0 = dev_sceneInfo.modelInfo.dev_tangents[tri[0]];
+                const glm::vec3& t1 = dev_sceneInfo.modelInfo.dev_tangents[tri[1]];
+                const glm::vec3& t2 = dev_sceneInfo.modelInfo.dev_tangents[tri[2]];
+                tmp_tangent = t0 * tmp_baryCoord[0] + t1 * tmp_baryCoord[1] + t2 * tmp_baryCoord[2];
+                tmp_tangent = glm::vec3(obj.Transform.invTranspose * glm::vec4(tmp_tangent, 0.0));
+            }*/
+        }
+        else if (obj.type == CUBE)
+        {
+            t = boxIntersectionTest(obj, *ray, tmp_intersect, tmp_normal);
+        }
+        else if (obj.type == SPHERE)
+        {
+            t = util_geometry_ray_sphere_intersection(obj, *ray, tmp_intersect, tmp_normal);
+        }
+
+        if (t > 0.0 && t < intersection->t)
+        {
+            intersection->t = t;
+            intersection->materialId = obj.materialid;
+            intersection->worldPos = tmp_intersect;
+            intersection->surfaceNormal = tmp_normal;
+            intersection->surfaceTangent = tmp_tangent;
+            intersection->fsign = tmp_fsign;
+            intersection->uv = tmp_uv;
+            intersection->primitiveId = i;
+            intersection->lightId = prim.lightID;
+            intersected = true;
+        }
+
+    }
+    if (intersected)
+    {
+        const Primitive& prim = dev_sceneInfo.dev_primitives[intersection->primitiveId];
+        int objID = prim.objID;
+        const Object& obj = dev_sceneInfo.dev_objs[objID];
+        if (obj.mediumIn != obj.mediumOut)
+        {
+            ray->medium = glm::dot(ray->direction, intersection->surfaceNormal) > 0 ? obj.mediumIn : obj.mediumOut;
+        }
+    }
+    return intersected;
+}
+
 __device__ float util_geometry_ray_box_intersection(const glm::vec3& pMin, const glm::vec3& pMax, const Ray& r, bool* outside, glm::vec3* normal)
 {
     float tmin = 0;
@@ -124,42 +210,46 @@ __device__ float boxIntersectionTest(const Object& box, const Ray& r,
 
 __device__ float util_geometry_ray_sphere_intersection(const Object& sphere, const Ray& r,
     glm::vec3& intersectionPoint, glm::vec3& normal) {
-    float radius = .5;
 
+    // Define the sphere radius
+    constexpr float radius = 0.5f;
+
+    // Transform ray into object space
     glm::vec3 ro = multiplyMV(sphere.Transform.inverseTransform, glm::vec4(r.origin, 1.0f));
     glm::vec3 rd = glm::normalize(multiplyMV(sphere.Transform.inverseTransform, glm::vec4(r.direction, 0.0f)));
 
-    Ray rt;
-    rt.origin = ro;
-    rt.direction = rd;
+    // Quadratic coefficients for the sphere intersection
+    float a = glm::dot(rd, rd);
+    float b = 2.0f * glm::dot(ro, rd);
+    float c = glm::dot(ro, ro) - radius * radius;
 
-    float vDotDirection = glm::dot(rt.origin, rt.direction);
-    float radicand = vDotDirection * vDotDirection - (glm::dot(rt.origin, rt.origin) - powf(radius, 2));
-    if (radicand < 0) {
-        return -1;
+    // Compute discriminant to check intersection
+    float discriminant = b * b - 4.0f * a * c;
+    if (discriminant < 0.0f) {
+        // No real roots; the ray misses the sphere
+        return -1.0f;
     }
 
-    float squareRoot = sqrt(radicand);
-    float firstTerm = -vDotDirection;
-    float t1 = firstTerm + squareRoot;
-    float t2 = firstTerm - squareRoot;
+    // Compute intersection points using the quadratic formula
+    float sqrtDiscriminant = sqrtf(discriminant);
+    float t1 = (-b - sqrtDiscriminant) / (2.0f * a);
+    float t2 = (-b + sqrtDiscriminant) / (2.0f * a);
 
-    float t = 0;
-    if (t1 < 0 && t2 < 0) {
-        return -1;
-    }
-    else if (t1 > 0 && t2 > 0) {
-        t = min(t1, t2);
-    }
-    else {
-        t = max(t1, t2);
+    // Find the nearest valid intersection point
+    float t = (t1 > 0.0f) ? t1 : (t2 > 0.0f ? t2 : -1.0f);
+    if (t < 0.0f) {
+        // Both intersections are behind the ray origin
+        return -1.0f;
     }
 
-    glm::vec3 objspaceIntersection = getPointOnRay(rt, t);
+    // Compute object-space intersection point
+    glm::vec3 objSpaceIntersection = ro + t * rd;
 
-    intersectionPoint = multiplyMV(sphere.Transform.transform, glm::vec4(objspaceIntersection, 1.f));
-    normal = glm::normalize(multiplyMV(sphere.Transform.invTranspose, glm::vec4(objspaceIntersection, 0.f)));
+    // Transform intersection point and normal back to world space
+    intersectionPoint = multiplyMV(sphere.Transform.transform, glm::vec4(objSpaceIntersection, 1.0f));
+    normal = glm::normalize(multiplyMV(sphere.Transform.invTranspose, glm::vec4(objSpaceIntersection, 0.0f)));
 
+    // Return the distance from the ray origin to the intersection point
     return glm::length(r.origin - intersectionPoint);
 }
 

@@ -11,6 +11,10 @@
 #include <tiny_obj_loader.h>
 #define TINYPLY_IMPLEMENTATION
 #include <tinyply.h>
+#define TINYEXR_USE_MINIZ 0 
+#define TINYEXR_USE_STB_ZLIB 1
+#define TINYEXR_IMPLEMENTATION
+#include <tinyexr.h>
 #include <mikktspace.h>
 #include <unordered_map>
 #include <queue>
@@ -86,6 +90,15 @@ void Scene::loadJSON(const std::string& name)
     camera.lookAt = glm::vec3(lookat[0], lookat[1], lookat[2]);
     camera.up = glm::vec3(up[0], up[1], up[2]);
 
+    if (cameraData.contains("LENS_RADIUS"))
+    {
+        camera.lensRadius = cameraData["LENS_RADIUS"];
+    }
+    if (cameraData.contains("FOCAL_LEN"))
+    {
+        camera.focalLength = cameraData["FOCAL_LEN"];
+    }
+
     //calculate fov based on resolution
     float yscaled = tan(fovy * (PI / 180));
     float xscaled = (yscaled * camera.resolution.x) / camera.resolution.y;
@@ -124,13 +137,22 @@ void Scene::loadJSON(const std::string& name)
     std::unordered_map<std::string, int> materialNameToId;
     if (data.contains("Materials"))
     {
+        int currMatId = LoadMaterialJobs.size();
         for (const auto& [key, val] : data["Materials"].items())
         {
             BundledParams params;
             std::string type = val["TYPE"];
             if (type == "diffuse")
             {
-                params.insert_vec3("albedo", glm::vec3( val["RGB"][0], val["RGB"][1], val["RGB"][2]));
+                auto& refl = val["REFL"];
+                if (refl["TYPE"] == "RGB")
+                {
+                    params.insert_vec3("albedo", glm::vec3(refl["VALUE"][0], refl["VALUE"][1], refl["VALUE"][2]));
+                }
+                else if (refl["TYPE"] == "TEX")
+                {
+                    LoadTextureFromFileJobs.emplace_back(refl["VALUE"], currMatId, "albedoMap");
+                }
             }
             else if (type == "emissive")
             {
@@ -149,9 +171,24 @@ void Scene::loadJSON(const std::string& name)
                 }
                 // TODO
             }
+            else if (type == "conductor")
+            {
+                auto& eta = val["ETA"];
+                auto& k = val["K"];
+                if(eta["TYPE"]=="named")
+                    params.insert_string("eta", eta["VALUE"]);
+                if (k["TYPE"] == "named")
+                    params.insert_string("k", k["VALUE"]);
+                params.insert_float("roughness", val["ROUGHNESS"]);
+            }
+            if (val.contains("NORMAL_MAP"))
+            {
+                LoadTextureFromFileJobs.emplace_back(val["NORMAL_MAP"], currMatId, "normalMap");
+            }
             int id = (int)LoadMaterialJobs.size();
             materialNameToId[key] = id;
             LoadMaterialJobs.emplace_back(type, params);
+            currMatId++;
         }
     }
 
@@ -307,7 +344,9 @@ void Scene::LoadAllTexturesToGPU()
 
     for (auto& p : LoadTextureFromFileJobs)
     {
-        
+        cudaTextureObject_t tmp_tex;
+        loadTextureFromFile(p.path, &tmp_tex);
+        LoadMaterialJobs[p.matId].params.insert_texture(p.matTextureKey, tmp_tex);
     }
     /*
     for (auto& p : LoadTextureFromMemoryJobs)
@@ -520,12 +559,53 @@ void Scene::loadTextureFromFile(const std::string& texturePath, cudaTextureObjec
 {
     int width, height, channels;
     std::string ext = texturePath.substr(texturePath.find_last_of('.') + 1);
-    if (ext != "hdr")
-    {
+
+    if (ext == "hdr") {
+        float* data = stbi_loadf(texturePath.c_str(), &width, &height, &channels, 4);
+        if (ret_data) {
+            size_t dataSize = width * height * 4 * sizeof(float);
+            ret_data->width = width;
+            ret_data->height = height;
+            ret_data->channels = 4;
+            ret_data->channelBits = 32;
+            ret_data->data.resize(dataSize);
+            memcpy(ret_data->data.data(), data, dataSize);
+        }
+        if (data) {
+            LoadTextureFromMemory(data, width, height, 32, 4, texObj);
+            stbi_image_free(data);
+        }
+        else {
+            printf("Failed to load HDR image: %s\n", stbi_failure_reason());
+        }
+    }
+    else if (ext == "exr") {
+        float* out_rgba = nullptr;
+        const char* err = nullptr;
+        int ret = LoadEXR(&out_rgba, &width, &height, texturePath.c_str(), &err);
+        if (ret == TINYEXR_SUCCESS) {
+            channels = 4; // TinyEXR outputs RGBA
+            if (ret_data) {
+                size_t dataSize = width * height * 4 * sizeof(float);
+                ret_data->width = width;
+                ret_data->height = height;
+                ret_data->channels = 4;
+                ret_data->channelBits = 32;
+                ret_data->data.resize(dataSize);
+                memcpy(ret_data->data.data(), out_rgba, dataSize);
+            }
+            LoadTextureFromMemory(out_rgba, width, height, 32, 4, texObj);
+            free(out_rgba);
+        }
+        else {
+            fprintf(stderr, "Failed to load EXR image: %s\n", err);
+            FreeEXRErrorMessage(err);
+        }
+    }
+    else {
         unsigned char* data = stbi_load(texturePath.c_str(), &width, &height, &channels, 4);
-        if (ret_data)
-        {
-            size_t dataSize = width * height * 4 * (8 >> 3);
+        if (ret_data) {
+            size_t dataSize = width * height * 4 * sizeof(unsigned char);
             ret_data->width = width;
             ret_data->height = height;
             ret_data->channels = 4;
@@ -535,28 +615,6 @@ void Scene::loadTextureFromFile(const std::string& texturePath, cudaTextureObjec
         }
         if (data) {
             LoadTextureFromMemory(data, width, height, 8, 4, texObj);
-            stbi_image_free(data);
-        }
-        else {
-            printf("Failed to load image: %s\n", stbi_failure_reason());
-        }
-    }
-    else
-    {
-        float* data = stbi_loadf(texturePath.c_str(), &width, &height, &channels, 4);
-        if (ret_data)
-        {
-            size_t dataSize = width * height * 4 * (32 >> 3);
-            ret_data->width = width;
-            ret_data->height = height;
-            ret_data->channels = 4;
-            ret_data->channelBits = 32;
-            ret_data->data.resize(dataSize);
-            memcpy(ret_data->data.data(), data, dataSize);
-        }
-        if (data) {
-            // TODO: we only need rgb instead of rgba
-            LoadTextureFromMemory(data, width, height, 32, 4, texObj);
             stbi_image_free(data);
         }
         else {
@@ -1165,7 +1223,7 @@ bool Scene::loadPly(Object* newObj, const std::string& path)
     tinyply::PlyFile file;
     file.parse_header(file_stream);
 
-    std::shared_ptr<tinyply::PlyData> vertices, normals, colors, texcoords, faces, tripstrip;
+    std::shared_ptr<tinyply::PlyData> vertices, normals, colors, texcoords, faces, tripstrip, tangents;
 
     try { vertices = file.request_properties_from_element("vertex", { "x", "y", "z" }); }
     catch (const std::exception& e) { 
@@ -1175,6 +1233,13 @@ bool Scene::loadPly(Object* newObj, const std::string& path)
     try { normals = file.request_properties_from_element("vertex", { "nx", "ny", "nz" }); }
     catch (const std::exception& e) { 
         std::cerr << "tinyply exception: " << e.what() << std::endl; 
+    }
+
+    try {
+        tangents = file.request_properties_from_element("vertex", { "tx", "ty", "tz" });
+    }
+    catch (const std::exception& e) {
+        std::cerr << "tinyply exception: " << e.what() << std::endl;
     }
 
     try { colors = file.request_properties_from_element("vertex", { "red", "green", "blue", "alpha" }); }

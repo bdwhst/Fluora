@@ -32,9 +32,21 @@ public:
 	
 	// Assume local allocated size is greater than any of the bxdf class
 	__device__ BxDFPtr get_bxdf(MaterialEvalInfo& info, void* localMem);
+	// TODO: improve this
+	__device__ glm::vec3 normal_mapping(const glm::vec2& uv);
 };
 
-class DiffuseMaterial
+class MaterialBase
+{
+public:
+	MaterialBase(cudaTextureObject_t normalTexture = 0):m_normalTexture(normalTexture){}
+	__device__ glm::vec3 normal_mapping(const glm::vec2& uv);
+private:
+	cudaTextureObject_t m_normalTexture;
+};
+
+
+class DiffuseMaterial : public MaterialBase
 {
 public:
 	static DiffuseMaterial* create(const BundledParams& params, Allocator alloc)
@@ -44,9 +56,10 @@ public:
 		RGBColorSpace* colorSpace = (RGBColorSpace*)params.get_ptr("colorSpace");
 		if (!colorSpace)
 			throw std::runtime_error("No color space specified for DiffuseMaterial");
-		return alloc.new_object<DiffuseMaterial>(albedo, albedoMap, colorSpace);
+		cudaTextureObject_t normalMap = params.get_texture("normalMap");
+		return alloc.new_object<DiffuseMaterial>(normalMap, albedo, albedoMap, colorSpace);
 	}
-	DiffuseMaterial(const glm::vec3& albedo, cudaTextureObject_t albedoMap, RGBColorSpace* colorSpace):albedo(albedo), albedoMap(albedoMap), colorSpace(colorSpace){}
+	DiffuseMaterial(cudaTextureObject_t normalMap, const glm::vec3& albedo, cudaTextureObject_t albedoMap, RGBColorSpace* colorSpace):albedo(albedo), albedoMap(albedoMap), colorSpace(colorSpace){}
 	__device__ BxDFPtr get_bxdf(MaterialEvalInfo& info, void* localMem);
 private:
 	glm::vec3   albedo = glm::vec3(0.5f);
@@ -54,7 +67,7 @@ private:
 	RGBColorSpace* colorSpace;
 };
 
-class DielectricMaterial
+class DielectricMaterial : public MaterialBase
 {
 public:
 	static DielectricMaterial* create(const BundledParams& params, Allocator alloc)
@@ -80,7 +93,7 @@ private:
 	SpectrumPtr eta;
 };
 
-class ConductorMaterial
+class ConductorMaterial : public MaterialBase
 {
 public:
 	static ConductorMaterial* create(const BundledParams& params, Allocator alloc)
@@ -106,10 +119,11 @@ public:
 private:
 	SpectrumPtr eta, k;
 	float roughness;
+	cudaTextureObject_t roughnessMap = 0;
 };
 
 // Diffuse emissive material
-class EmissiveMaterial
+class EmissiveMaterial : public MaterialBase
 {
 public:
 	static EmissiveMaterial* create(const BundledParams& params, Allocator alloc)

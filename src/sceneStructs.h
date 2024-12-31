@@ -18,7 +18,7 @@
 #define VIS_NORMAL 0
 #define TONEMAPPING 1
 #define DOF_ENABLED 1
-#define SCATTER_ORIGIN_OFFSETMULT 0.00035f
+#define SCATTER_ORIGIN_OFFSETMULT 0.0000125f
 #define BOUNDING_BOX_EXPAND 0.0001f
 #define ALPHA_CUTOFF 0.01f
 #define STOCHASTIC_SAMPLING 1
@@ -248,6 +248,7 @@ struct SceneInfoDev {
     int objectsSize;
     TriangleMesh* m_dev_meshes;
     Primitive* dev_primitives;
+    int m_primitives_size;
     union {
         BVHGPUNode* dev_bvhArray;
         MTBVHGPUNode* dev_mtbvhArray;

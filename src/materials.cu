@@ -31,6 +31,22 @@ __device__ BxDFPtr MaterialPtr::get_bxdf(MaterialEvalInfo& info, void* localMem)
 	return Dispatch(op);
 }
 
+__device__ glm::vec3 MaterialPtr::normal_mapping(const glm::vec2& uv)
+{
+	auto op = [&](auto ptr) { return ptr->normal_mapping(uv); };
+	return Dispatch(op);
+}
+
+__device__ glm::vec3 MaterialBase::normal_mapping(const glm::vec2& uv)
+{
+	if (m_normalTexture)
+	{
+		float4 color = { 0,0,0,1 };
+		color = tex2D<float4>(m_normalTexture, uv.x, uv.y);
+		return glm::vec3(color.x, color.y, color.z);
+	}
+	return glm::vec3(0.0);
+}
 
 __device__ BxDFPtr DiffuseMaterial::get_bxdf(MaterialEvalInfo& info, void* localMem)
 {
