@@ -33,6 +33,21 @@ set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr --extended-la
 set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
 set(CUDA_VERBOSE_BUILD ON)
 
+# CUDA 13's CCCL headers require MSVC's standards-conforming preprocessor.
+# Apply /Zc:preprocessor to both host C++ code and nvcc's host-compiler pass.
+if(MSVC)
+    add_compile_options(
+        $<$<COMPILE_LANGUAGE:CXX>:/Zc:preprocessor>
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>
+    )
+endif()
+
+# Stop <windows.h> from defining min/max macros that collide with
+# std::numeric_limits<T>::max(), Thrust internals, and std::min/std::max.
+if(WIN32)
+    add_compile_definitions(NOMINMAX)
+endif()
+
 if(WIN32)
     # Set up include and lib paths
     set(CUDA_HOST_COMPILER ${CMAKE_CXX_COMPILER} CACHE FILEPATH "Host side compiler used by NVCC" FORCE)
@@ -64,6 +79,22 @@ endif(UNIX)
 set(GLM_ROOT_DIR "external")
 find_package(GLM REQUIRED)
 include_directories(${GLM_INCLUDE_DIRS})
+
+# zlib (required because media.h enables NANOVDB_USE_ZIP for compressed .nvdb files)
+find_library(ZLIB_STATIC_LIB
+    NAMES zlibstatic zlibstaticd zlib
+    PATHS "${PROJECT_SOURCE_DIR}/external/lib"
+    NO_DEFAULT_PATH
+)
+if(NOT ZLIB_STATIC_LIB)
+    message(FATAL_ERROR "zlib static library not found in external/lib. "
+        "Drop zlibstatic.lib into external/lib and zlib.h + zconf.h into external/include.")
+endif()
+if(NOT EXISTS "${PROJECT_SOURCE_DIR}/external/include/zlib.h")
+    message(FATAL_ERROR "zlib.h not found in external/include. "
+        "Drop zlib.h and zconf.h into external/include.")
+endif()
+list(APPEND LIBRARIES ${ZLIB_STATIC_LIB})
 
 file(GLOB_RECURSE headers 
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
@@ -122,6 +153,11 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/src" PREFIX "Sources" FILES ${sou
 
 link_directories(${PROJECT_SOURCE_DIR}/external/lib)
 find_package(CUDAToolkit REQUIRED)
+
+# Thrust headers live under the CUDA Toolkit include dir. nvcc gets this
+# automatically; the host C++ compiler does not, so expose it explicitly
+# for the .cpp files that pull in CUDA-aware headers (e.g. bsdf.h -> thrust/random.h).
+include_directories(${CUDAToolkit_INCLUDE_DIRS})
 add_executable(${CMAKE_PROJECT_NAME} ${sources} ${headers})
 set_property(TARGET ${CMAKE_PROJECT_NAME} PROPERTY CUDA_ARCHITECTURES native)
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES
