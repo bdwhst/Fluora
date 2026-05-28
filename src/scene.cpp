@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <queue>
 #include <numeric>
+#include <new>
 #include <json.hpp>
 
 #include "memoryUtils.h"
@@ -487,7 +488,9 @@ void Scene::LoadAllMeshesToGPU(Allocator alloc)
     for (int i=0;i<m_triangleMeshes.size();i++)
     {
         const auto& mesh = m_triangleMeshes[i];
-        TriangleMesh& dev_mesh = m_dev_triangleMeshes[i];
+        // cudaMallocManaged leaves memory uninitialized; default member initializers
+        // don't apply to raw allocation, so explicitly construct.
+        TriangleMesh& dev_mesh = *(new (m_dev_triangleMeshes + i) TriangleMesh{});
         dev_mesh.m_vertices = alloc.allocate<glm::vec3>(mesh.m_vertices.size());
         memcpy(dev_mesh.m_vertices, mesh.m_vertices.data(), sizeof(glm::vec3) * mesh.m_vertices.size());
         dev_mesh.m_triangles = alloc.allocate<glm::ivec3>(mesh.m_triangles.size());

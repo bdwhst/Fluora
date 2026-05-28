@@ -485,7 +485,12 @@ GPU_UNROLL
 		return  lambda_max - lambda_min + 1;
 	}
 
-	__device__ __host__ float max_value() const { return *std::max_element(values, values + get_size()); }
+	__device__ __host__ float max_value() const {
+		uint32_t n = get_size();
+		float m = values[0];
+		for (uint32_t i = 1; i < n; ++i) m = fmaxf(m, values[i]);
+		return m;
+	}
 
 	__device__ __host__ void scale(float val)
 	{
@@ -564,7 +569,9 @@ public:
 	__device__ __host__ float max_value() const
 	{
 		if (length == 0) return 0;
-		return *std::max_element(values, values + length);
+		float m = values[0];
+		for (int i = 1; i < length; ++i) m = fmaxf(m, values[i]);
+		return m;
 	}
 	__device__ __host__ float operator()(float lambda) const
 	{

@@ -146,7 +146,7 @@ public:
 	__device__ __host__
 		RGBUnboundedSpectrum(const RGBColorSpace& cs, const glm::vec3& rgb)
 	{
-		float m = std::max({ rgb.r, rgb.g, rgb.b });
+		float m = fmaxf(fmaxf(rgb.r, rgb.g), rgb.b);
 		scale = 2 * m;
 		rsp = cs.to_rgb_coeffs(scale ? rgb / scale : glm::vec3(0, 0, 0));
 	}
@@ -163,7 +163,7 @@ public:
 	__device__ __host__
 		RGBIlluminantSpectrum(const RGBColorSpace& cs, const glm::vec3& rgb) : illuminant(&cs.illuminant)
 	{
-		float m = std::max({ rgb.r, rgb.g, rgb.b });
+		float m = fmaxf(fmaxf(rgb.r, rgb.g), rgb.b);
 		scale = 2 * m;
 		rsp = cs.to_rgb_coeffs(scale ? rgb / scale : glm::vec3(0, 0, 0));
 	}
