@@ -1,22 +1,22 @@
 #include "materials.h"
 
-MaterialPtr MaterialPtr::create(const std::string& name, const BundledParams& params, Allocator alloc)
+MaterialHandle MaterialHandle::create(const std::string& name, const BundledParams& params, MaterialPool& pool)
 {
 	if (name == "diffuse")
 	{
-		return DiffuseMaterial::create(params, alloc);
+		return pool.add(DiffuseMaterial::create(params));
 	}
 	else if (name == "dielectric")
 	{
-		return DielectricMaterial::create(params, alloc);
+		return pool.add(DielectricMaterial::create(params));
 	}
 	else if (name == "conductor")
 	{
-		return ConductorMaterial::create(params, alloc);
+		return pool.add(ConductorMaterial::create(params));
 	}
 	else if (name == "emissive")
 	{
-		return EmissiveMaterial::create(params, alloc);
+		return pool.add(EmissiveMaterial::create(params));
 	}
 	else
 	{

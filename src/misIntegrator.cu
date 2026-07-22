@@ -131,7 +131,7 @@ __global__ void sample_Ld_volume(
 		if (intersected_surface)
 		{
 			// intersected with non-emissive material 
-			if(tmpIntersection.materialId != -1 && !sceneInfo.dev_materials[tmpIntersection.materialId].Is<EmissiveMaterial>())
+			if(tmpIntersection.materialId != -1 && !sceneInfo.dev_materialHandles[tmpIntersection.materialId].Is<EmissiveMaterial>())
 				return;
 			// intersected with light other than the chosen one
 			if (tmpIntersection.lightId != -1 && lightSampler.get_light(tmpIntersection.lightId) != light)
@@ -460,14 +460,13 @@ __global__ void scatter_on_intersection_mis(
 	extern __shared__ char sharedMemory[];
 	char* bxdfBufferLocal = sharedMemory;
 
-	MaterialPtr* materials = sceneInfo.dev_materials;
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
 	if (idx >= num_paths) return;
 	ShadeableIntersection intersection = shadeableIntersections[idx];
 	const PathSegment& pathSegment = pathSegments[idx];
 	thrust::default_random_engine& rng = pathSegments[idx].rng;
 	thrust::uniform_real_distribution<float> u01(0, 1);
-	MaterialPtr material = materials[intersection.materialId];
+	MaterialPtr material = sceneInfo.dev_materialPool.resolve<MaterialPtr>(sceneInfo.dev_materialHandles[intersection.materialId]);
 
 	if (material.Is<EmissiveMaterial>()) {
 		SampledSpectrum Le = material.Cast<EmissiveMaterial>()->Le(pathSegment.lambda);
@@ -762,7 +761,6 @@ __global__ void scatter_on_intersection_volume_mis(
 	extern __shared__ char sharedMemory[];
 	char* bxdfBufferLocal = sharedMemory;
 
-	MaterialPtr* materials = sceneInfo.dev_materials;
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
 	if (idx >= num_paths) return;
 	ShadeableIntersection intersection = shadeableIntersections[idx];
@@ -778,7 +776,7 @@ __global__ void scatter_on_intersection_volume_mis(
 		rayValid[idx] = true;
 		return;
 	}
-	MaterialPtr material = materials[intersection.materialId];
+	MaterialPtr material = sceneInfo.dev_materialPool.resolve<MaterialPtr>(sceneInfo.dev_materialHandles[intersection.materialId]);
 
 	// If the material indicates that the object was a light, "light" the ray
 	if (material.Is<EmissiveMaterial>()) {

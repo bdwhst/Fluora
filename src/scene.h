@@ -91,7 +91,8 @@ public:
     ~Scene();
     std::string sceneFilename;
     std::vector<Object> objects;
-    std::vector<MaterialPtr> materials;
+    std::vector<MaterialHandle> materials;
+    MaterialPool materialPool;
     std::vector<MediumPtr> media;
     std::vector<TriangleMeshData> m_triangleMeshes;
     TriangleMesh* m_dev_triangleMeshes;

@@ -410,7 +410,7 @@ void Scene::LoadAllMaterialsToGPU(Allocator alloc)
             }
         }
         job.params.insert_ptr("colorSpace", RGBColorSpace::sRGB);
-        materials.emplace_back(MaterialPtr::create(job.type, job.params, alloc));
+        materials.emplace_back(MaterialHandle::create(job.type, job.params, materialPool));
     }
 }
 
@@ -472,7 +472,7 @@ void Scene::LoadAllLightsToGPU(Allocator alloc)
         {
             BundledParams params;
             params.insert_int("primitiveID", i);
-            EmissiveMaterial* mat = materials[matID].Cast<EmissiveMaterial>();
+            EmissiveMaterial* mat = materialPool.host_get<EmissiveMaterial>(materials[matID]);
             // TODO: possible mem leak
             SpectrumPtr spec = alloc.new_object<RGBIlluminantSpectrum>(*mat->get_colorspace(), mat->get_rgb());
             params.insert_spectrum("Le_spec", spec);

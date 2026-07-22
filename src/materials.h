@@ -1,5 +1,6 @@
 #pragma once
 #include "taggedptr.h"
+#include "taggedindex.h"
 #include "bsdf.h"
 #include "spectrum.h"
 #include "color.h"
@@ -24,12 +25,14 @@ struct MaterialEvalInfo
 	__device__ MaterialEvalInfo(const glm::vec3& wo, const glm::vec2& uv, SampledWavelengths& swl) :wo(wo), uv(uv), swl(swl){}
 };
 
+// Transient dispatch type: only exists inside a kernel (or host call), resolved
+// from a MaterialHandle + MaterialPoolView. Never stored across the host/device
+// boundary — persistent references use MaterialHandle.
 class MaterialPtr : public TaggedPointer<DiffuseMaterial, DielectricMaterial, ConductorMaterial, EmissiveMaterial>
 {
 public:
 	using TaggedPointer::TaggedPointer;
-	static MaterialPtr create(const std::string& name, const BundledParams& params, Allocator alloc);
-	
+
 	// Assume local allocated size is greater than any of the bxdf class
 	__device__ BxDFPtr get_bxdf(MaterialEvalInfo& info, void* localMem);
 	// TODO: improve this
@@ -49,7 +52,7 @@ private:
 class DiffuseMaterial : public MaterialBase
 {
 public:
-	static DiffuseMaterial* create(const BundledParams& params, Allocator alloc)
+	static DiffuseMaterial create(const BundledParams& params)
 	{
 		glm::vec3  albedo = params.get_vec3("albedo");
 		cudaTextureObject_t albedoMap = params.get_texture("albedoMap");
@@ -57,7 +60,7 @@ public:
 		if (!colorSpace)
 			throw std::runtime_error("No color space specified for DiffuseMaterial");
 		cudaTextureObject_t normalMap = params.get_texture("normalMap");
-		return alloc.new_object<DiffuseMaterial>(normalMap, albedo, albedoMap, colorSpace);
+		return DiffuseMaterial(normalMap, albedo, albedoMap, colorSpace);
 	}
 	DiffuseMaterial(cudaTextureObject_t normalMap, const glm::vec3& albedo, cudaTextureObject_t albedoMap, RGBColorSpace* colorSpace):albedo(albedo), albedoMap(albedoMap), colorSpace(colorSpace){}
 	__device__ BxDFPtr get_bxdf(MaterialEvalInfo& info, void* localMem);
@@ -70,10 +73,10 @@ private:
 class DielectricMaterial : public MaterialBase
 {
 public:
-	static DielectricMaterial* create(const BundledParams& params, Allocator alloc)
+	static DielectricMaterial create(const BundledParams& params)
 	{
 		SpectrumPtr eta = params.get_spec("eta");
-		return alloc.new_object<DielectricMaterial>(eta);
+		return DielectricMaterial(eta);
 	}
 	DielectricMaterial(SpectrumPtr eta):eta(eta){}
 	__device__ BxDFPtr get_bxdf(MaterialEvalInfo& info, void* localMem)
@@ -96,12 +99,12 @@ private:
 class ConductorMaterial : public MaterialBase
 {
 public:
-	static ConductorMaterial* create(const BundledParams& params, Allocator alloc)
+	static ConductorMaterial create(const BundledParams& params)
 	{
 		SpectrumPtr eta = params.get_spec("eta");
 		SpectrumPtr k = params.get_spec("k");
 		float roughness = params.get_float("roughness");
-		return alloc.new_object<ConductorMaterial>(eta, k, roughness);
+		return ConductorMaterial(eta, k, roughness);
 	}
 	ConductorMaterial(SpectrumPtr eta, SpectrumPtr k, float roughness):eta(eta),k(k), roughness(roughness){}
 	__device__ BxDFPtr get_bxdf(MaterialEvalInfo& info, void* localMem)
@@ -126,14 +129,14 @@ private:
 class EmissiveMaterial : public MaterialBase
 {
 public:
-	static EmissiveMaterial* create(const BundledParams& params, Allocator alloc)
+	static EmissiveMaterial create(const BundledParams& params)
 	{
 		glm::vec3 albedo = params.get_vec3("albedo");
 		float emittance = params.get_float("emittance");
 		RGBColorSpace* colorSpace = (RGBColorSpace*)params.get_ptr("colorSpace");
 		if (!colorSpace)
 			throw std::runtime_error("No color space specified for EmissiveMaterial");
-		return alloc.new_object<EmissiveMaterial>(albedo * emittance, colorSpace);
+		return EmissiveMaterial(albedo * emittance, colorSpace);
 	}
 	EmissiveMaterial(const glm::vec3& rgb, RGBColorSpace* colorSpace):rgb(rgb), colorSpace(colorSpace){}
 	//should not be called
@@ -155,3 +158,18 @@ private:
 };
 
 constexpr uint32_t BxDFMaxSize = std::max({ sizeof(DiffuseBxDF), sizeof(DielectricBxDF), sizeof(ConductorBxDF)});
+
+// Persistent material storage: type-segregated pools + 32-bit handles.
+// The pool builder lives in Scene; the POD view is embedded in SceneInfoDev and
+// resolved to a transient MaterialPtr inside kernels.
+using MaterialPool = TypedPoolBuilder<DiffuseMaterial, DielectricMaterial, ConductorMaterial, EmissiveMaterial>;
+using MaterialPoolView = MaterialPool::View;
+
+class MaterialHandle : public MaterialPool::Handle
+{
+public:
+	using TaggedIndex::TaggedIndex;
+	MaterialHandle() = default;
+	__device__ __host__ MaterialHandle(const MaterialPool::Handle& h) : MaterialPool::Handle(h) {}
+	static MaterialHandle create(const std::string& name, const BundledParams& params, MaterialPool& pool);
+};

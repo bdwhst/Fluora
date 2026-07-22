@@ -158,7 +158,6 @@ __global__ void scatter_on_intersection(
 	extern __shared__ char sharedMemory[];
 	char* bxdfBufferLocal = sharedMemory;
 
-	MaterialPtr* materials = sceneInfo.dev_materials;
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
 	if (idx >= num_paths) return;
 	ShadeableIntersection intersection = shadeableIntersections[idx];
@@ -170,7 +169,7 @@ __global__ void scatter_on_intersection(
 		rayValid[idx] = true;
 		return;
 	}
-	MaterialPtr material = materials[intersection.materialId];
+	MaterialPtr material = sceneInfo.dev_materialPool.resolve<MaterialPtr>(sceneInfo.dev_materialHandles[intersection.materialId]);
 
 	if (material.Is<EmissiveMaterial>()) {
 		SampledSpectrum Le = material.Cast<EmissiveMaterial>()->Le(pathSegments[idx].lambda);

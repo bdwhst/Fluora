@@ -69,7 +69,8 @@ static Scene* hst_scene = NULL;
 static GuiDataContainer* guiData = NULL;
 static glm::vec3* dev_image = NULL;
 static Object* dev_objs = NULL;
-static MaterialPtr* dev_materials = NULL;
+static MaterialHandle* dev_materialHandles = NULL;
+static MaterialPoolView dev_materialPool = {};
 static MediumPtr* dev_media = NULL;
 static MTBVHGPUNode* dev_mtbvhArray = NULL;
 static Primitive* dev_primitives = NULL;
@@ -145,8 +146,9 @@ void pathtraceInit(Scene* scene, Allocator alloc) {
 
 	if (scene->materials.size())
 	{
-		cudaMalloc(&dev_materials, scene->materials.size() * sizeof(MaterialPtr));
-		cudaMemcpy(dev_materials, scene->materials.data(), scene->materials.size() * sizeof(MaterialPtr), cudaMemcpyHostToDevice);
+		cudaMalloc(&dev_materialHandles, scene->materials.size() * sizeof(MaterialHandle));
+		cudaMemcpy(dev_materialHandles, scene->materials.data(), scene->materials.size() * sizeof(MaterialHandle), cudaMemcpyHostToDevice);
+		dev_materialPool = scene->materialPool.upload(alloc);
 	}
 	
 	if (scene->media.size())
@@ -198,7 +200,7 @@ void pathtraceFree(Scene* scene) {
 #else
 	cudaFree(dev_bvhArray);
 #endif
-	cudaFree(dev_materials);
+	cudaFree(dev_materialHandles);
 	cudaFree(dev_media);
 	cudaFree(dev_intersections1);
 	cudaFree(dev_intersections2);
@@ -335,7 +337,8 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 	const int blockSize1d = 128;
 
 	SceneInfoDev dev_sceneInfo{};
-	dev_sceneInfo.dev_materials = dev_materials;
+	dev_sceneInfo.dev_materialHandles = dev_materialHandles;
+	dev_sceneInfo.dev_materialPool = dev_materialPool;
 	if (dev_media)
 	{
 		dev_sceneInfo.dev_media = dev_media;

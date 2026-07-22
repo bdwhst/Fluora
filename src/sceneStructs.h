@@ -242,7 +242,8 @@ struct ShadeableIntersection {
 
 
 struct SceneInfoDev {
-    MaterialPtr* dev_materials;
+    MaterialHandle* dev_materialHandles;
+    MaterialPoolView dev_materialPool;
     MediumPtr* dev_media;
     Object* dev_objs;
     int objectsSize;
