@@ -72,3 +72,7 @@ Renderer options are `#define`s at the top of `sceneStructs.h`: `MTBVH`, `DENOIS
 
 - Host/device-shared code is marked `__host__ __device__` (or `CPU_GPU_FUNC` from `defines.h`) — most headers under `src/` are compiled by both nvcc and MSVC, so keep them free of host-only constructs.
 - `workqueue.h` provides `SOA<T>`-backed work queues with `cuda::atomic` and a generic `GPUParallelFor`; separable compilation is on (`CUDA_SEPARABLE_COMPILATION`), and device-side Thrust (sort/remove/random) is used throughout the integrators.
+
+## Git conventions
+
+When fixing a feature that is broken by a recent commit that has not been pushed, amend/fixup that commit (rebase if it is not HEAD) instead of stacking new "fix the fix" commits — keep one clean commit per feature.
