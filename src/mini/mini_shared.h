@@ -59,7 +59,7 @@ struct MiniParams {
     unsigned int iter;        // current sample index, mixed into the RNG seed
     unsigned int maxDepth;
     unsigned int numObjects;
-    unsigned int pad0;
+    unsigned int bvhNumNodes; // RayIntersector::numNodes() (0 = no meshes)
 };
 
 // ---- wavefront mode (design doc M2) ----
@@ -82,7 +82,8 @@ struct WfCtl {
     unsigned int argSlot;      // wf_prepare: indirect-args slot (16-byte stride)
     unsigned int numObjects;
     unsigned int maxDepth;
-    unsigned int pad0, pad1;
+    unsigned int bvhNumNodes;
+    unsigned int pad0;
 };
 
 #endif // MINI_SHARED_H

@@ -1,5 +1,8 @@
 #include "mini_scene.h"
 
+#include "../core/mesh_loader.h"
+#include "../core/bvh_builder.h"
+
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -73,6 +76,7 @@ simd_float3 readVec3(std::istringstream& ss)
 
 struct PendingObject {
     std::string geometry;
+    std::string meshPath;
     int materialId = -1;
     simd_float3 trans = { 0, 0, 0 };
     simd_float3 rot = { 0, 0, 0 };
@@ -95,6 +99,10 @@ bool miniLoadScene(const std::string& path, MiniScene& out, std::string& err)
     MiniMaterial curMat = {};
     PendingObject curObj;
 
+    std::string sceneDir = "./";
+    if (auto slash = path.find_last_of('/'); slash != std::string::npos)
+        sceneDir = path.substr(0, slash + 1);
+
     auto flushObject = [&]() {
         if (!curObj.active)
             return;
@@ -106,6 +114,11 @@ bool miniLoadScene(const std::string& path, MiniScene& out, std::string& err)
             o.invTransform = simd_inverse(o.transform);
             o.invTranspose = simd_transpose(o.invTransform);
             out.objects.push_back(o);
+        } else if (curObj.geometry == "mesh") {
+            // Model paths in scene files are relative to the scene directory.
+            loadObjMesh(sceneDir + curObj.meshPath,
+                        buildTransform(curObj.trans, curObj.rot, curObj.scale),
+                        (uint32_t)curObj.materialId, out.positions, out.tris);
         } else {
             std::cout << "mini: skipping unsupported geometry '" << curObj.geometry << "'\n";
         }
@@ -188,6 +201,10 @@ bool miniLoadScene(const std::string& path, MiniScene& out, std::string& err)
         // object keys
         else if (mode == Mode::Object && tok == "geometry") {
             ss >> curObj.geometry;
+        } else if (mode == Mode::Object && tok == "model") {
+            std::string subtype;  // "fnormal"/"vnormal" — M1 uses face normals regardless
+            ss >> subtype >> curObj.meshPath;
+            curObj.geometry = "mesh";
         } else if (mode == Mode::Object && tok == "material") {
             ss >> curObj.materialId;
         } else if (mode == Mode::Object && tok == "TRANS") {
@@ -201,8 +218,8 @@ bool miniLoadScene(const std::string& path, MiniScene& out, std::string& err)
     flushMaterial();
     flushObject();
 
-    if (out.objects.empty()) {
-        err = "scene has no cube/sphere objects that FluoraMini can render";
+    if (out.objects.empty() && out.tris.empty()) {
+        err = "scene has no geometry that FluoraMini can render";
         return false;
     }
     for (const auto& o : out.objects) {
@@ -211,5 +228,6 @@ bool miniLoadScene(const std::string& path, MiniScene& out, std::string& err)
             return false;
         }
     }
+    out.bvh = buildThreadedBvh6(out.positions, out.tris);
     return true;
 }

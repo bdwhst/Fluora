@@ -134,19 +134,11 @@ private:
     cudaStream_t mStream;
 };
 
-// Traversal view the CUDA rt::intersect() unpacks — mirrors the fields of
-// SceneInfoDev that intersect_surface_mtbvh reads today.
-struct CudaTraversalView {
-    DeviceAddress mtbvhArray;      // MTBVHGPUNode*, 6 direction-ordered arrays
-    int bvhDataSize;
-    DeviceAddress primitives;      // Primitive*
-    DeviceAddress meshes;          // TriangleMesh*
-};
-static_assert(sizeof(CudaTraversalView) <= kTraversalViewMaxSize);
-
-// SKETCH: CudaRayIntersector::build uploads the CPU-built MTBVH (bvh.cpp)
-// exactly as pathtraceInit does now, then packs CudaTraversalView into the
-// opaque blob. CudaTexture wraps the cudaArray/cudaTextureObject_t path that
+// SKETCH: CudaRayIntersector::build uploads the node/triangle/position arrays
+// with cudaMalloc + memcpy (mirroring MetalRayIntersector), and a __device__
+// rt_closest_hit twin of raytrace.metal walks the same threaded BVH — or
+// bridges to the existing MTBVH traversal in intersections.cu for parity
+// testing. CudaTexture wraps the cudaArray/cudaTextureObject_t path that
 // Scene::loadTextureFromFile implements. CudaDevice::presentTarget keeps the
 // GL PBO interop currently in main.cpp/preview.cpp.
 

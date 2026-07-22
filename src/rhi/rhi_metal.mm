@@ -6,6 +6,8 @@
 
 #include "rhi.h"
 
+#include <algorithm>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -188,10 +190,7 @@ public:
     {
         throw std::logic_error("Metal textures land in M3 (textured scenes)");
     }
-    std::unique_ptr<RayIntersector> createIntersector() override
-    {
-        throw std::logic_error("RayIntersector lands in M3 (BVH scenes)");
-    }
+    std::unique_ptr<RayIntersector> createIntersector() override;
     Buffer& presentTarget(int, int) override
     {
         throw std::logic_error("presentation lands in M4 (interactive preview)");
@@ -205,6 +204,47 @@ private:
     id<MTLDevice> mDev;
     id<MTLLibrary> mLib = nil;
 };
+
+// Compute-traversal intersector: uploads the CPU-built threaded BVH; the
+// paired device code is rt_closest_hit in raytrace.metal. The M5 hardware-RT
+// variant replaces this class without touching kernel call sites.
+class MetalRayIntersector final : public RayIntersector {
+public:
+    explicit MetalRayIntersector(id<MTLDevice> dev) : mDev(dev) {}
+
+    void build(const AccelBuildInput& in) override
+    {
+        mNumNodes = in.numNodesPerDir;
+        mNodes = upload(in.nodes, in.nodeBytes, "rt.nodes");
+        mTris = upload(in.triangles, in.triangleBytes, "rt.tris");
+        mPositions = upload(in.positions, in.positionBytes, "rt.positions");
+    }
+    uint32_t numNodes() const override { return mNumNodes; }
+    std::array<Buffer*, 3> bindings() override
+    {
+        return { mNodes.get(), mTris.get(), mPositions.get() };
+    }
+
+private:
+    std::unique_ptr<Buffer> upload(const void* data, size_t bytes, const char* name)
+    {
+        // Metal rejects zero-length buffers; empty scenes get a dummy that
+        // numNodes()==0 guards against ever being read.
+        auto buf = std::make_unique<MetalBuffer>(
+            mDev, BufferDesc{ std::max<size_t>(bytes, 16), MemoryLocation::Shared, name });
+        if (data && bytes)
+            memcpy(buf->hostPtr(), data, bytes);
+        return buf;
+    }
+    id<MTLDevice> mDev;
+    uint32_t mNumNodes = 0;
+    std::unique_ptr<Buffer> mNodes, mTris, mPositions;
+};
+
+std::unique_ptr<RayIntersector> MetalDevice::createIntersector()
+{
+    return std::make_unique<MetalRayIntersector>(mDev);
+}
 
 std::unique_ptr<Device> createDevice(BackendKind kind, const DeviceDesc& desc)
 {

@@ -72,14 +72,21 @@ inline bool intersectUnitSphere(float3 ro, float3 rd, thread float& tOut, thread
 struct MiniHit {
     float t;
     float3 n;      // world-space geometric normal
-    int objIdx;
+    int objIdx;    // >=0 analytic object, -2 mesh triangle, -1 miss
+    uint matId;
 };
 
-inline bool closestHit(float3 ro, float3 rd, device const MiniObject* objects,
-                       uint numObjects, thread MiniHit& hit)
+// Analytic scaffolding objects tested brute-force; mesh geometry goes through
+// the rt_closest_hit seam (src/rhi/raytrace.metal).
+inline bool sceneIntersect(float3 ro, float3 rd,
+                           device const MiniObject* objects, uint numObjects,
+                           device const RtBvhNode* nodes, uint numNodes,
+                           device const uint4* tris, device const float3* positions,
+                           thread MiniHit& hit)
 {
     hit.t = INFINITY;
     hit.objIdx = -1;
+    hit.matId = 0;
     for (uint i = 0; i < numObjects; i++) {
         device const MiniObject& obj = objects[i];
         float3 roLocal = (obj.invTransform * float4(ro, 1.0f)).xyz;
@@ -93,9 +100,19 @@ inline bool closestHit(float3 ro, float3 rd, device const MiniObject* objects,
             hit.t = t;
             hit.n = normalize((obj.invTranspose * float4(nLocal, 0.0f)).xyz);
             hit.objIdx = (int)i;
+            hit.matId = (uint)obj.materialId;
         }
     }
-    return hit.objIdx >= 0;
+    RtHit rhit;
+    rhit.t = hit.t;
+    rt_closest_hit(ro, rd, nodes, numNodes, tris, positions, rhit);
+    if (rhit.hit) {
+        hit.t = rhit.t;
+        hit.n = rhit.n;
+        hit.matId = rhit.userData;
+        hit.objIdx = -2;
+    }
+    return hit.objIdx != -1;
 }
 
 inline float3 cosineSampleHemisphere(float3 n, thread MiniRng& rng)
@@ -167,6 +184,9 @@ kernel void pathtraceKernel(constant MiniParams& P                [[buffer(0)]],
                             device float4* accum                  [[buffer(1)]],
                             device const MiniMaterial* materials  [[buffer(2)]],
                             device const MiniObject* objects      [[buffer(3)]],
+                            device const RtBvhNode* bvhNodes    [[buffer(4)]],
+                            device const uint4* tris              [[buffer(5)]],
+                            device const float3* positions        [[buffer(6)]],
                             uint2 gid [[thread_position_in_grid]])
 {
     if (gid.x >= P.width || gid.y >= P.height)
@@ -186,10 +206,10 @@ kernel void pathtraceKernel(constant MiniParams& P                [[buffer(0)]],
 
     for (uint depth = 0; depth < P.maxDepth; depth++) {
         MiniHit hit;
-        if (!closestHit(ro, rd, objects, P.numObjects, hit))
+        if (!sceneIntersect(ro, rd, objects, P.numObjects, bvhNodes, P.bvhNumNodes,
+                            tris, positions, hit))
             break;  // black environment, like the CUDA renderer without a skybox
-        device const MiniObject& obj = objects[hit.objIdx];
-        device const MiniMaterial& mat = materials[obj.materialId];
+        device const MiniMaterial& mat = materials[hit.matId];
         if (mat.type == MINI_MAT_EMITTING) {
             L += throughput * float3(mat.rgb) * mat.emittance;
             break;
@@ -264,22 +284,26 @@ kernel void wf_prepare(constant WfCtl& C          [[buffer(0)]],
     atomic_store_explicit(&counts[C.zeroCounter], 0u, memory_order_relaxed);
 }
 
-kernel void wf_intersect(constant WfCtl& C               [[buffer(0)]],
-                         device atomic_uint* counts      [[buffer(1)]],
-                         device const WfPath* raysIn     [[buffer(2)]],
-                         device WfPath* shadeQueue       [[buffer(3)]],
+kernel void wf_intersect(constant WfCtl& C                [[buffer(0)]],
+                         device atomic_uint* counts       [[buffer(1)]],
+                         device const WfPath* raysIn      [[buffer(2)]],
+                         device WfPath* shadeQueue        [[buffer(3)]],
                          device const MiniObject* objects [[buffer(4)]],
+                         device const RtBvhNode* bvhNodes [[buffer(5)]],
+                         device const uint4* tris         [[buffer(6)]],
+                         device const float3* positions   [[buffer(7)]],
                          uint tid [[thread_position_in_grid]])
 {
     if (tid >= atomic_load_explicit(&counts[C.srcCounter], memory_order_relaxed))
         return;
     WfPath path = raysIn[tid];
     MiniHit hit;
-    if (!closestHit(float3(path.origin), float3(path.dir), objects, C.numObjects, hit))
+    if (!sceneIntersect(float3(path.origin), float3(path.dir), objects, C.numObjects,
+                        bvhNodes, C.bvhNumNodes, tris, positions, hit))
         return;  // escaped: contributes nothing, simply not re-enqueued
     path.t = hit.t;
     path.normal = hit.n;
-    path.matId = (uint)objects[hit.objIdx].materialId;
+    path.matId = hit.matId;
     shadeQueue[prim_queue_alloc(&counts[C.dstCounter])] = path;
 }
 

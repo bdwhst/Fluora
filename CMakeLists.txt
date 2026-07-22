@@ -35,14 +35,17 @@ if(APPLE)
     add_executable(FluoraMini
         src/mini/mini_main.cpp
         src/mini/mini_scene.cpp
+        src/core/mesh_loader.cpp
+        src/core/bvh_builder.cpp
         src/rhi/rhi_metal.mm
         src/stb.cpp
     )
     target_include_directories(FluoraMini PRIVATE external/include)
     # MSL sources are loaded from the source tree at runtime (dev convenience;
-    # packaging deferred to M4)
+    # packaging deferred to M5)
     target_compile_definitions(FluoraMini PRIVATE
         MINI_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/mini"
+        CORE_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/core"
         RHI_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/rhi")
     set_source_files_properties(src/rhi/rhi_metal.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(FluoraMini "-framework Metal" "-framework Foundation")

@@ -18,6 +18,7 @@
 //     becomes a registered kernel. Metal: MTLComputePipelineState from a
 //     metallib. CUDA: a launch thunk registered at static-init time.
 // =============================================================================
+#include <array>
 #include <cstdint>
 #include <cstddef>
 #include <initializer_list>
@@ -144,38 +145,33 @@ public:
 // Ray tracing seam
 // ---------------------------------------------------------------------------
 //
-// Host side: build an intersector from the scene's primitive soup and get an
-// opaque, POD "traversal view" blob to embed in kernel parameter blocks.
-// Device side: a per-backend rt::intersect(view, ray) / rt::occluded(view, ray)
-// compiled with the kernels — CUDA implements it with the existing MTBVH
-// traversal (intersections.cu), Metal either ports that same compute traversal
-// (parity first) or uses MSL intersection_query against an
-// MTLAccelerationStructure (fast path). Integrator code calls only the rt::
-// functions, so it cannot tell which one it got.
+// Host side: the CPU builds the acceleration structure (src/core/bvh_builder,
+// backend-neutral); the intersector owns its GPU residency. Device side:
+// kernels call rt_closest_hit() (src/rhi/raytrace.metal), compiled per
+// backend — the compute threaded-BVH traversal today, MSL intersection_query
+// against an MTLAccelerationStructure as the M5 fast path (which would ignore
+// `nodes` and build from the triangles instead). Kernel code cannot tell
+// which one it got.
 
 struct AccelBuildInput {
-    // Positions/indices as device buffers plus the host-side Primitive array;
-    // the CUDA backend also receives the CPU-built MTBVH (bvh.cpp) here.
-    Buffer* positions = nullptr;
-    Buffer* indices = nullptr;
-    const void* hostPrimitives = nullptr;
-    size_t primitiveCount = 0;
-};
-
-// Max bytes any backend needs for its traversal view (MTBVH view: array base +
-// size + primitive/vertex bases; Metal HW view: accel handle + intersection
-// function table index).
-inline constexpr size_t kTraversalViewMaxSize = 128;
-
-struct TraversalView {
-    alignas(16) unsigned char opaque[kTraversalViewMaxSize];
+    const void* nodes = nullptr;      // RtBvhNode[numNodesPerDir * 6] (accel_shared.h)
+    size_t nodeBytes = 0;
+    uint32_t numNodesPerDir = 0;
+    const void* triangles = nullptr;  // uint4 {i0,i1,i2,userData}
+    size_t triangleBytes = 0;
+    const void* positions = nullptr;  // float3 (16-byte stride)
+    size_t positionBytes = 0;
 };
 
 class RayIntersector {
 public:
     virtual ~RayIntersector() = default;
-    virtual void build(CommandStream& stream, const AccelBuildInput& input) = 0;
-    virtual TraversalView traversalView() const = 0;
+    virtual void build(const AccelBuildInput& input) = 0;
+    virtual uint32_t numNodes() const = 0;
+    // Buffers in the order rt_closest_hit expects (nodes, tris, positions),
+    // for slot binding in dispatch(). An opaque bindless traversal view
+    // replaces this when argument buffers land.
+    virtual std::array<Buffer*, 3> bindings() = 0;
 };
 
 // ---------------------------------------------------------------------------

@@ -81,8 +81,10 @@ int main(int argc, char** argv)
         // (see DeviceDesc::shaderSource in rhi.h).
         rhi::DeviceDesc deviceDesc;
         deviceDesc.shaderSource = readTextFile(std::string(MINI_SHADER_DIR) + "/mini_shared.h")
+                                + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/accel_shared.h")
                                 + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives_shared.h")
                                 + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives.metal")
+                                + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/raytrace.metal")
                                 + "\n" + readTextFile(std::string(MINI_SHADER_DIR) + "/pathtrace.metal");
         auto device = rhi::createDevice(rhi::BackendKind::Metal, deviceDesc);
         auto stream = device->createStream();
@@ -98,8 +100,25 @@ int main(int argc, char** argv)
         std::memcpy(matBuf->hostPtr(), scene.materials.data(),
                     scene.materials.size() * sizeof(MiniMaterial));
         auto objBuf = device->createBuffer(
-            { scene.objects.size() * sizeof(MiniObject), rhi::MemoryLocation::Shared, "objects" });
-        std::memcpy(objBuf->hostPtr(), scene.objects.data(), objBuf->size());
+            { std::max<size_t>(scene.objects.size(), 1) * sizeof(MiniObject),
+              rhi::MemoryLocation::Shared, "objects" });
+        std::memcpy(objBuf->hostPtr(), scene.objects.data(),
+                    scene.objects.size() * sizeof(MiniObject));
+
+        // Mesh geometry lives behind the ray-tracing seam: the CPU-built BVH
+        // (core/bvh_builder) is handed to the RayIntersector, whose buffers we
+        // slot-bind for rt_closest_hit.
+        auto intersector = device->createIntersector();
+        rhi::AccelBuildInput accel;
+        accel.nodes = scene.bvh.nodes.data();
+        accel.nodeBytes = scene.bvh.nodes.size() * sizeof(RtBvhNode);
+        accel.numNodesPerDir = scene.bvh.numNodesPerDir;
+        accel.triangles = scene.tris.data();
+        accel.triangleBytes = scene.tris.size() * sizeof(simd_uint4);
+        accel.positions = scene.positions.data();
+        accel.positionBytes = scene.positions.size() * sizeof(simd_float3);
+        intersector->build(accel);
+        auto rt = intersector->bindings();  // {nodes, tris, positions}
 
         // Camera setup replicating scene.cpp exactly, quirks included: pixelLength
         // uses tan(fovy in degrees->radians) un-halved, and the UP vector is used
@@ -117,6 +136,7 @@ int main(int argc, char** argv)
         params.height = height;
         params.maxDepth = scene.camera.maxDepth;
         params.numObjects = (unsigned)scene.objects.size();
+        params.bvhNumNodes = intersector->numNodes();
 
         const rhi::Dim3 grid{ (unsigned)(width + 15) / 16, (unsigned)(height + 15) / 16, 1 };
         const rhi::Dim3 block{ 16, 16, 1 };
@@ -144,7 +164,8 @@ int main(int argc, char** argv)
             params.iter = (unsigned)i;
             if (mode == "mega") {
                 stream->dispatch(*pipeline, grid, block, &params, sizeof(params),
-                                 { accum.get(), matBuf.get(), objBuf.get() });
+                                 { accum.get(), matBuf.get(), objBuf.get(),
+                                   rt[0], rt[1], rt[2] });
             } else {
                 stream->dispatch(*raygenPipe, grid, block, &params, sizeof(params),
                                  { raysA.get(), counts.get() });
@@ -157,6 +178,7 @@ int main(int argc, char** argv)
                     WfCtl c = {};
                     c.numObjects = params.numObjects;
                     c.maxDepth = params.maxDepth;
+                    c.bvhNumNodes = params.bvhNumNodes;
 
                     c.srcCounter = cur;
                     c.zeroCounter = WF_COUNT_SHADE;
@@ -165,7 +187,8 @@ int main(int argc, char** argv)
                                      { counts.get(), indirectArgs.get() });
                     c.dstCounter = WF_COUNT_SHADE;
                     stream->dispatchIndirect(*intersectPipe, tile, *indirectArgs, 0, &c, sizeof(c),
-                                             { counts.get(), raysCur, shadeQ.get(), objBuf.get() });
+                                             { counts.get(), raysCur, shadeQ.get(), objBuf.get(),
+                                               rt[0], rt[1], rt[2] });
 
                     c.srcCounter = WF_COUNT_SHADE;
                     c.zeroCounter = next;

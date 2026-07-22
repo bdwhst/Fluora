@@ -7,6 +7,7 @@
 #include <vector>
 #include <simd/simd.h>
 #include "mini_shared.h"
+#include "../core/bvh_builder.h"
 
 struct MiniCamera {
     int width = 800;
@@ -22,8 +23,14 @@ struct MiniCamera {
 
 struct MiniScene {
     std::vector<MiniMaterial> materials;
-    std::vector<MiniObject> objects;
+    std::vector<MiniObject> objects;      // analytic cubes/spheres
     MiniCamera camera;
+
+    // Mesh geometry, world-space baked at load (no instancing); loading and
+    // BVH construction live in src/core. tris are {i0, i1, i2, materialId}.
+    std::vector<simd_float3> positions;
+    std::vector<simd_uint4> tris;
+    BvhBuildResult bvh;
 };
 
 // Returns false and sets err on failure (missing file, no objects, ...).

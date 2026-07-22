@@ -1,8 +1,7 @@
 # Metal RHI: design and migration plan
 
-Status: M0–M2 landed (Cornell renders on macOS/Metal in megakernel and wavefront
-modes, bitwise-identical; primitives + queue tested via RhiTest) · Next: M3 device
-ports · Owner: bdwhst · Last updated: 2026-07-22
+Status: M0–M2 landed; M3 in progress (mesh scenes render on macOS via threaded-BVH
+traversal behind the RayIntersector seam) · Owner: bdwhst · Last updated: 2026-07-22
 
 ## 1. Context and goal
 
@@ -149,12 +148,22 @@ Unverified on CUDA until M4.
   real BSDFs/BVH make stages expensive and divergent; re-measure in M3/M4
   before drawing conclusions.
 
-**M3 — shared device code + full scenes on Metal** *(Mac)*: portability shim (math
-header mapping glm↔MSL vectors, PCG RNG replacing `thrust::random`, atomics/texture
-shims); port MTBVH traversal (behind `RayIntersector`), BSDFs, and the spectral
-pipeline to compile as MSL; make the real scene loader host-portable so `mini_scene`
-dies. This is the long pole; the M1 kernel gets progressively replaced by ports of the
-real integrators.
+**M3 — shared device code + full scenes on Metal** *(Mac, in progress)*:
+- *Landed:* mesh scenes render — OBJ loading (`src/core/mesh_loader`), CPU-built
+  six-direction threaded BVH (`src/core/bvh_builder`, median split; SAH later), and
+  stackless traversal behind the `rt_closest_hit` seam (`src/rhi/raytrace.metal`) with
+  GPU residency owned by `RayIntersector`. Glass-bunny (144k tris) renders in both
+  modes, bitwise identical; with real traversal cost the wavefront/mega gap collapses
+  to 1.14× (4.9 s vs 5.6 s at 800×800×300spp) from 3.5× on the analytic scene.
+- *Remaining:* math/RNG/texture shims for sharing device code with CUDA; port the real
+  BSDFs (per-material shade kernels, tier-1 of the `get_bxdf` plan) and the spectral
+  pipeline; make the real scene loader host-portable (migrating it into `src/core`) so
+  `mini_scene` dies. This is the long pole.
+
+**Code layout rule:** portable host code (loaders, builders, eventually the renderer
+core) lives in `src/core/`; backend seams, device-code files, and primitives in
+`src/rhi/`; `src/mini/` is scaffolding that only shrinks and may only *call* the other
+two. Adding capability inside `src/mini` is a review flag.
 
 **M4 — CUDA catch-up and parity** *(needs the Windows/CUDA machine, ~2026-07-27+)*:
 build the CUDA renderer and fix anything M0–M3 broke (starting with the unverified
