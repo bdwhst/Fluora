@@ -59,7 +59,7 @@ Defined in `src/rhi/rhi.h`; one implementation file per backend
 |---|---|---|
 | `Device` | context + kernel registry | `MTLDevice` + `MTLLibrary` |
 | `Buffer` | `cudaMalloc`/`cudaMallocManaged` | `MTLBuffer` (Private/Shared) |
-| `Texture` | `cudaTextureObject_t` | `MTLTexture` + sampler, bindless heap index |
+| `Texture` | `cudaTextureObject_t` | `MTLTexture` + sampler, bindless heap index (landed) |
 | `ComputePipeline` | registered launch thunk (named) | `MTLComputePipelineState` |
 | `CommandStream` | `cudaStream_t` | `MTLCommandBuffer` + compute encoders |
 | `RayIntersector` | CPU-built MTBVH upload | same (M3) or `MTLAccelerationStructure` (M5) |
@@ -181,10 +181,23 @@ Unverified on CUDA until M4.
   early close.
   Preview is on by default; `--no-preview` keeps the headless path, which stays
   bitwise identical to preview-mode output. ImGui and resize stay in M5.
-- *Remaining:* math/RNG/texture shims for sharing device code with CUDA; port the
+- *Landed:* bindless textures + environment maps. `Device::textureHeap()` is a
+  buffer of 64-bit entries indexed by `Texture::shaderHandle()` — `MTLResourceID`
+  on Metal (read directly as `texture2d<float>`, Metal 3 bindless, backend keeps
+  every texture resident per dispatch), an array of `cudaTextureObject_t` on CUDA
+  in M4 (same layout, same kernel code through the `tex_heap_sample` shim in
+  `src/rhi/texture.metal`, fixed bilinear+wrap sampler matching the CUDA
+  `cudaTextureDesc`). First consumer: SKYBOX equirect env maps (`src/core/`
+  image_loader + envmap_shared) sampled on ray miss, resolved inline in
+  `wf_intersect` like emissive hits. Replicated quirk: the CUDA renderer sets
+  `stbi_set_flip_vertically_on_load` globally and its `v = asin(y)+0.5` mapping
+  assumes bottom-up images — the core loader flips to match. Verified by a
+  RhiTest bilinear-sampling unit test plus bunny-skybox rendering both modes
+  bitwise identical; cornell output unchanged.
+- *Remaining:* math/RNG shims for sharing device code with CUDA; port the
   remaining real BSDFs (rough dielectric, metallic workflow) and the spectral
   pipeline; make the real scene loader host-portable (migrating it into `src/core`) so
-  `mini_scene` dies. This is the long pole.
+  `mini_scene` dies (textured materials ride on that). This is the long pole.
 
 **Code layout rule:** portable host code (loaders, builders, eventually the renderer
 core) lives in `src/core/`; backend seams, device-code files, and primitives in

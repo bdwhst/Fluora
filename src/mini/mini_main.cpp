@@ -15,6 +15,7 @@
 
 #include <stb_image_write.h>
 
+#include "../core/image_loader.h"
 #include "../core/tonemap_shared.h"
 #include "../rhi/rhi.h"
 #include "../rhi/primitives_shared.h"
@@ -84,9 +85,11 @@ int main(int argc, char** argv)
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/accel_shared.h")
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/bsdf_shared.h")
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/tonemap_shared.h")
+                                + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/envmap_shared.h")
                                 + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives_shared.h")
                                 + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives.metal")
                                 + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/raytrace.metal")
+                                + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/texture.metal")
                                 + "\n" + readTextFile(std::string(MINI_SHADER_DIR) + "/pathtrace.metal");
         auto device = rhi::createDevice(rhi::BackendKind::Metal, deviceDesc);
         auto stream = device->createStream();
@@ -122,6 +125,27 @@ int main(int argc, char** argv)
         intersector->build(accel);
         auto rt = intersector->bindings();  // {nodes, tris, positions}
 
+        // Environment map: an RGBA32F texture in the bindless heap; kernels
+        // get the heap index through params (invariant I-1: index, not handle).
+        uint32_t envMapIdx = MINI_ENV_NONE;
+        std::unique_ptr<rhi::Texture> envTex;
+        if (!scene.envMapPath.empty()) {
+            HdrImage envImg;
+            if (loadHdrImage(scene.envMapPath, envImg)) {
+                envTex = device->createTexture(
+                    { envImg.width, envImg.height, rhi::TextureFormat::RGBA32Float,
+                      true, false, "envmap" });
+                envTex->upload(envImg.rgba.data(), envImg.rgba.size() * sizeof(float));
+                envMapIdx = (uint32_t)envTex->shaderHandle();
+                std::cout << "mini: environment map " << scene.envMapPath << " ("
+                          << envImg.width << "x" << envImg.height << ")\n";
+            } else {
+                std::cout << "mini: failed to load environment map "
+                          << scene.envMapPath << ", using black\n";
+            }
+        }
+        rhi::Buffer* texHeap = &device->textureHeap();
+
         // Camera setup replicating scene.cpp exactly, quirks included: pixelLength
         // uses tan(fovy in degrees->radians) un-halved, and the UP vector is used
         // as given rather than re-orthogonalized.
@@ -139,6 +163,7 @@ int main(int argc, char** argv)
         params.maxDepth = scene.camera.maxDepth;
         params.numObjects = (unsigned)scene.objects.size();
         params.bvhNumNodes = intersector->numNodes();
+        params.envMapIdx = envMapIdx;
 
         const rhi::Dim3 grid{ (unsigned)(width + 15) / 16, (unsigned)(height + 15) / 16, 1 };
         const rhi::Dim3 block{ 16, 16, 1 };
@@ -191,7 +216,7 @@ int main(int argc, char** argv)
             if (mode == "mega") {
                 stream->dispatch(*pipeline, grid, block, &params, sizeof(params),
                                  { accum.get(), matBuf.get(), objBuf.get(),
-                                   rt[0], rt[1], rt[2] });
+                                   rt[0], rt[1], rt[2], texHeap });
             } else {
                 stream->dispatch(*raygenPipe, grid, block, &params, sizeof(params),
                                  { raysA.get(), counts.get() });
@@ -205,6 +230,7 @@ int main(int argc, char** argv)
                     c.numObjects = params.numObjects;
                     c.maxDepth = params.maxDepth;
                     c.bvhNumNodes = params.bvhNumNodes;
+                    c.envMapIdx = envMapIdx;
                     c.srcCounter = cur;
                     c.zeroCounter = next;
 
@@ -214,7 +240,8 @@ int main(int argc, char** argv)
                                              WF_ARG_INTERSECT * 16, &c, sizeof(c),
                                              { counts.get(), raysCur, objBuf.get(),
                                                rt[0], rt[1], rt[2], matBuf.get(), accum.get(),
-                                               qDiffuse.get(), qConductor.get(), qGlass.get() });
+                                               qDiffuse.get(), qConductor.get(), qGlass.get(),
+                                               texHeap });
                     stream->dispatch(*prepShadePipe, one, one, &c, sizeof(c),
                                      { counts.get(), indirectArgs.get() });
 

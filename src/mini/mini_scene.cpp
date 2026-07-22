@@ -152,6 +152,19 @@ bool miniLoadScene(const std::string& path, MiniScene& out, std::string& err)
             flushObject();
             mode = Mode::Object;
             curObj.active = true;
+        } else if (tok == "SKYBOX") {
+            // Like Scene::loadSkybox: the path is the whole next line,
+            // relative to the scene directory.
+            flushMaterial();
+            flushObject();
+            mode = Mode::None;
+            std::string pathLine;
+            if (std::getline(file, pathLine)) {
+                while (!pathLine.empty() && (pathLine.back() == '\r' || pathLine.back() == ' '))
+                    pathLine.pop_back();
+                if (!pathLine.empty())
+                    out.envMapPath = sceneDir + pathLine;
+            }
         }
         // material keys
         else if (mode == Mode::Material && tok == "TYPE") {

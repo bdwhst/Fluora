@@ -52,7 +52,20 @@ int main()
     try {
         rhi::DeviceDesc desc;
         desc.shaderSource = readTextFile(std::string(RHI_SHADER_DIR) + "/primitives_shared.h")
-                          + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives.metal");
+                          + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives.metal")
+                          + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/texture.metal")
+                          // Samples the bindless heap at (uv.xy, index=uv.z).
+                          + R"MSL(
+kernel void test_tex_sample(constant PrimParams& P    [[buffer(0)]],
+                            device const RhiTex* heap [[buffer(1)]],
+                            device const float4* q    [[buffer(2)]],
+                            device float4* outv       [[buffer(3)]],
+                            uint tid [[thread_position_in_grid]])
+{
+    if (tid >= P.n) return;
+    outv[tid] = tex_heap_sample(heap, (uint)q[tid].z, q[tid].xy);
+}
+)MSL";
         auto device = rhi::createDevice(rhi::BackendKind::Metal, desc);
         auto stream = device->createStream();
         rhi::Algorithms alg(*device);
@@ -142,6 +155,48 @@ int main()
             std::sort(got.begin(), got.end());
             std::sort(expect.begin(), expect.end());
             check(count == expect.size() && got == expect, "workQueuePush");
+        }
+
+        // bindless texture heap: bilinear sampling of known texels
+        {
+            // Texture 0: 2x2 RGBA32F with distinct texel colors.
+            const float texA[2 * 2 * 4] = {
+                1, 0, 0, 1,   0, 1, 0, 1,
+                0, 0, 1, 1,   1, 1, 0, 1,
+            };
+            auto t0 = device->createTexture({ 2, 2, rhi::TextureFormat::RGBA32Float });
+            t0->upload(texA, sizeof(texA));
+            // Texture 1: 1x1 constant, verifies heap index routing.
+            const float texB[4] = { 0.25f, 0.5f, 0.75f, 1 };
+            auto t1 = device->createTexture({ 1, 1, rhi::TextureFormat::RGBA32Float });
+            t1->upload(texB, sizeof(texB));
+
+            // (u, v, heapIndex): texel centers reproduce exact texels under
+            // bilinear; the center of the 2x2 blends all four equally.
+            const float queries[][4] = {
+                { 0.25f, 0.25f, 0, 0 }, { 0.75f, 0.25f, 0, 0 },
+                { 0.25f, 0.75f, 0, 0 }, { 0.75f, 0.75f, 0, 0 },
+                { 0.50f, 0.50f, 0, 0 }, { 0.33f, 0.77f, 1, 0 },
+            };
+            const float expect[][4] = {
+                { 1, 0, 0, 1 }, { 0, 1, 0, 1 },
+                { 0, 0, 1, 1 }, { 1, 1, 0, 1 },
+                { 0.5f, 0.5f, 0.25f, 1 }, { 0.25f, 0.5f, 0.75f, 1 },
+            };
+            const uint32_t nq = 6;
+            auto qBuf = makeShared(*device, queries, sizeof(queries), "queries");
+            auto oBuf = makeShared(*device, nullptr, sizeof(expect), "out");
+            auto pipeline = device->createPipeline({ "test_tex_sample" });
+            PrimParams p = {};
+            p.n = nq;
+            stream->dispatch(*pipeline, { 1, 1, 1 }, { PRIM_TILE, 1, 1 }, &p, sizeof(p),
+                             { &device->textureHeap(), qBuf.get(), oBuf.get() });
+            stream->waitIdle();
+            const float* got = (const float*)oBuf->hostPtr();
+            bool ok = true;
+            for (uint32_t i = 0; i < nq * 4; i++)
+                ok = ok && std::abs(got[i] - ((const float*)expect)[i]) < 1e-5f;
+            check(ok, "textureHeapSample");
         }
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << "\n";

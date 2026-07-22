@@ -168,6 +168,7 @@ kernel void pathtraceKernel(constant MiniParams& P                [[buffer(0)]],
                             device const RtBvhNode* bvhNodes    [[buffer(4)]],
                             device const uint4* tris              [[buffer(5)]],
                             device const float3* positions        [[buffer(6)]],
+                            device const RhiTex* texHeap          [[buffer(7)]],
                             uint2 gid [[thread_position_in_grid]])
 {
     if (gid.x >= P.width || gid.y >= P.height)
@@ -188,8 +189,13 @@ kernel void pathtraceKernel(constant MiniParams& P                [[buffer(0)]],
     for (uint depth = 0; depth < P.maxDepth; depth++) {
         MiniHit hit;
         if (!sceneIntersect(ro, rd, objects, P.numObjects, bvhNodes, P.bvhNumNodes,
-                            tris, positions, hit))
-            break;  // black environment, like the CUDA renderer without a skybox
+                            tris, positions, hit)) {
+            // Escaped: environment radiance if the scene has a SKYBOX, else black.
+            if (P.envMapIdx != MINI_ENV_NONE)
+                L += throughput
+                   * tex_heap_sample(texHeap, P.envMapIdx, env_equirect_uv(rd)).xyz;
+            break;
+        }
         device const MiniMaterial& mat = materials[hit.matId];
         if (mat.type == MINI_MAT_EMITTING) {
             L += throughput * float3(mat.rgb) * mat.emittance;
@@ -298,6 +304,7 @@ kernel void wf_intersect(constant WfCtl& C                 [[buffer(0)]],
                          device WfPath* qDiffuse           [[buffer(9)]],
                          device WfPath* qConductor         [[buffer(10)]],
                          device WfPath* qGlass             [[buffer(11)]],
+                         device const RhiTex* texHeap      [[buffer(12)]],
                          uint tid [[thread_position_in_grid]])
 {
     if (tid >= atomic_load_explicit(&counts[C.srcCounter], memory_order_relaxed))
@@ -305,8 +312,18 @@ kernel void wf_intersect(constant WfCtl& C                 [[buffer(0)]],
     WfPath path = raysIn[tid];
     MiniHit hit;
     if (!sceneIntersect(float3(path.origin), float3(path.dir), objects, C.numObjects,
-                        bvhNodes, C.bvhNumNodes, tris, positions, hit))
-        return;  // escaped: contributes nothing, simply not re-enqueued
+                        bvhNodes, C.bvhNumNodes, tris, positions, hit)) {
+        // Escaped: environment radiance (resolved inline like emissive hits),
+        // then simply not re-enqueued.
+        if (C.envMapIdx != MINI_ENV_NONE) {
+            float3 L = float3(path.throughput)
+                     * tex_heap_sample(texHeap, C.envMapIdx,
+                                       env_equirect_uv(float3(path.dir))).xyz;
+            if (all(isfinite(L)))
+                accum[path.pixel] += float4(L, 1.0f);
+        }
+        return;
+    }
 
     device const MiniMaterial& mat = materials[hit.matId];
     if (mat.type == MINI_MAT_EMITTING) {

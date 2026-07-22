@@ -28,6 +28,8 @@ typedef simd_float4x4 mini_float4x4;
 #define MINI_MAT_GLASS     2
 #define MINI_MAT_CONDUCTOR 3  // GGX; roughness < 1e-3 degenerates to mirror
 
+#define MINI_ENV_NONE 0xFFFFFFFFu  // envMapIdx sentinel: black environment
+
 struct MiniMaterial {
     mini_float3 rgb;
     int   type;         // MINI_MAT_*
@@ -60,6 +62,8 @@ struct MiniParams {
     unsigned int maxDepth;
     unsigned int numObjects;
     unsigned int bvhNumNodes; // RayIntersector::numNodes() (0 = no meshes)
+    unsigned int envMapIdx;   // texture-heap index of the env map, or MINI_ENV_NONE
+    unsigned int pad0, pad1, pad2;
 };
 
 // ---- wavefront mode (design doc M2/M3) ----
@@ -94,7 +98,7 @@ struct WfCtl {
     unsigned int numObjects;
     unsigned int maxDepth;
     unsigned int bvhNumNodes;
-    unsigned int pad0;
+    unsigned int envMapIdx;
 };
 
 #endif // MINI_SHARED_H

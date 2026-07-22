@@ -59,6 +59,57 @@ private:
     id<MTLBuffer> mBuf;
 };
 
+// Bindless texture: the MTLTexture's gpuResourceID is written into the
+// device's heap table at creation; shaderHandle() is that slot index. Kernels
+// read the heap buffer as texture2d<float> entries (Metal 3 bindless — no
+// argument encoder). Shared storage so upload() is a plain replaceRegion.
+class MetalTexture final : public Texture {
+public:
+    MetalTexture(id<MTLDevice> dev, const TextureDesc& desc, uint64_t heapIndex)
+        : mHeapIndex(heapIndex), mWidth(desc.width), mHeight(desc.height)
+    {
+        MTLPixelFormat fmt;
+        switch (desc.format) {
+        case TextureFormat::RGBA8Unorm:  fmt = MTLPixelFormatRGBA8Unorm;  mBytesPerPixel = 4;  break;
+        case TextureFormat::RGBA32Float: fmt = MTLPixelFormatRGBA32Float; mBytesPerPixel = 16; break;
+        case TextureFormat::R32Float:    fmt = MTLPixelFormatR32Float;    mBytesPerPixel = 4;  break;
+        }
+        MTLTextureDescriptor* td =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:fmt
+                                                               width:desc.width
+                                                              height:desc.height
+                                                           mipmapped:NO];
+        td.usage = MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModeShared;
+        mTex = [dev newTextureWithDescriptor:td];
+        if (!mTex)
+            throw std::runtime_error("MTLTexture allocation failed");
+        if (desc.debugName)
+            mTex.label = [NSString stringWithUTF8String:desc.debugName];
+    }
+
+    uint64_t shaderHandle() const override { return mHeapIndex; }
+
+    void upload(const void* pixels, size_t bytes) override
+    {
+        size_t expected = (size_t)mWidth * mHeight * mBytesPerPixel;
+        if (bytes != expected)
+            throw std::logic_error("texture upload size mismatch");
+        [mTex replaceRegion:MTLRegionMake2D(0, 0, mWidth, mHeight)
+                mipmapLevel:0
+                  withBytes:pixels
+                bytesPerRow:(NSUInteger)mWidth * mBytesPerPixel];
+    }
+
+    id<MTLTexture> handle() const { return mTex; }
+
+private:
+    id<MTLTexture> mTex;
+    uint64_t mHeapIndex;
+    int mWidth, mHeight;
+    size_t mBytesPerPixel = 4;
+};
+
 class MetalComputePipeline final : public ComputePipeline {
 public:
     MetalComputePipeline(id<MTLDevice> dev, id<MTLLibrary> lib, const ComputePipelineDesc& desc)
@@ -87,19 +138,16 @@ private:
 
 class MetalCommandStream final : public CommandStream {
 public:
-    explicit MetalCommandStream(id<MTLCommandQueue> queue) : mQueue(queue) {}
+    MetalCommandStream(id<MTLCommandQueue> queue,
+                       const std::vector<id<MTLTexture>>* textures)
+        : mQueue(queue), mTextures(textures) {}
 
     void dispatch(ComputePipeline& pipeline, Dim3 grid, Dim3 block,
                   const void* params, size_t paramsSize,
                   std::initializer_list<Buffer*> buffers) override
     {
         id<MTLComputeCommandEncoder> enc = [current() computeCommandEncoder];
-        [enc setComputePipelineState:static_cast<MetalComputePipeline&>(pipeline).pso()];
-        if (params && paramsSize)
-            [enc setBytes:params length:paramsSize atIndex:0];
-        NSUInteger slot = 1;
-        for (Buffer* b : buffers)
-            [enc setBuffer:static_cast<MetalBuffer*>(b)->handle() offset:0 atIndex:slot++];
+        bind(enc, pipeline, params, paramsSize, buffers);
         [enc dispatchThreadgroups:MTLSizeMake(grid.x, grid.y, grid.z)
             threadsPerThreadgroup:MTLSizeMake(block.x, block.y, block.z)];
         [enc endEncoding];
@@ -111,12 +159,7 @@ public:
                           std::initializer_list<Buffer*> buffers) override
     {
         id<MTLComputeCommandEncoder> enc = [current() computeCommandEncoder];
-        [enc setComputePipelineState:static_cast<MetalComputePipeline&>(pipeline).pso()];
-        if (params && paramsSize)
-            [enc setBytes:params length:paramsSize atIndex:0];
-        NSUInteger slot = 1;
-        for (Buffer* b : buffers)
-            [enc setBuffer:static_cast<MetalBuffer*>(b)->handle() offset:0 atIndex:slot++];
+        bind(enc, pipeline, params, paramsSize, buffers);
         [enc dispatchThreadgroupsWithIndirectBuffer:static_cast<MetalBuffer&>(argsBuffer).handle()
                                indirectBufferOffset:argsOffset
                               threadsPerThreadgroup:MTLSizeMake(block.x, block.y, block.z)];
@@ -175,6 +218,25 @@ public:
     }
 
 private:
+    void bind(id<MTLComputeCommandEncoder> enc, ComputePipeline& pipeline,
+              const void* params, size_t paramsSize,
+              std::initializer_list<Buffer*> buffers)
+    {
+        [enc setComputePipelineState:static_cast<MetalComputePipeline&>(pipeline).pso()];
+        if (params && paramsSize)
+            [enc setBytes:params length:paramsSize atIndex:0];
+        NSUInteger slot = 1;
+        for (Buffer* b : buffers)
+            [enc setBuffer:static_cast<MetalBuffer*>(b)->handle() offset:0 atIndex:slot++];
+        // Bindless textures are referenced through the heap buffer, invisible
+        // to Metal's automatic residency — declare them all on every dispatch
+        // (texture counts are small; revisit with heaps if that changes).
+        if (mTextures && !mTextures->empty())
+            [enc useResources:(__unsafe_unretained id<MTLResource> const*)mTextures->data()
+                        count:mTextures->size()
+                        usage:MTLResourceUsageRead];
+    }
+
     id<MTLCommandBuffer> current()
     {
         if (!mCurrent)
@@ -182,6 +244,7 @@ private:
         return mCurrent;
     }
     id<MTLCommandQueue> mQueue;
+    const std::vector<id<MTLTexture>>* mTextures;
     id<MTLCommandBuffer> mCurrent = nil;
     std::deque<id<MTLCommandBuffer>> mInFlight;
 };
@@ -233,6 +296,26 @@ public:
     {
         return std::make_unique<MetalBuffer>(mDev, desc);
     }
+
+    std::unique_ptr<Texture> createTexture(const TextureDesc& desc) override
+    {
+        uint64_t index = mTextures.size();
+        if ((index + 1) * sizeof(MTLResourceID) > textureHeap().size())
+            throw std::runtime_error("texture heap full");
+        auto tex = std::make_unique<MetalTexture>(mDev, desc, index);
+        static_cast<MTLResourceID*>(mTexHeap->hostPtr())[index] = [tex->handle() gpuResourceID];
+        mTextures.push_back(tex->handle());
+        return tex;
+    }
+
+    Buffer& textureHeap() override
+    {
+        if (!mTexHeap)
+            mTexHeap = std::make_unique<MetalBuffer>(
+                mDev, BufferDesc{ kMaxTextures * sizeof(MTLResourceID),
+                                  MemoryLocation::Shared, "rhi.texheap" });
+        return *mTexHeap;
+    }
     std::unique_ptr<ComputePipeline> createPipeline(const ComputePipelineDesc& desc) override
     {
         if (!mLib)
@@ -244,13 +327,9 @@ public:
         // All streams and the present blit share one queue: command buffers on
         // a queue start in commit order and default hazard tracking covers the
         // present-target buffer, so present-after-submit needs no fences.
-        return std::make_unique<MetalCommandStream>(mQueue);
+        return std::make_unique<MetalCommandStream>(mQueue, &mTextures);
     }
 
-    std::unique_ptr<Texture> createTexture(const TextureDesc&) override
-    {
-        throw std::logic_error("Metal textures land in M3 (textured scenes)");
-    }
     std::unique_ptr<RayIntersector> createIntersector() override;
 
     Buffer& presentTarget(int width, int height) override
@@ -356,9 +435,13 @@ private:
         mPresentH = height;
     }
 
+    static constexpr size_t kMaxTextures = 1024;
+
     id<MTLDevice> mDev;
     id<MTLCommandQueue> mQueue;
     id<MTLLibrary> mLib = nil;
+    std::unique_ptr<Buffer> mTexHeap;         // MTLResourceID per texture
+    std::vector<id<MTLTexture>> mTextures;    // kept resident by dispatches
 
     NSWindow* mWindow = nil;
     CAMetalLayer* mLayer = nil;

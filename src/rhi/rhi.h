@@ -77,11 +77,13 @@ struct TextureDesc {
     const char* debugName = nullptr;
 };
 
-// Sampled image + sampler state fused, matching how the renderer already uses
-// cudaTextureObject_t. The 64-bit shaderHandle is what gets stored in material
-// structs: CUDA = the cudaTextureObject_t itself; Metal = index into a bindless
-// argument-buffer heap of textures (NOT a pointer — heap index survives the
-// host/device boundary, per invariant 1).
+// Sampled image accessed through the device's bindless texture heap (see
+// Device::textureHeap). shaderHandle() is the texture's index into that heap —
+// an index, NOT a pointer, so it survives the host/device boundary (invariant
+// 1) and can be stored in material structs / kernel params on both backends.
+// Device code samples via the tex_heap_sample shim (src/rhi/texture.metal).
+// Sampler state is fixed by the shim: bilinear + wrap, matching the
+// cudaTextureDesc the CUDA renderer uses today.
 class Texture {
 public:
     virtual ~Texture() = default;
@@ -208,6 +210,13 @@ public:
     virtual std::unique_ptr<ComputePipeline> createPipeline(const ComputePipelineDesc&) = 0;
     virtual std::unique_ptr<CommandStream> createStream() = 0;
     virtual std::unique_ptr<RayIntersector> createIntersector() = 0;
+
+    // Bindless texture table: one 64-bit entry per created texture, indexed by
+    // Texture::shaderHandle(). Slot-bind it like any buffer and sample with
+    // tex_heap_sample(heap, idx, uv). Metal: MTLResourceID entries (the backend
+    // keeps every texture resident for dispatches automatically); CUDA: an
+    // array of cudaTextureObject_t — same 8-byte layout, same kernel code.
+    virtual Buffer& textureHeap() = 0;
 
     // Presentation seam replacing the CUDA<->OpenGL PBO interop in main.cpp:
     // the backend owns how a final image reaches the window (CUDA: GL PBO as

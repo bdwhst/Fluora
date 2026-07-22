@@ -31,6 +31,9 @@ struct MiniScene {
     std::vector<simd_float3> positions;
     std::vector<simd_uint4> tris;
     BvhBuildResult bvh;
+
+    // SKYBOX line: equirectangular .hdr path (scene-dir relative), or empty.
+    std::string envMapPath;
 };
 
 // Returns false and sets err on failure (missing file, no objects, ...).

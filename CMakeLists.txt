@@ -37,6 +37,7 @@ if(APPLE)
         src/mini/mini_scene.cpp
         src/core/mesh_loader.cpp
         src/core/bvh_builder.cpp
+        src/core/image_loader.cpp
         src/rhi/rhi_metal.mm
         src/stb.cpp
     )
