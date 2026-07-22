@@ -361,3 +361,22 @@ kernel void wf_shade(constant WfCtl& C                    [[buffer(0)]],
     path.depth++;
     raysOut[prim_queue_alloc(&counts[C.dstCounter])] = path;
 }
+
+// ==========================================================================
+// Preview
+// ==========================================================================
+
+// Tonemaps the accumulator into the RHI present target (RGBA8) each iteration.
+// P.iter carries the number of completed samples. Mirrors x like saveImage()
+// (the quirk all saved renders share), so the window shows exactly what the
+// PNG will contain.
+kernel void present_tonemap(constant MiniParams& P     [[buffer(0)]],
+                            device const float4* accum [[buffer(1)]],
+                            device uchar4* out         [[buffer(2)]],
+                            uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= P.width || gid.y >= P.height)
+        return;
+    float3 c = tonemap_aces(accum[gid.y * P.width + gid.x].xyz / (float)P.iter);
+    out[gid.y * P.width + (P.width - 1u - gid.x)] = uchar4(uchar3(c * 255.0f + 0.5f), 255);
+}

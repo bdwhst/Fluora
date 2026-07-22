@@ -29,6 +29,8 @@ cmake --build build-mac
 ./build-mac/bin/RhiTest    # unit tests for the RHI parallel primitives — run after touching src/rhi/
 ```
 
+FluoraMini opens a live preview window by default (updates per iteration, freezes at the final frame until closed; q/Esc also close it). Pass `--no-preview` for headless/scripted renders — preview and headless output are bitwise identical, and the window shows the same orientation as the saved PNG.
+
 Gotcha when comparing images: `saveImage()` (main.cpp) writes PNGs mirrored (`setPixel(width-1-x, y)`) relative to kernel pixel indexing; all `img/` references use that convention and FluoraMini matches it. Another replicated quirk: the camera's `pixelLength` uses `tan(fovy_degrees→radians)` un-halved (scene.cpp) — FOVY in scene files is effectively a half-angle.
 
 Prerequisites the CMake build hard-fails without: a zlib static lib in `external/lib` plus `zlib.h`/`zconf.h` in `external/include` (needed because NanoVDB reads zip-compressed `.nvdb` volumes). OpenImageDenoise is linked from `external/lib`, with DLLs copied from `external/bin` post-build.

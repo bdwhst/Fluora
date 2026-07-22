@@ -1,15 +1,32 @@
 // Metal backend for the RHI (see docs/metal-rhi-design.md, milestone M1).
-// Implements Device / Buffer / ComputePipeline / CommandStream. Texture,
-// RayIntersector and presentation are M3/M4 work and throw for now.
+// Implements Device / Buffer / ComputePipeline / CommandStream /
+// RayIntersector and the presentation seam (Cocoa window + CAMetalLayer).
+// Texture is M3 work and throws for now.
 // Compiled with ARC (-fobjc-arc); ObjC objects held as C++ members are strong.
+#import <AppKit/AppKit.h>
 #import <Metal/Metal.h>
+#import <QuartzCore/CAMetalLayer.h>
 
 #include "rhi.h"
 
 #include <algorithm>
 #include <cstring>
+#include <deque>
 #include <stdexcept>
 #include <string>
+
+// Flags the close button instead of tearing the window down: present() reports
+// it and the app exits, which is also what q/Esc do.
+@interface RhiWindowDelegate : NSObject <NSWindowDelegate>
+@property(nonatomic) BOOL closeRequested;
+@end
+@implementation RhiWindowDelegate
+- (BOOL)windowShouldClose:(NSWindow*)sender
+{
+    self.closeRequested = YES;
+    return NO;
+}
+@end
 
 namespace rhi {
 
@@ -127,21 +144,33 @@ public:
         [blit endEncoding];
     }
 
+    // Bounded in-flight submits: without backpressure the CPU encodes an
+    // entire render ahead of the GPU, queueing seconds of GPU work that
+    // starves WindowServer compositing (OS-wide stutter on heavy scenes) and
+    // decouples wall-clock time from render progress (preview pacing breaks).
+    // Blocking here keeps at most kMaxInFlight buffers pending while the GPU
+    // always has work queued.
+    static constexpr size_t kMaxInFlight = 2;
+
     void submit() override
     {
         if (mCurrent) {
             [mCurrent commit];
-            mLastCommitted = mCurrent;
+            mInFlight.push_back(mCurrent);
             mCurrent = nil;
+        }
+        while (mInFlight.size() > kMaxInFlight) {
+            [mInFlight.front() waitUntilCompleted];
+            mInFlight.pop_front();
         }
     }
 
     void waitIdle() override
     {
         submit();
-        if (mLastCommitted) {
-            [mLastCommitted waitUntilCompleted];
-            mLastCommitted = nil;
+        if (!mInFlight.empty()) {
+            [mInFlight.back() waitUntilCompleted];  // in-order queue: back covers all
+            mInFlight.clear();
         }
     }
 
@@ -154,8 +183,27 @@ private:
     }
     id<MTLCommandQueue> mQueue;
     id<MTLCommandBuffer> mCurrent = nil;
-    id<MTLCommandBuffer> mLastCommitted = nil;
+    std::deque<id<MTLCommandBuffer>> mInFlight;
 };
+
+// Swizzle-free upload of the RGBA8 present target into the drawable: the
+// texture write consumes float4 RGBA regardless of the layer's BGRA storage.
+static NSString* const kPresentBlitSrc = @R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+kernel void rhi_present_blit(constant uint2& dims [[buffer(0)]],
+                             device const uchar4* src [[buffer(1)]],
+                             texture2d<float, access::write> dst [[texture(0)]],
+                             uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= dims.x || gid.y >= dims.y)
+        return;
+    // The drawable displays row 0 at the top of the window (verified on
+    // macOS 15 — no Core Animation flip applies to CAMetalLayer drawables),
+    // matching the present-target convention. Straight copy.
+    dst.write(float4(src[gid.y * dims.x + gid.x]) / 255.0f, gid);
+}
+)MSL";
 
 class MetalDevice final : public Device {
 public:
@@ -164,6 +212,7 @@ public:
         mDev = MTLCreateSystemDefaultDevice();
         if (!mDev)
             throw std::runtime_error("no Metal device available");
+        mQueue = [mDev newCommandQueue];
         if (!desc.shaderSource.empty()) {
             NSError* err = nil;
             MTLCompileOptions* opts = [MTLCompileOptions new];
@@ -192,7 +241,10 @@ public:
     }
     std::unique_ptr<CommandStream> createStream() override
     {
-        return std::make_unique<MetalCommandStream>([mDev newCommandQueue]);
+        // All streams and the present blit share one queue: command buffers on
+        // a queue start in commit order and default hazard tracking covers the
+        // present-target buffer, so present-after-submit needs no fences.
+        return std::make_unique<MetalCommandStream>(mQueue);
     }
 
     std::unique_ptr<Texture> createTexture(const TextureDesc&) override
@@ -200,18 +252,120 @@ public:
         throw std::logic_error("Metal textures land in M3 (textured scenes)");
     }
     std::unique_ptr<RayIntersector> createIntersector() override;
-    Buffer& presentTarget(int, int) override
+
+    Buffer& presentTarget(int width, int height) override
     {
-        throw std::logic_error("presentation lands in M4 (interactive preview)");
+        if (!mWindow)
+            createWindow(width, height);
+        else if (width != mPresentW || height != mPresentH)
+            throw std::logic_error("present target resize not supported");
+        return *mPresentBuf;
     }
-    void present() override
+
+    bool present() override
     {
-        throw std::logic_error("presentation lands in M4 (interactive preview)");
+        if (!mWindow)
+            throw std::logic_error("present() before presentTarget()");
+        @autoreleasepool {
+            for (;;) {
+                NSEvent* ev = [NSApp nextEventMatchingMask:NSEventMaskAny
+                                                 untilDate:[NSDate distantPast]
+                                                    inMode:NSDefaultRunLoopMode
+                                                   dequeue:YES];
+                if (!ev)
+                    break;
+                if (ev.type == NSEventTypeKeyDown) {
+                    NSString* ch = ev.charactersIgnoringModifiers;
+                    if (ev.keyCode == 53 /* Esc */ || [ch isEqualToString:@"q"]) {
+                        mWinDelegate.closeRequested = YES;
+                        continue;
+                    }
+                }
+                [NSApp sendEvent:ev];
+            }
+            if (mWinDelegate.closeRequested)
+                return false;
+
+            id<CAMetalDrawable> drawable = [mLayer nextDrawable];
+            if (!drawable)
+                return true;  // transient (e.g. window occluded); keep going
+            id<MTLCommandBuffer> cb = [mQueue commandBuffer];
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:mBlitPso];
+            uint32_t dims[2] = { (uint32_t)mPresentW, (uint32_t)mPresentH };
+            [enc setBytes:dims length:sizeof(dims) atIndex:0];
+            [enc setBuffer:static_cast<MetalBuffer*>(mPresentBuf.get())->handle()
+                    offset:0
+                   atIndex:1];
+            [enc setTexture:drawable.texture atIndex:0];
+            [enc dispatchThreadgroups:MTLSizeMake((mPresentW + 15) / 16, (mPresentH + 15) / 16, 1)
+                threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+            [enc endEncoding];
+            [cb presentDrawable:drawable];
+            [cb commit];
+        }
+        return true;
     }
 
 private:
+    void createWindow(int width, int height)
+    {
+        // Cocoa bring-up for a non-bundled CLI binary; must run on the main
+        // thread (it does: the renderer drives present() from main).
+        [NSApplication sharedApplication];
+        [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        [NSApp finishLaunching];
+
+        mWindow = [[NSWindow alloc]
+            initWithContentRect:NSMakeRect(0, 0, width, height)
+                      styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                                 | NSWindowStyleMaskMiniaturizable)
+                        backing:NSBackingStoreBuffered
+                          defer:NO];
+        mWindow.releasedWhenClosed = NO;
+        mWindow.title = @"FluoraMini";
+        mWinDelegate = [RhiWindowDelegate new];
+        mWindow.delegate = mWinDelegate;
+
+        mLayer = [CAMetalLayer layer];
+        mLayer.device = mDev;
+        mLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        mLayer.framebufferOnly = NO;  // written by the blit compute kernel
+        mLayer.drawableSize = CGSizeMake(width, height);
+        mWindow.contentView.wantsLayer = YES;
+        mWindow.contentView.layer = mLayer;
+
+        [mWindow center];
+        [mWindow makeKeyAndOrderFront:nil];
+        [NSApp activateIgnoringOtherApps:YES];
+
+        NSError* err = nil;
+        id<MTLLibrary> lib = [mDev newLibraryWithSource:kPresentBlitSrc
+                                                options:[MTLCompileOptions new]
+                                                  error:&err];
+        id<MTLFunction> fn = [lib newFunctionWithName:@"rhi_present_blit"];
+        if (fn)
+            mBlitPso = [mDev newComputePipelineStateWithFunction:fn error:&err];
+        if (!mBlitPso)
+            throw std::runtime_error("present blit pipeline failed: " + nsErrorToString(err));
+
+        mPresentBuf = std::make_unique<MetalBuffer>(
+            mDev, BufferDesc{ (size_t)width * height * 4, MemoryLocation::DeviceLocal,
+                              "rhi.present" });
+        mPresentW = width;
+        mPresentH = height;
+    }
+
     id<MTLDevice> mDev;
+    id<MTLCommandQueue> mQueue;
     id<MTLLibrary> mLib = nil;
+
+    NSWindow* mWindow = nil;
+    CAMetalLayer* mLayer = nil;
+    RhiWindowDelegate* mWinDelegate = nil;
+    id<MTLComputePipelineState> mBlitPso = nil;
+    std::unique_ptr<Buffer> mPresentBuf;
+    int mPresentW = 0, mPresentH = 0;
 };
 
 // Compute-traversal intersector: uploads the CPU-built threaded BVH; the

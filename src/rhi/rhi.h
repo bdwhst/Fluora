@@ -210,11 +210,19 @@ public:
     virtual std::unique_ptr<RayIntersector> createIntersector() = 0;
 
     // Presentation seam replacing the CUDA<->OpenGL PBO interop in main.cpp:
-    // the backend owns how a final uchar4 image reaches the window (CUDA: GL
-    // PBO as today; Metal: blit into a CAMetalLayer drawable). Preview/ImGui
-    // code talks only to this.
+    // the backend owns how a final image reaches the window (CUDA: GL PBO as
+    // today; Metal: Cocoa window + CAMetalLayer). Preview/ImGui code talks
+    // only to this.
+    //
+    // presentTarget() creates the window on first call and returns the RGBA8
+    // buffer (width*height*4, row-major, row 0 = top of the window) a tonemap
+    // kernel writes into. present() pumps window events and blits it to screen;
+    // it returns false once the user asked to close (window close, q, Esc) —
+    // after that the caller should stop rendering and exit. Writes to the
+    // target must be submitted on this device's streams before present() so
+    // same-queue ordering makes them visible.
     virtual Buffer& presentTarget(int width, int height) = 0;
-    virtual void present() = 0;
+    virtual bool present() = 0;
 };
 
 std::unique_ptr<Device> createDevice(BackendKind kind, const DeviceDesc& desc = {});

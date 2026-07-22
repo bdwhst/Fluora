@@ -48,7 +48,8 @@ if(APPLE)
         CORE_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/core"
         RHI_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/rhi")
     set_source_files_properties(src/rhi/rhi_metal.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-    target_link_libraries(FluoraMini "-framework Metal" "-framework Foundation")
+    target_link_libraries(FluoraMini "-framework Metal" "-framework Foundation"
+        "-framework AppKit" "-framework QuartzCore")
 
     # RHI primitive unit tests (reduce/scan/compact/sort/work queue)
     add_executable(RhiTest
@@ -57,7 +58,8 @@ if(APPLE)
         src/rhi/rhi_metal.mm
     )
     target_compile_definitions(RhiTest PRIVATE RHI_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/rhi")
-    target_link_libraries(RhiTest "-framework Metal" "-framework Foundation")
+    target_link_libraries(RhiTest "-framework Metal" "-framework Foundation"
+        "-framework AppKit" "-framework QuartzCore")
     return()
 endif()
 

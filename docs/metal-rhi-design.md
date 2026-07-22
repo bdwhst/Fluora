@@ -63,7 +63,7 @@ Defined in `src/rhi/rhi.h`; one implementation file per backend
 | `ComputePipeline` | registered launch thunk (named) | `MTLComputePipelineState` |
 | `CommandStream` | `cudaStream_t` | `MTLCommandBuffer` + compute encoders |
 | `RayIntersector` | CPU-built MTBVH upload | same (M3) or `MTLAccelerationStructure` (M5) |
-| present | GL PBO interop (as today) | `CAMetalLayer` drawable (M5) |
+| present | GL PBO interop (as today) | `CAMetalLayer` drawable (landed) |
 
 **Dispatch/binding convention** (I-2): `dispatch(pipeline, gridGroups, groupSize,
 params, paramsSize, {buffers...})`. The parameter block binds at Metal `buffer(0)` via
@@ -163,6 +163,24 @@ Unverified on CUDA until M4.
   port in `src/core/bsdf_shared.h`: GGX VNDF conductor (Heitz 2018, from
   microfacet.cu) — `microfacet` materials now honor roughness. Both modes remain
   bitwise identical on cornell and bunny.
+- *Landed (pulled forward from M5):* live preview window behind the presentation
+  seam. `Device::presentTarget(w,h)` creates a Cocoa window + `CAMetalLayer` and
+  returns an RGBA8 buffer; a `present_tonemap` kernel (ACES from
+  `src/core/tonemap_shared.h`, shared with the host PNG writer) writes the running
+  average into it each iteration, and `Device::present()` pumps events and blits to
+  the drawable (returns false on window close / q / Esc). Presentation shares the
+  device's single `MTLCommandQueue` with all streams, so commit order + hazard
+  tracking give present-after-render for free. `CommandStream::submit()` bounds
+  in-flight command buffers (2): without backpressure the CPU encodes the whole
+  render ahead of the GPU, which both queues seconds of GPU work (starving
+  WindowServer compositing — OS-wide stutter on heavy scenes) and breaks preview
+  pacing (wall clock stops tracking render progress, so only the first/last frames
+  ever show). The mini loop submits per sample in preview mode and rate-limits
+  presents to ~60 Hz (the drawable pool would otherwise throttle fast renders),
+  freezes at the last frame until the window closes, and saves a partial image on
+  early close.
+  Preview is on by default; `--no-preview` keeps the headless path, which stays
+  bitwise identical to preview-mode output. ImGui and resize stay in M5.
 - *Remaining:* math/RNG/texture shims for sharing device code with CUDA; port the
   remaining real BSDFs (rough dielectric, metallic workflow) and the spectral
   pipeline; make the real scene loader host-portable (migrating it into `src/core`) so
@@ -180,9 +198,8 @@ onto the RHI (convert lights/media/spectra to handle pools, replace Thrust with 
 M2 queues/primitives); A/B queues vs compaction on CUDA; golden-image parity between
 backends and against pre-migration renders.
 
-**M5 — Metal-native features**: hardware RT path; interactive preview
-(MetalKit + ImGui Metal backend) behind the `presentTarget` seam; OIDN-on-Metal
-denoise.
+**M5 — Metal-native features**: hardware RT path; preview upgrades (ImGui Metal
+backend, window resize — the basic window landed in M3); OIDN-on-Metal denoise.
 
 ## 7. Build integration
 

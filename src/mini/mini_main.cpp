@@ -1,18 +1,21 @@
 // FluoraMini: Cornell-box vertical slice on the Metal RHI backend (M1 in
 // docs/metal-rhi-design.md). Loads a Fluora .txt scene subset, path-traces it
-// with a megakernel via rhi::, tonemaps on the CPU with the same ACES curve as
-// the CUDA preview, and writes a PNG.
+// via rhi:: with a live preview window (one frame per iteration, frozen at the
+// last frame until closed), and writes a PNG.
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <stb_image_write.h>
 
+#include "../core/tonemap_shared.h"
 #include "../rhi/rhi.h"
 #include "../rhi/primitives_shared.h"
 #include "mini_scene.h"
@@ -29,33 +32,30 @@ std::string readTextFile(const std::string& path)
     return ss.str();
 }
 
-// Same curve as util_postprocess_ACESFilm / sendImageToPBO (no extra gamma,
-// matching the CUDA preview output).
-float acesFilm(float x)
-{
-    float a = 2.51f, b = 0.03f, c = 2.43f, d = 0.59f, e = 0.14f;
-    return std::clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0f, 1.0f);
-}
-
 } // namespace
 
 int main(int argc, char** argv)
 {
     if (argc < 2) {
-        std::cout << "usage: FluoraMini <scene.txt> [--spp N] [--out name.png] [--mode wavefront|mega]\n";
+        std::cout << "usage: FluoraMini <scene.txt> [--spp N] [--out name.png]"
+                     " [--mode wavefront|mega] [--no-preview]\n";
         return 1;
     }
     std::string scenePath = argv[1];
     int sppOverride = -1;
     std::string outOverride;
     std::string mode = "wavefront";
-    for (int i = 2; i < argc - 1; i++) {
-        if (std::string(argv[i]) == "--spp")
-            sppOverride = std::atoi(argv[i + 1]);
-        else if (std::string(argv[i]) == "--out")
-            outOverride = argv[i + 1];
-        else if (std::string(argv[i]) == "--mode")
-            mode = argv[i + 1];
+    bool preview = true;
+    for (int i = 2; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "--spp" && i + 1 < argc)
+            sppOverride = std::atoi(argv[++i]);
+        else if (arg == "--out" && i + 1 < argc)
+            outOverride = argv[++i];
+        else if (arg == "--mode" && i + 1 < argc)
+            mode = argv[++i];
+        else if (arg == "--no-preview")
+            preview = false;
     }
     if (mode != "wavefront" && mode != "mega") {
         std::cerr << "unknown --mode " << mode << "\n";
@@ -83,6 +83,7 @@ int main(int argc, char** argv)
         deviceDesc.shaderSource = readTextFile(std::string(MINI_SHADER_DIR) + "/mini_shared.h")
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/accel_shared.h")
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/bsdf_shared.h")
+                                + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/tonemap_shared.h")
                                 + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives_shared.h")
                                 + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives.metal")
                                 + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/raytrace.metal")
@@ -170,6 +171,21 @@ int main(int argc, char** argv)
         const rhi::Dim3 one{ 1, 1, 1 };
         const rhi::Dim3 tile{ PRIM_TILE, 1, 1 };
 
+        // Preview: a tonemap dispatch writes the running average into the RHI
+        // present target, then present() blits it to the window. Rate-limited
+        // to ~60 Hz so fast scenes are not throttled by the drawable pool;
+        // slow scenes present every iteration.
+        rhi::Buffer* presentBuf = nullptr;
+        std::unique_ptr<rhi::ComputePipeline> tonemapPipe;
+        if (preview) {
+            presentBuf = &device->presentTarget(width, height);
+            tonemapPipe = device->createPipeline({ "present_tonemap" });
+        }
+        using clock = std::chrono::steady_clock;
+        auto lastPresent = clock::now() - std::chrono::seconds(1);
+        bool closed = false;
+        int completed = 0;
+
         for (int i = 0; i < spp; i++) {
             params.iter = (unsigned)i;
             if (mode == "mega") {
@@ -218,13 +234,37 @@ int main(int argc, char** argv)
                     cur = next;
                 }
             }
-            if ((i + 1) % 4 == 0)
+            completed = i + 1;
+            if (preview) {
+                // Per-sample submit: the stream's bounded in-flight ring paces
+                // the CPU to GPU progress, so the wall clock below measures
+                // actual render progress rather than encode speed.
                 stream->submit();
+                auto now = clock::now();
+                if (completed == spp
+                    || now - lastPresent >= std::chrono::milliseconds(16)) {
+                    MiniParams tp = params;
+                    tp.iter = (unsigned)completed;
+                    stream->dispatch(*tonemapPipe, grid, block, &tp, sizeof(tp),
+                                     { accum.get(), presentBuf });
+                    stream->submit();
+                    lastPresent = now;
+                    if (!device->present()) {
+                        closed = true;
+                        break;
+                    }
+                }
+            } else if ((i + 1) % 4 == 0) {
+                stream->submit();
+            }
             if (spp >= 10 && (i + 1) % (spp / 10) == 0)
                 std::cout << "  " << (i + 1) << "/" << spp << " spp\r" << std::flush;
         }
         stream->waitIdle();
         std::cout << "\n";
+        if (closed)
+            std::cout << "preview closed at " << completed << "/" << spp
+                      << " spp, saving partial image\n";
 
         const float* acc = (const float*)accum->hostPtr();
         std::vector<unsigned char> pixels((size_t)width * height * 3);
@@ -235,10 +275,11 @@ int main(int argc, char** argv)
                 // images are comparable with img/ references.
                 size_t src = (size_t)y * width + x;
                 size_t dst = (size_t)y * width + (width - 1 - x);
-                for (int ch = 0; ch < 3; ch++) {
-                    float v = acesFilm(acc[src * 4 + ch] / (float)spp);
-                    pixels[dst * 3 + ch] = (unsigned char)(v * 255.0f + 0.5f);
-                }
+                simd_float3 v = tonemap_aces(simd_make_float3(
+                    acc[src * 4 + 0], acc[src * 4 + 1], acc[src * 4 + 2])
+                    / (float)completed);
+                for (int ch = 0; ch < 3; ch++)
+                    pixels[dst * 3 + ch] = (unsigned char)(v[ch] * 255.0f + 0.5f);
             }
         }
         std::string outName = !outOverride.empty() ? outOverride
@@ -248,6 +289,14 @@ int main(int argc, char** argv)
             return 1;
         }
         std::cout << "wrote " << outName << "\n";
+
+        // Freeze at the last frame: keep the window alive (present() re-blits
+        // the final image and pumps events) until the user closes it.
+        if (preview && !closed) {
+            std::cout << "preview: close the window (or press q / Esc) to exit\n";
+            while (device->present())
+                std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        }
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
