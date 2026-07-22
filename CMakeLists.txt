@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(Fluora CXX CUDA C)
+# CUDA is enabled below only on non-Apple platforms; macOS builds the Metal
+# vertical slice (FluoraMini) instead. See docs/metal-rhi-design.md.
+project(Fluora CXX C)
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
@@ -25,8 +27,39 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 endif()
 
 ########################################
+# macOS: Metal vertical slice only (milestone M1)
+########################################
+if(APPLE)
+    enable_language(OBJCXX)
+    set(CMAKE_OBJCXX_STANDARD 20)
+    add_executable(FluoraMini
+        src/mini/mini_main.cpp
+        src/mini/mini_scene.cpp
+        src/rhi/rhi_metal.mm
+        src/stb.cpp
+    )
+    target_include_directories(FluoraMini PRIVATE external/include)
+    # MSL sources are loaded from the source tree at runtime (dev convenience;
+    # packaging deferred to M4)
+    target_compile_definitions(FluoraMini PRIVATE MINI_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/mini")
+    set_source_files_properties(src/rhi/rhi_metal.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(FluoraMini "-framework Metal" "-framework Foundation")
+
+    # RHI primitive unit tests (reduce/scan/compact/sort/work queue)
+    add_executable(RhiTest
+        src/rhi/rhi_test.cpp
+        src/rhi/rhi_algorithms.cpp
+        src/rhi/rhi_metal.mm
+    )
+    target_compile_definitions(RhiTest PRIVATE RHI_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/rhi")
+    target_link_libraries(RhiTest "-framework Metal" "-framework Foundation")
+    return()
+endif()
+
+########################################
 # CUDA Setup
 ########################################
+enable_language(CUDA)
 find_package(CUDA 10 REQUIRED)
 include(${CMAKE_MODULE_PATH}/CUDAComputesList.cmake)
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr --extended-lambda")

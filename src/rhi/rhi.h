@@ -1,0 +1,215 @@
+#pragma once
+// =============================================================================
+// RHI sketch: the host-side seam between the renderer and a GPU backend
+// (CUDA today, Metal later). NOT wired into the build yet — this header pins
+// down the interface shape and the portability invariants each backend must
+// satisfy. See rhi_cuda.h for how the current CUDA code maps onto it.
+//
+// The two invariants that make a Metal backend possible at all:
+//
+//  1. No raw host pointers in device-visible data. Persistent cross-object
+//     references are {tag, index} handles (taggedindex.h) resolved against a
+//     TypedPoolView bound per dispatch. CUDA can cheat with unified memory;
+//     Metal cannot (MTLBuffer.contents != gpuAddress).
+//
+//  2. Kernels are named entry points taking one parameter block (plain bytes)
+//     plus resources referenced through it. No host-lambda launches
+//     (GPUParallelFor's extended-lambda path is CUDA-only); each launch site
+//     becomes a registered kernel. Metal: MTLComputePipelineState from a
+//     metallib. CUDA: a launch thunk registered at static-init time.
+// =============================================================================
+#include <cstdint>
+#include <cstddef>
+#include <initializer_list>
+#include <memory>
+#include <string>
+
+namespace rhi {
+
+enum class BackendKind { CUDA, Metal };
+
+// 64-bit GPU virtual address, embeddable in kernel parameter blocks.
+// CUDA: the device pointer itself. Metal: MTLBuffer.gpuAddress (+offset),
+// requires argument-buffer tier 2 — fine on all Apple Silicon.
+using DeviceAddress = uint64_t;
+
+struct Capabilities {
+    BackendKind kind;
+    bool hardwareRayTracing;   // Metal: MTLAccelerationStructure; CUDA: false (no OptiX path)
+    bool unifiedMemory;        // both true in practice (managed memory / Apple Silicon)
+};
+
+// ---------------------------------------------------------------------------
+// Resources
+// ---------------------------------------------------------------------------
+
+enum class MemoryLocation {
+    DeviceLocal,   // cudaMalloc            / MTLStorageModePrivate
+    Shared,        // cudaMallocManaged     / MTLStorageModeShared
+};
+
+struct BufferDesc {
+    size_t size = 0;
+    MemoryLocation location = MemoryLocation::DeviceLocal;
+    const char* debugName = nullptr;
+};
+
+class Buffer {
+public:
+    virtual ~Buffer() = default;
+    virtual size_t size() const = 0;
+    virtual DeviceAddress deviceAddress() const = 0;
+    // Host-visible mapping; null for DeviceLocal. Valid to write only before
+    // the buffer is in flight (Shared-mode coherency rules are the caller's
+    // problem, same as today with managed memory).
+    virtual void* hostPtr() = 0;
+};
+
+enum class TextureFormat { RGBA8Unorm, RGBA32Float, R32Float };
+
+struct TextureDesc {
+    int width = 0, height = 0;
+    TextureFormat format = TextureFormat::RGBA8Unorm;
+    bool normalizedCoords = true;  // cudaTextureDesc.normalizedCoords / sampler config
+    bool srgb = false;
+    const char* debugName = nullptr;
+};
+
+// Sampled image + sampler state fused, matching how the renderer already uses
+// cudaTextureObject_t. The 64-bit shaderHandle is what gets stored in material
+// structs: CUDA = the cudaTextureObject_t itself; Metal = index into a bindless
+// argument-buffer heap of textures (NOT a pointer — heap index survives the
+// host/device boundary, per invariant 1).
+class Texture {
+public:
+    virtual ~Texture() = default;
+    virtual uint64_t shaderHandle() const = 0;
+    virtual void upload(const void* pixels, size_t bytes) = 0;
+};
+
+// ---------------------------------------------------------------------------
+// Compute
+// ---------------------------------------------------------------------------
+
+struct ComputePipelineDesc {
+    // Name of a kernel entry point. CUDA: key into the kernel registry
+    // (RHI_REGISTER_KERNEL in rhi_cuda.h). Metal: function name in the metallib.
+    std::string entryPoint;
+};
+
+class ComputePipeline {
+public:
+    virtual ~ComputePipeline() = default;
+};
+
+struct Dim3 { uint32_t x = 1, y = 1, z = 1; };
+
+// Ordered command recording + submission. CUDA: a cudaStream_t, dispatch =
+// kernel launch. Metal: MTLCommandBuffer + compute encoders, submit = commit.
+// The renderer's per-bounce loop (raygen -> intersect -> shade -> queues)
+// records into one stream per frame.
+//
+// Binding convention: `params` is a POD blob copied at record time (Metal:
+// setBytes at buffer(0); CUDA: part of the kernel argument struct). Resource
+// i of `buffers` binds at Metal buffer(i+1); the CUDA thunk receives the
+// corresponding device addresses in order. Grid semantics match CUDA:
+// grid = number of thread groups, block = threads per group.
+class CommandStream {
+public:
+    virtual ~CommandStream() = default;
+
+    virtual void dispatch(ComputePipeline& pipeline, Dim3 grid, Dim3 block,
+                          const void* params, size_t paramsSize,
+                          std::initializer_list<Buffer*> buffers) = 0;
+
+    // Indirect dispatch off a GPU-written count — required for the wavefront
+    // work-queue design (queue sizes are only known on device). argsBuffer at
+    // argsOffset holds three uint32 threadgroup counts {x, y, z}.
+    // CUDA: read count via launch with max size + early-out, or cuLaunch from
+    // a copied-back count. Metal: dispatchThreadgroups(indirectBuffer:).
+    virtual void dispatchIndirect(ComputePipeline& pipeline, Dim3 block,
+                                  Buffer& argsBuffer, size_t argsOffset,
+                                  const void* params, size_t paramsSize,
+                                  std::initializer_list<Buffer*> buffers) = 0;
+
+    virtual void copy(Buffer& dst, size_t dstOffset,
+                      const Buffer& src, size_t srcOffset, size_t bytes) = 0;
+    virtual void fill(Buffer& dst, size_t offset, size_t bytes, uint8_t value) = 0;
+
+    virtual void submit() = 0;
+    virtual void waitIdle() = 0;   // cudaStreamSynchronize / waitUntilCompleted
+};
+
+// ---------------------------------------------------------------------------
+// Ray tracing seam
+// ---------------------------------------------------------------------------
+//
+// Host side: build an intersector from the scene's primitive soup and get an
+// opaque, POD "traversal view" blob to embed in kernel parameter blocks.
+// Device side: a per-backend rt::intersect(view, ray) / rt::occluded(view, ray)
+// compiled with the kernels — CUDA implements it with the existing MTBVH
+// traversal (intersections.cu), Metal either ports that same compute traversal
+// (parity first) or uses MSL intersection_query against an
+// MTLAccelerationStructure (fast path). Integrator code calls only the rt::
+// functions, so it cannot tell which one it got.
+
+struct AccelBuildInput {
+    // Positions/indices as device buffers plus the host-side Primitive array;
+    // the CUDA backend also receives the CPU-built MTBVH (bvh.cpp) here.
+    Buffer* positions = nullptr;
+    Buffer* indices = nullptr;
+    const void* hostPrimitives = nullptr;
+    size_t primitiveCount = 0;
+};
+
+// Max bytes any backend needs for its traversal view (MTBVH view: array base +
+// size + primitive/vertex bases; Metal HW view: accel handle + intersection
+// function table index).
+inline constexpr size_t kTraversalViewMaxSize = 128;
+
+struct TraversalView {
+    alignas(16) unsigned char opaque[kTraversalViewMaxSize];
+};
+
+class RayIntersector {
+public:
+    virtual ~RayIntersector() = default;
+    virtual void build(CommandStream& stream, const AccelBuildInput& input) = 0;
+    virtual TraversalView traversalView() const = 0;
+};
+
+// ---------------------------------------------------------------------------
+// Device
+// ---------------------------------------------------------------------------
+
+struct DeviceDesc {
+    // Metal: MSL source compiled at device creation (newLibraryWithSource).
+    // The host concatenates shared-struct headers + kernel files before passing
+    // it in, since runtime MSL compilation cannot resolve #includes. Later
+    // milestones replace this with a precompiled .metallib. CUDA: unused
+    // (kernels are registered at static-init time).
+    std::string shaderSource;
+};
+
+class Device {
+public:
+    virtual ~Device() = default;
+    virtual Capabilities capabilities() const = 0;
+
+    virtual std::unique_ptr<Buffer> createBuffer(const BufferDesc&) = 0;
+    virtual std::unique_ptr<Texture> createTexture(const TextureDesc&) = 0;
+    virtual std::unique_ptr<ComputePipeline> createPipeline(const ComputePipelineDesc&) = 0;
+    virtual std::unique_ptr<CommandStream> createStream() = 0;
+    virtual std::unique_ptr<RayIntersector> createIntersector() = 0;
+
+    // Presentation seam replacing the CUDA<->OpenGL PBO interop in main.cpp:
+    // the backend owns how a final uchar4 image reaches the window (CUDA: GL
+    // PBO as today; Metal: blit into a CAMetalLayer drawable). Preview/ImGui
+    // code talks only to this.
+    virtual Buffer& presentTarget(int width, int height) = 0;
+    virtual void present() = 0;
+};
+
+std::unique_ptr<Device> createDevice(BackendKind kind, const DeviceDesc& desc = {});
+
+} // namespace rhi
