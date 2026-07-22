@@ -155,8 +155,16 @@ Unverified on CUDA until M4.
   GPU residency owned by `RayIntersector`. Glass-bunny (144k tris) renders in both
   modes, bitwise identical; with real traversal cost the wavefront/mega gap collapses
   to 1.14× (4.9 s vs 5.6 s at 800×800×300spp) from 3.5× on the analytic scene.
-- *Remaining:* math/RNG/texture shims for sharing device code with CUDA; port the real
-  BSDFs (per-material shade kernels, tier-1 of the `get_bxdf` plan) and the spectral
+- *Landed:* per-material-type shade queues (tier-1 of the `get_bxdf` plan) — intersect
+  routes paths by material type and resolves emissive hits inline; shading is ONE
+  `wf_shade` kernel specialized per type via `rhi::SpecConstant` (Metal function
+  constants — the Metal analog of template instantiation), so the material branch
+  folds at pipeline creation and each dispatch is divergence-free. First real BSDF
+  port in `src/core/bsdf_shared.h`: GGX VNDF conductor (Heitz 2018, from
+  microfacet.cu) — `microfacet` materials now honor roughness. Both modes remain
+  bitwise identical on cornell and bunny.
+- *Remaining:* math/RNG/texture shims for sharing device code with CUDA; port the
+  remaining real BSDFs (rough dielectric, metallic workflow) and the spectral
   pipeline; make the real scene loader host-portable (migrating it into `src/core`) so
   `mini_scene` dies. This is the long pole.
 

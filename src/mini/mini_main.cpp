@@ -82,6 +82,7 @@ int main(int argc, char** argv)
         rhi::DeviceDesc deviceDesc;
         deviceDesc.shaderSource = readTextFile(std::string(MINI_SHADER_DIR) + "/mini_shared.h")
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/accel_shared.h")
+                                + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/bsdf_shared.h")
                                 + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives_shared.h")
                                 + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives.metal")
                                 + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/raytrace.metal")
@@ -141,21 +142,30 @@ int main(int argc, char** argv)
         const rhi::Dim3 grid{ (unsigned)(width + 15) / 16, (unsigned)(height + 15) / 16, 1 };
         const rhi::Dim3 block{ 16, 16, 1 };
 
-        // Wavefront-mode resources: ping-pong ray queues + shade queue (GPU
-        // only, host never reads paths), queue counters, indirect-args slots.
-        std::unique_ptr<rhi::Buffer> raysA, raysB, shadeQ, counts, indirectArgs;
-        std::unique_ptr<rhi::ComputePipeline> raygenPipe, preparePipe, intersectPipe, shadePipe;
+        // Wavefront-mode resources: ping-pong ray queues + one shade queue per
+        // material type (GPU only, host never reads paths), queue counters,
+        // indirect-args slots. Shade pipelines are one kernel specialized per
+        // material type via rhi::SpecConstant.
+        std::unique_ptr<rhi::Buffer> raysA, raysB, counts, indirectArgs;
+        std::unique_ptr<rhi::Buffer> qDiffuse, qConductor, qGlass;
+        std::unique_ptr<rhi::ComputePipeline> raygenPipe, prepIntersectPipe, prepShadePipe,
+            intersectPipe, shadeDiffusePipe, shadeConductorPipe, shadeGlassPipe;
         if (mode == "wavefront") {
             const size_t queueBytes = (size_t)width * height * WF_PATHSTATE_SIZE;
             raysA = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.raysA" });
             raysB = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.raysB" });
-            shadeQ = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.shade" });
+            qDiffuse = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.qDiffuse" });
+            qConductor = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.qConductor" });
+            qGlass = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.qGlass" });
             counts = device->createBuffer({ WF_NUM_COUNTERS * 4, rhi::MemoryLocation::DeviceLocal, "wf.counts" });
-            indirectArgs = device->createBuffer({ 32, rhi::MemoryLocation::DeviceLocal, "wf.args" });
+            indirectArgs = device->createBuffer({ WF_NUM_ARG_SLOTS * 16, rhi::MemoryLocation::DeviceLocal, "wf.args" });
             raygenPipe = device->createPipeline({ "wf_raygen" });
-            preparePipe = device->createPipeline({ "wf_prepare" });
+            prepIntersectPipe = device->createPipeline({ "wf_prep_intersect" });
+            prepShadePipe = device->createPipeline({ "wf_prep_shade" });
             intersectPipe = device->createPipeline({ "wf_intersect" });
-            shadePipe = device->createPipeline({ "wf_shade" });
+            shadeDiffusePipe = device->createPipeline({ "wf_shade", { { 0, MINI_MAT_DIFFUSE } } });
+            shadeConductorPipe = device->createPipeline({ "wf_shade", { { 0, MINI_MAT_CONDUCTOR } } });
+            shadeGlassPipe = device->createPipeline({ "wf_shade", { { 0, MINI_MAT_GLASS } } });
         }
         const rhi::Dim3 one{ 1, 1, 1 };
         const rhi::Dim3 tile{ PRIM_TILE, 1, 1 };
@@ -179,25 +189,32 @@ int main(int argc, char** argv)
                     c.numObjects = params.numObjects;
                     c.maxDepth = params.maxDepth;
                     c.bvhNumNodes = params.bvhNumNodes;
-
                     c.srcCounter = cur;
-                    c.zeroCounter = WF_COUNT_SHADE;
-                    c.argSlot = 0;
-                    stream->dispatch(*preparePipe, one, one, &c, sizeof(c),
-                                     { counts.get(), indirectArgs.get() });
-                    c.dstCounter = WF_COUNT_SHADE;
-                    stream->dispatchIndirect(*intersectPipe, tile, *indirectArgs, 0, &c, sizeof(c),
-                                             { counts.get(), raysCur, shadeQ.get(), objBuf.get(),
-                                               rt[0], rt[1], rt[2] });
-
-                    c.srcCounter = WF_COUNT_SHADE;
                     c.zeroCounter = next;
-                    c.argSlot = 1;
-                    stream->dispatch(*preparePipe, one, one, &c, sizeof(c),
+
+                    stream->dispatch(*prepIntersectPipe, one, one, &c, sizeof(c),
                                      { counts.get(), indirectArgs.get() });
+                    stream->dispatchIndirect(*intersectPipe, tile, *indirectArgs,
+                                             WF_ARG_INTERSECT * 16, &c, sizeof(c),
+                                             { counts.get(), raysCur, objBuf.get(),
+                                               rt[0], rt[1], rt[2], matBuf.get(), accum.get(),
+                                               qDiffuse.get(), qConductor.get(), qGlass.get() });
+                    stream->dispatch(*prepShadePipe, one, one, &c, sizeof(c),
+                                     { counts.get(), indirectArgs.get() });
+
                     c.dstCounter = next;
-                    stream->dispatchIndirect(*shadePipe, tile, *indirectArgs, 16, &c, sizeof(c),
-                                             { counts.get(), shadeQ.get(), raysNext, matBuf.get(), accum.get() });
+                    struct { rhi::ComputePipeline* pipe; rhi::Buffer* queue; unsigned counter; unsigned argSlot; }
+                    shadePasses[] = {
+                        { shadeDiffusePipe.get(), qDiffuse.get(), WF_COUNT_SHADE_DIFFUSE, WF_ARG_DIFFUSE },
+                        { shadeConductorPipe.get(), qConductor.get(), WF_COUNT_SHADE_CONDUCTOR, WF_ARG_CONDUCTOR },
+                        { shadeGlassPipe.get(), qGlass.get(), WF_COUNT_SHADE_GLASS, WF_ARG_GLASS },
+                    };
+                    for (const auto& pass : shadePasses) {
+                        c.srcCounter = pass.counter;
+                        stream->dispatchIndirect(*pass.pipe, tile, *indirectArgs,
+                                                 pass.argSlot * 16, &c, sizeof(c),
+                                                 { counts.get(), pass.queue, raysNext, matBuf.get() });
+                    }
                     cur = next;
                 }
             }

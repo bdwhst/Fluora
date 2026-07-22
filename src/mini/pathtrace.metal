@@ -115,19 +115,6 @@ inline bool sceneIntersect(float3 ro, float3 rd,
     return hit.objIdx != -1;
 }
 
-inline float3 cosineSampleHemisphere(float3 n, thread MiniRng& rng)
-{
-    float u1 = mini_rand(rng);
-    float u2 = mini_rand(rng);
-    float r = sqrt(u1);
-    float phi = 2.0f * M_PI_F * u2;
-    // orthonormal basis around n
-    float3 t = abs(n.x) > 0.9f ? float3(0, 1, 0) : float3(1, 0, 0);
-    float3 b1 = normalize(cross(n, t));
-    float3 b2 = cross(n, b1);
-    return normalize(b1 * (r * cos(phi)) + b2 * (r * sin(phi)) + n * sqrt(max(0.0f, 1.0f - u1)));
-}
-
 // Same jittered pinhole formula as generateRayFromCamera in pathtrace.cu.
 inline void generateCameraRay(constant MiniParams& P, uint2 gid, thread MiniRng& rng,
                               thread float3& ro, thread float3& rd)
@@ -140,40 +127,34 @@ inline void generateCameraRay(constant MiniParams& P, uint2 gid, thread MiniRng&
     ro = P.camPos;
 }
 
-// Non-emissive scatter (emissive termination is the caller's job, since it
-// touches the accumulator). Updates ro/rd/throughput in place.
-inline void scatterMaterial(device const MiniMaterial& mat, float3 p, float3 n,
-                            thread float3& ro, thread float3& rd,
-                            thread float3& throughput, thread MiniRng& rng)
+// Draws this material's uniforms and scatters via the core BSDFs
+// (core/bsdf_shared.h). Shared by the megakernel switch and the specialized
+// shade kernel, so both modes consume identical RNG streams and math.
+// `type` is mat.type in the megakernel (dynamic branch) and a function
+// constant in wf_shade (branch folds at pipeline creation).
+// Returns false when the sample is absorbed.
+inline bool miniScatter(uint type, device const MiniMaterial& mat, float3 p, float3 n,
+                        thread float3& ro, thread float3& rd,
+                        thread float3& throughput, thread MiniRng& rng)
 {
-    float3 nFacing = dot(n, rd) < 0.0f ? n : -n;
-    if (mat.type == MINI_MAT_DIFFUSE) {
-        throughput *= float3(mat.rgb);
-        rd = cosineSampleHemisphere(nFacing, rng);
-        ro = p + nFacing * 1e-4f;
+    float3 nF = dot(n, rd) < 0.0f ? n : -n;
+    bool alive;
+    if (type == MINI_MAT_DIFFUSE) {
+        float u1 = mini_rand(rng);
+        float u2 = mini_rand(rng);
+        alive = bsdf_sample_lambert(float3(mat.rgb), nF, u1, u2, rd, throughput);
+    } else if (type == MINI_MAT_CONDUCTOR) {
+        float u1 = mini_rand(rng);
+        float u2 = mini_rand(rng);
+        alive = bsdf_sample_conductor(float3(mat.rgb), mat.roughness, nF, u1, u2, rd, throughput);
+    } else {  // MINI_MAT_GLASS
+        float u = mini_rand(rng);
+        alive = bsdf_sample_dielectric(float3(mat.rgb), mat.ior, n, u, rd, throughput);
     }
-    else if (mat.type == MINI_MAT_MIRROR) {
-        throughput *= float3(mat.rgb);
-        rd = reflect(rd, nFacing);
-        ro = p + nFacing * 1e-4f;
-    }
-    else {  // MINI_MAT_GLASS — RTIOW-grade dielectric with Schlick fresnel
-        bool entering = dot(n, rd) < 0.0f;
-        float eta = entering ? 1.0f / mat.ior : mat.ior;
-        float cosI = fabs(dot(rd, nFacing));
-        float f0 = (1.0f - mat.ior) / (1.0f + mat.ior);
-        f0 = f0 * f0;
-        float fresnel = f0 + (1.0f - f0) * pow(1.0f - cosI, 5.0f);
-        float3 refr = refract(rd, nFacing, eta);
-        if (length_squared(refr) < 1e-8f || mini_rand(rng) < fresnel) {
-            rd = reflect(rd, nFacing);
-            ro = p + nFacing * 1e-4f;
-        } else {
-            throughput *= float3(mat.rgb);
-            rd = normalize(refr);
-            ro = p - nFacing * 1e-4f;
-        }
-    }
+    if (!alive)
+        return false;
+    ro = p + nF * (dot(rd, nF) >= 0.0f ? 1e-4f : -1e-4f);
+    return true;
 }
 
 // ==========================================================================
@@ -214,7 +195,8 @@ kernel void pathtraceKernel(constant MiniParams& P                [[buffer(0)]],
             L += throughput * float3(mat.rgb) * mat.emittance;
             break;
         }
-        scatterMaterial(mat, ro + rd * hit.t, hit.n, ro, rd, throughput, rng);
+        if (!miniScatter(mat.type, mat, ro + rd * hit.t, hit.n, ro, rd, throughput, rng))
+            break;
     }
 
     if (all(isfinite(L)))
@@ -264,34 +246,58 @@ kernel void wf_raygen(constant MiniParams& P     [[buffer(0)]],
     rays[idx] = path;
 
     if (idx == 0) {
+        // Shade counters are zeroed by wf_prep_intersect each bounce.
         atomic_store_explicit(&counts[WF_COUNT_RAY_A], P.width * P.height, memory_order_relaxed);
         atomic_store_explicit(&counts[WF_COUNT_RAY_B], 0u, memory_order_relaxed);
-        atomic_store_explicit(&counts[WF_COUNT_SHADE], 0u, memory_order_relaxed);
     }
 }
 
-// Single-thread dispatch: turn a queue count into indirect threadgroup args
-// (three uints per 16-byte slot) and reset the counter the next stage pushes
-// into. This keeps the whole bounce loop free of CPU readbacks.
-kernel void wf_prepare(constant WfCtl& C          [[buffer(0)]],
-                       device atomic_uint* counts [[buffer(1)]],
-                       device uint* args          [[buffer(2)]])
+// Single-thread dispatches turning GPU-written queue counts into indirect
+// threadgroup args, keeping the bounce loop free of CPU readbacks.
+kernel void wf_prep_intersect(constant WfCtl& C          [[buffer(0)]],
+                              device atomic_uint* counts [[buffer(1)]],
+                              device uint* args          [[buffer(2)]])
 {
     uint c = atomic_load_explicit(&counts[C.srcCounter], memory_order_relaxed);
-    args[C.argSlot * 4 + 0] = (c + PRIM_TILE - 1u) / PRIM_TILE;
-    args[C.argSlot * 4 + 1] = 1u;
-    args[C.argSlot * 4 + 2] = 1u;
+    args[WF_ARG_INTERSECT * 4 + 0] = (c + PRIM_TILE - 1u) / PRIM_TILE;
+    args[WF_ARG_INTERSECT * 4 + 1] = 1u;
+    args[WF_ARG_INTERSECT * 4 + 2] = 1u;
+    atomic_store_explicit(&counts[WF_COUNT_SHADE_DIFFUSE], 0u, memory_order_relaxed);
+    atomic_store_explicit(&counts[WF_COUNT_SHADE_CONDUCTOR], 0u, memory_order_relaxed);
+    atomic_store_explicit(&counts[WF_COUNT_SHADE_GLASS], 0u, memory_order_relaxed);
+}
+
+kernel void wf_prep_shade(constant WfCtl& C          [[buffer(0)]],
+                          device atomic_uint* counts [[buffer(1)]],
+                          device uint* args          [[buffer(2)]])
+{
+    constexpr uint queues[3] = { WF_COUNT_SHADE_DIFFUSE, WF_COUNT_SHADE_CONDUCTOR,
+                                 WF_COUNT_SHADE_GLASS };
+    constexpr uint slots[3] = { WF_ARG_DIFFUSE, WF_ARG_CONDUCTOR, WF_ARG_GLASS };
+    for (uint i = 0; i < 3; i++) {
+        uint c = atomic_load_explicit(&counts[queues[i]], memory_order_relaxed);
+        args[slots[i] * 4 + 0] = (c + PRIM_TILE - 1u) / PRIM_TILE;
+        args[slots[i] * 4 + 1] = 1u;
+        args[slots[i] * 4 + 2] = 1u;
+    }
     atomic_store_explicit(&counts[C.zeroCounter], 0u, memory_order_relaxed);
 }
 
-kernel void wf_intersect(constant WfCtl& C                [[buffer(0)]],
-                         device atomic_uint* counts       [[buffer(1)]],
-                         device const WfPath* raysIn      [[buffer(2)]],
-                         device WfPath* shadeQueue        [[buffer(3)]],
-                         device const MiniObject* objects [[buffer(4)]],
-                         device const RtBvhNode* bvhNodes [[buffer(5)]],
-                         device const uint4* tris         [[buffer(6)]],
-                         device const float3* positions   [[buffer(7)]],
+// Intersect routes surviving paths into their material type's shade queue
+// (tier-1 material dispatch: the queue decides which BSDF code runs, not a
+// per-thread branch). Emissive hits are resolved here.
+kernel void wf_intersect(constant WfCtl& C                 [[buffer(0)]],
+                         device atomic_uint* counts        [[buffer(1)]],
+                         device const WfPath* raysIn       [[buffer(2)]],
+                         device const MiniObject* objects  [[buffer(3)]],
+                         device const RtBvhNode* bvhNodes  [[buffer(4)]],
+                         device const uint4* tris          [[buffer(5)]],
+                         device const float3* positions    [[buffer(6)]],
+                         device const MiniMaterial* materials [[buffer(7)]],
+                         device float4* accum              [[buffer(8)]],
+                         device WfPath* qDiffuse           [[buffer(9)]],
+                         device WfPath* qConductor         [[buffer(10)]],
+                         device WfPath* qGlass             [[buffer(11)]],
                          uint tid [[thread_position_in_grid]])
 {
     if (tid >= atomic_load_explicit(&counts[C.srcCounter], memory_order_relaxed))
@@ -301,25 +307,8 @@ kernel void wf_intersect(constant WfCtl& C                [[buffer(0)]],
     if (!sceneIntersect(float3(path.origin), float3(path.dir), objects, C.numObjects,
                         bvhNodes, C.bvhNumNodes, tris, positions, hit))
         return;  // escaped: contributes nothing, simply not re-enqueued
-    path.t = hit.t;
-    path.normal = hit.n;
-    path.matId = hit.matId;
-    shadeQueue[prim_queue_alloc(&counts[C.dstCounter])] = path;
-}
 
-kernel void wf_shade(constant WfCtl& C                   [[buffer(0)]],
-                     device atomic_uint* counts          [[buffer(1)]],
-                     device const WfPath* shadeQueue     [[buffer(2)]],
-                     device WfPath* raysOut              [[buffer(3)]],
-                     device const MiniMaterial* materials [[buffer(4)]],
-                     device float4* accum                [[buffer(5)]],
-                     uint tid [[thread_position_in_grid]])
-{
-    if (tid >= atomic_load_explicit(&counts[C.srcCounter], memory_order_relaxed))
-        return;
-    WfPath path = shadeQueue[tid];
-    device const MiniMaterial& mat = materials[path.matId];
-
+    device const MiniMaterial& mat = materials[hit.matId];
     if (mat.type == MINI_MAT_EMITTING) {
         // One path per pixel per sample, so this write does not race.
         float3 L = float3(path.throughput) * float3(mat.rgb) * mat.emittance;
@@ -327,16 +316,44 @@ kernel void wf_shade(constant WfCtl& C                   [[buffer(0)]],
             accum[path.pixel] += float4(L, 1.0f);
         return;
     }
+
+    path.t = hit.t;
+    path.normal = hit.n;
+    path.matId = hit.matId;
+    if (mat.type == MINI_MAT_DIFFUSE)
+        qDiffuse[prim_queue_alloc(&counts[WF_COUNT_SHADE_DIFFUSE])] = path;
+    else if (mat.type == MINI_MAT_CONDUCTOR)
+        qConductor[prim_queue_alloc(&counts[WF_COUNT_SHADE_CONDUCTOR])] = path;
+    else
+        qGlass[prim_queue_alloc(&counts[WF_COUNT_SHADE_GLASS])] = path;
+}
+
+// One shade kernel, specialized per material type at pipeline creation
+// (rhi::SpecConstant -> MTLFunctionConstantValues): the miniScatter branch
+// folds away, and the queue guarantees the specialization matches every path
+// in it — divergence-free shading with a single source of truth.
+constant uint kShadeMatType [[function_constant(0)]];
+
+kernel void wf_shade(constant WfCtl& C                    [[buffer(0)]],
+                     device atomic_uint* counts           [[buffer(1)]],
+                     device const WfPath* queue           [[buffer(2)]],
+                     device WfPath* raysOut               [[buffer(3)]],
+                     device const MiniMaterial* materials [[buffer(4)]],
+                     uint tid [[thread_position_in_grid]])
+{
+    if (tid >= atomic_load_explicit(&counts[C.srcCounter], memory_order_relaxed))
+        return;
+    WfPath path = queue[tid];
     if (path.depth + 1 >= C.maxDepth)
         return;
-
     MiniRng rng;
     rng.state = path.rng;
     float3 ro = float3(path.origin);
     float3 rd = float3(path.dir);
     float3 throughput = float3(path.throughput);
-    scatterMaterial(mat, ro + rd * path.t, float3(path.normal), ro, rd, throughput, rng);
-
+    if (!miniScatter(kShadeMatType, materials[path.matId], ro + rd * path.t,
+                     float3(path.normal), ro, rd, throughput, rng))
+        return;
     path.origin = ro;
     path.dir = rd;
     path.throughput = throughput;

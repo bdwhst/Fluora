@@ -46,10 +46,19 @@ class MetalComputePipeline final : public ComputePipeline {
 public:
     MetalComputePipeline(id<MTLDevice> dev, id<MTLLibrary> lib, const ComputePipelineDesc& desc)
     {
-        id<MTLFunction> fn = [lib newFunctionWithName:[NSString stringWithUTF8String:desc.entryPoint.c_str()]];
-        if (!fn)
-            throw std::runtime_error("Metal kernel not found: " + desc.entryPoint);
+        NSString* name = [NSString stringWithUTF8String:desc.entryPoint.c_str()];
         NSError* err = nil;
+        id<MTLFunction> fn;
+        if (desc.constants.empty()) {
+            fn = [lib newFunctionWithName:name];
+        } else {
+            MTLFunctionConstantValues* values = [MTLFunctionConstantValues new];
+            for (const SpecConstant& c : desc.constants)
+                [values setConstantValue:&c.value type:MTLDataTypeUInt atIndex:c.index];
+            fn = [lib newFunctionWithName:name constantValues:values error:&err];
+        }
+        if (!fn)
+            throw std::runtime_error("Metal kernel not found: " + desc.entryPoint + ": " + nsErrorToString(err));
         mPso = [dev newComputePipelineStateWithFunction:fn error:&err];
         if (!mPso)
             throw std::runtime_error("Pipeline creation failed for " + desc.entryPoint + ": " + nsErrorToString(err));

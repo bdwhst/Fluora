@@ -24,6 +24,7 @@
 #include <initializer_list>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace rhi {
 
@@ -92,10 +93,20 @@ public:
 // Compute
 // ---------------------------------------------------------------------------
 
+struct SpecConstant {
+    uint32_t index;
+    uint32_t value;
+};
+
 struct ComputePipelineDesc {
     // Name of a kernel entry point. CUDA: key into the kernel registry
     // (RHI_REGISTER_KERNEL in rhi_cuda.h). Metal: function name in the metallib.
     std::string entryPoint;
+    // Specialization constants baked at pipeline creation — one kernel source,
+    // N specialized pipelines (e.g. per-material shade kernels). Metal:
+    // [[function_constant(index)]] + MTLFunctionConstantValues. CUDA: template
+    // instantiations registered under entryPoint + constant values.
+    std::vector<SpecConstant> constants;
 };
 
 class ComputePipeline {

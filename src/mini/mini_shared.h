@@ -23,10 +23,10 @@ typedef simd_float4x4 mini_float4x4;
 #define MINI_GEOM_CUBE   0
 #define MINI_GEOM_SPHERE 1
 
-#define MINI_MAT_DIFFUSE  0
-#define MINI_MAT_EMITTING 1
-#define MINI_MAT_GLASS    2
-#define MINI_MAT_MIRROR   3
+#define MINI_MAT_DIFFUSE   0
+#define MINI_MAT_EMITTING  1
+#define MINI_MAT_GLASS     2
+#define MINI_MAT_CONDUCTOR 3  // GGX; roughness < 1e-3 degenerates to mirror
 
 struct MiniMaterial {
     mini_float3 rgb;
@@ -62,13 +62,24 @@ struct MiniParams {
     unsigned int bvhNumNodes; // RayIntersector::numNodes() (0 = no meshes)
 };
 
-// ---- wavefront mode (design doc M2) ----
-// Path queues ping-pong between two ray buffers; shade has its own. Counter
-// slots in the counts buffer:
-#define WF_COUNT_RAY_A 0
-#define WF_COUNT_RAY_B 1
-#define WF_COUNT_SHADE 2
-#define WF_NUM_COUNTERS 4  // last slot is padding
+// ---- wavefront mode (design doc M2/M3) ----
+// Path queues ping-pong between two ray buffers. Shading is queue-routed per
+// material type (tier-1 of the get_bxdf plan): intersect looks at the hit
+// material and pushes into that type's queue; each shade kernel runs one BSDF
+// with zero divergence. Emissive hits are resolved inline in intersect.
+#define WF_COUNT_RAY_A          0
+#define WF_COUNT_RAY_B          1
+#define WF_COUNT_SHADE_DIFFUSE  2
+#define WF_COUNT_SHADE_CONDUCTOR 3
+#define WF_COUNT_SHADE_GLASS    4
+#define WF_NUM_COUNTERS 8  // padded
+
+// Indirect-args slots (16-byte stride each)
+#define WF_ARG_INTERSECT 0
+#define WF_ARG_DIFFUSE   1
+#define WF_ARG_CONDUCTOR 2
+#define WF_ARG_GLASS     3
+#define WF_NUM_ARG_SLOTS 4
 
 // WfPath is MSL-only (the host never reads paths); the host allocates queues
 // with this stride and MSL static_asserts the real sizeof matches.

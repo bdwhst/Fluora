@@ -164,7 +164,7 @@ bool miniLoadScene(const std::string& path, MiniScene& out, std::string& err)
             else if (type == "frenselSpecular")
                 curMat.type = MINI_MAT_GLASS;
             else if (type == "microfacet")
-                curMat.type = MINI_MAT_MIRROR;  // M1: roughness ignored
+                curMat.type = MINI_MAT_CONDUCTOR;
             else {
                 std::cout << "mini: material type '" << type << "' unsupported, using diffuse\n";
                 curMat.type = MINI_MAT_DIFFUSE;
