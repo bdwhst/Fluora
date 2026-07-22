@@ -22,3 +22,17 @@ bool loadHdrImage(const std::string& path, HdrImage& out)
     stbi_image_free(data);
     return true;
 }
+
+bool loadLdrImage(const std::string& path, LdrImage& out)
+{
+    stbi_set_flip_vertically_on_load(1);  // same quirk as loadHdrImage
+    int width = 0, height = 0, channels = 0;
+    unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 4);
+    if (!data)
+        return false;
+    out.width = width;
+    out.height = height;
+    out.rgba.assign(data, data + (size_t)width * height * 4);
+    stbi_image_free(data);
+    return true;
+}

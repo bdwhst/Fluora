@@ -11,12 +11,14 @@ using namespace metal;
 struct RtHit {
     float t;           // in: max distance; out: hit distance
     float3 n;          // geometric normal (unoriented)
+    float2 bary;       // barycentrics (weights of v1, v2)
+    uint triIdx;       // index into the (reordered) triangle array
     uint userData;     // triangle uint4.w (renderer stores a material id)
     bool hit;
 };
 
 inline bool rt_intersect_triangle(float3 ro, float3 rd, float3 v0, float3 v1, float3 v2,
-                                  thread float& tOut)
+                                  thread float& tOut, thread float2& baryOut)
 {
     // Moller-Trumbore, no backface culling (dielectrics need both sides)
     float3 e1 = v1 - v0;
@@ -38,6 +40,7 @@ inline bool rt_intersect_triangle(float3 ro, float3 rd, float3 v0, float3 v1, fl
     if (t < 1e-5f)
         return false;
     tOut = t;
+    baryOut = float2(u, v);
     return true;
 }
 
@@ -69,6 +72,7 @@ inline void rt_closest_hit(float3 ro, float3 rd,
     device const RtBvhNode* base = nodes + dirIdx * numNodes;
     float3 invD = 1.0f / rd;
     int bestTri = -1;
+    float2 bestBary = float2(0.0f);
     uint curr = 0;
     while (curr < numNodes) {
         device const RtBvhNode& node = base[curr];
@@ -76,10 +80,12 @@ inline void rt_closest_hit(float3 ro, float3 rd,
             for (uint i = 0; i < node.triCount; i++) {
                 uint4 tri = tris[node.triStart + i];
                 float t;
+                float2 bary;
                 if (rt_intersect_triangle(ro, rd, positions[tri.x], positions[tri.y],
-                                          positions[tri.z], t) && t < hit.t) {
+                                          positions[tri.z], t, bary) && t < hit.t) {
                     hit.t = t;
                     bestTri = (int)(node.triStart + i);
+                    bestBary = bary;
                 }
             }
             curr = node.hitLink;
@@ -91,7 +97,32 @@ inline void rt_closest_hit(float3 ro, float3 rd,
         uint4 tri = tris[bestTri];
         hit.n = normalize(cross(positions[tri.y] - positions[tri.x],
                                 positions[tri.z] - positions[tri.x]));
+        hit.bary = bestBary;
+        hit.triIdx = (uint)bestTri;
         hit.userData = tri.w;
         hit.hit = true;
     }
+}
+
+// Vertex-attribute interpolation for a hit; the attribute arrays share the
+// triangle's vertex indices (unified vertices, core/mesh_loader).
+
+// Zero-length vertex normals mean "not provided" — fall back to geometric.
+inline float3 rt_shading_normal(device const uint4* tris, device const float3* normals,
+                                thread const RtHit& hit)
+{
+    uint4 tri = tris[hit.triIdx];
+    float3 n = normals[tri.x] * (1.0f - hit.bary.x - hit.bary.y)
+             + normals[tri.y] * hit.bary.x
+             + normals[tri.z] * hit.bary.y;
+    return dot(n, n) > 1e-12f ? normalize(n) : hit.n;
+}
+
+inline float2 rt_interp_uv(device const uint4* tris, device const float2* uvs,
+                           thread const RtHit& hit)
+{
+    uint4 tri = tris[hit.triIdx];
+    return uvs[tri.x] * (1.0f - hit.bary.x - hit.bary.y)
+         + uvs[tri.y] * hit.bary.x
+         + uvs[tri.z] * hit.bary.y;
 }

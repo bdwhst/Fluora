@@ -27,10 +27,18 @@ struct MiniScene {
     MiniCamera camera;
 
     // Mesh geometry, world-space baked at load (no instancing); loading and
-    // BVH construction live in src/core. tris are {i0, i1, i2, materialId}.
+    // BVH construction live in src/core. tris are {i0, i1, i2, materialId};
+    // positions/normals/uvs are unified vertex arrays sharing those indices.
     std::vector<simd_float3> positions;
+    std::vector<simd_float3> normals;
+    std::vector<simd_float2> uvs;
     std::vector<simd_uint4> tris;
     BvhBuildResult bvh;
+
+    // Base-color texture files (scene-dir joined), one per MiniMaterial.texIdx
+    // in order — the host must create heap textures in exactly this order so
+    // heap indices line up.
+    std::vector<std::string> texturePaths;
 
     // SKYBOX line: equirectangular .hdr path (scene-dir relative), or empty.
     std::string envMapPath;

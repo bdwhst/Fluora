@@ -29,13 +29,16 @@ typedef simd_float4x4 mini_float4x4;
 #define MINI_MAT_CONDUCTOR 3  // GGX; roughness < 1e-3 degenerates to mirror
 
 #define MINI_ENV_NONE 0xFFFFFFFFu  // envMapIdx sentinel: black environment
+#define MINI_TEX_NONE 0xFFFFFFFFu  // texIdx sentinel: untextured
 
 struct MiniMaterial {
     mini_float3 rgb;
     int   type;         // MINI_MAT_*
     float emittance;
     float ior;
-    float roughness;    // parsed but unused in M1 (microfacet renders as mirror)
+    float roughness;
+    unsigned int texIdx;  // base-color texture-heap index, or MINI_TEX_NONE
+    unsigned int pad0, pad1, pad2;
 };
 
 // Unit primitives (cube [-0.5,0.5]^3, sphere r=0.5) with baked transforms,

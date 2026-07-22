@@ -194,10 +194,22 @@ Unverified on CUDA until M4.
   assumes bottom-up images — the core loader flips to match. Verified by a
   RhiTest bilinear-sampling unit test plus bunny-skybox rendering both modes
   bitwise identical; cornell output unchanged.
+- *Landed:* mesh vertex attributes + OBJ/MTL materials. `core/mesh_loader`
+  builds unified vertex arrays (positions/normals/uvs share indices, deduped on
+  the OBJ index triple — BVH triangle reordering stays valid); `RtHit` carries
+  barycentrics + triangle index and `rt_shading_normal`/`rt_interp_uv`
+  interpolate behind the seam (`vnormal` smooth shading; zero normals fall back
+  to geometric). `material -1` pulls the OBJ's MTL materials as textured
+  diffuse (`MiniMaterial.texIdx` = bindless heap index; sRGB RGBA8 textures,
+  deduped by path — 45 MTL entries binding one atlas must not become 45 GPU
+  textures, that OOM'd the wavefront queues). The command stream now surfaces
+  command-buffer faults instead of rendering black. Verified: dragon-skybox
+  (871k tris, vnormal) and lost-empire (textured, per-face MTL materials)
+  render in both modes bitwise identical; cornell and bunny byte-unchanged.
 - *Remaining:* math/RNG shims for sharing device code with CUDA; port the
   remaining real BSDFs (rough dielectric, metallic workflow) and the spectral
-  pipeline; make the real scene loader host-portable (migrating it into `src/core`) so
-  `mini_scene` dies (textured materials ride on that). This is the long pole.
+  pipeline; migrate the remaining scene-loading (glTF/PLY, lights, full
+  material params) into `src/core` so `mini_scene` dies. This is the long pole.
 
 **Code layout rule:** portable host code (loaders, builders, eventually the renderer
 core) lives in `src/core/`; backend seams, device-code files, and primitives in

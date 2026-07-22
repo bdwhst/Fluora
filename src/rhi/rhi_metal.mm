@@ -70,7 +70,11 @@ public:
     {
         MTLPixelFormat fmt;
         switch (desc.format) {
-        case TextureFormat::RGBA8Unorm:  fmt = MTLPixelFormatRGBA8Unorm;  mBytesPerPixel = 4;  break;
+        case TextureFormat::RGBA8Unorm:
+            // desc.srgb decodes on sample, like cudaTextureDesc.sRGB = 1.
+            fmt = desc.srgb ? MTLPixelFormatRGBA8Unorm_sRGB : MTLPixelFormatRGBA8Unorm;
+            mBytesPerPixel = 4;
+            break;
         case TextureFormat::RGBA32Float: fmt = MTLPixelFormatRGBA32Float; mBytesPerPixel = 16; break;
         case TextureFormat::R32Float:    fmt = MTLPixelFormatR32Float;    mBytesPerPixel = 4;  break;
         }
@@ -204,6 +208,7 @@ public:
         }
         while (mInFlight.size() > kMaxInFlight) {
             [mInFlight.front() waitUntilCompleted];
+            checkError(mInFlight.front());
             mInFlight.pop_front();
         }
     }
@@ -213,11 +218,22 @@ public:
         submit();
         if (!mInFlight.empty()) {
             [mInFlight.back() waitUntilCompleted];  // in-order queue: back covers all
+            for (id<MTLCommandBuffer> cb : mInFlight)
+                checkError(cb);
             mInFlight.clear();
         }
     }
 
 private:
+    // A GPU fault silently discards the command buffer's writes; surface it
+    // instead of rendering black.
+    static void checkError(id<MTLCommandBuffer> cb)
+    {
+        if ([cb status] == MTLCommandBufferStatusError)
+            throw std::runtime_error("Metal command buffer failed: "
+                                     + nsErrorToString([cb error]));
+    }
+
     void bind(id<MTLComputeCommandEncoder> enc, ComputePipeline& pipeline,
               const void* params, size_t paramsSize,
               std::initializer_list<Buffer*> buffers)

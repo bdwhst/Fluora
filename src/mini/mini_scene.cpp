@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <unordered_map>
 
 namespace {
 
@@ -77,6 +78,7 @@ simd_float3 readVec3(std::istringstream& ss)
 struct PendingObject {
     std::string geometry;
     std::string meshPath;
+    bool useVertexNormal = false;
     int materialId = -1;
     simd_float3 trans = { 0, 0, 0 };
     simd_float3 rot = { 0, 0, 0 };
@@ -103,6 +105,19 @@ bool miniLoadScene(const std::string& path, MiniScene& out, std::string& err)
     if (auto slash = path.find_last_of('/'); slash != std::string::npos)
         sceneDir = path.substr(0, slash + 1);
 
+    // Texture paths dedupe to one heap slot (MTL files commonly bind the same
+    // atlas to every material).
+    std::unordered_map<std::string, unsigned> pathToTexIdx;
+    auto textureIndex = [&](const std::string& p) {
+        auto it = pathToTexIdx.find(p);
+        if (it == pathToTexIdx.end()) {
+            it = pathToTexIdx.emplace(p, (unsigned)out.texturePaths.size()).first;
+            out.texturePaths.push_back(p);
+        }
+        return it->second;
+    };
+
+    bool meshLoadFailed = false;
     auto flushObject = [&]() {
         if (!curObj.active)
             return;
@@ -116,9 +131,29 @@ bool miniLoadScene(const std::string& path, MiniScene& out, std::string& err)
             out.objects.push_back(o);
         } else if (curObj.geometry == "mesh") {
             // Model paths in scene files are relative to the scene directory.
-            loadObjMesh(sceneDir + curObj.meshPath,
-                        buildTransform(curObj.trans, curObj.rot, curObj.scale),
-                        (uint32_t)curObj.materialId, out.positions, out.tris);
+            // material -1 = use the OBJ's MTL materials (Scene::loadModel
+            // convention): they append to the scene material list as textured
+            // diffuse, with each texture path registered for heap upload.
+            std::vector<MeshMaterial> mtlMats;
+            if (!loadObjMesh(sceneDir + curObj.meshPath,
+                             buildTransform(curObj.trans, curObj.rot, curObj.scale),
+                             curObj.materialId, (uint32_t)out.materials.size(),
+                             curObj.useVertexNormal,
+                             out.positions, out.normals, out.uvs, out.tris, mtlMats)) {
+                err = "failed to load mesh " + sceneDir + curObj.meshPath;
+                meshLoadFailed = true;
+                curObj = PendingObject{};
+                return;
+            }
+            for (const auto& mm : mtlMats) {
+                MiniMaterial m = {};
+                m.type = MINI_MAT_DIFFUSE;
+                m.rgb = mm.kd;
+                m.ior = 1.5f;
+                m.texIdx = mm.diffuseTexPath.empty() ? MINI_TEX_NONE
+                                                     : textureIndex(mm.diffuseTexPath);
+                out.materials.push_back(m);
+            }
         } else {
             std::cout << "mini: skipping unsupported geometry '" << curObj.geometry << "'\n";
         }
@@ -143,6 +178,7 @@ bool miniLoadScene(const std::string& path, MiniScene& out, std::string& err)
             curMat = MiniMaterial{};
             curMat.rgb = simd_make_float3(0.5f, 0.5f, 0.5f);
             curMat.ior = 1.5f;
+            curMat.texIdx = MINI_TEX_NONE;
         } else if (tok == "CAMERA") {
             flushMaterial();
             flushObject();
@@ -215,8 +251,9 @@ bool miniLoadScene(const std::string& path, MiniScene& out, std::string& err)
         else if (mode == Mode::Object && tok == "geometry") {
             ss >> curObj.geometry;
         } else if (mode == Mode::Object && tok == "model") {
-            std::string subtype;  // "fnormal"/"vnormal" — M1 uses face normals regardless
+            std::string subtype;
             ss >> subtype >> curObj.meshPath;
+            curObj.useVertexNormal = subtype == "vnormal";
             curObj.geometry = "mesh";
         } else if (mode == Mode::Object && tok == "material") {
             ss >> curObj.materialId;
@@ -231,6 +268,8 @@ bool miniLoadScene(const std::string& path, MiniScene& out, std::string& err)
     flushMaterial();
     flushObject();
 
+    if (meshLoadFailed)
+        return false;  // err set at the failure site
     if (out.objects.empty() && out.tris.empty()) {
         err = "scene has no geometry that FluoraMini can render";
         return false;
@@ -238,6 +277,15 @@ bool miniLoadScene(const std::string& path, MiniScene& out, std::string& err)
     for (const auto& o : out.objects) {
         if (o.materialId < 0 || o.materialId >= (int)out.materials.size()) {
             err = "object references material out of range";
+            return false;
+        }
+    }
+    // Mesh triangles carry material ids in uint4.w (the scene's "material N"
+    // line, or MTL-derived ids); kernels index materials[] with them
+    // unchecked, so a bad id must die here, not on the GPU.
+    for (const auto& tri : out.tris) {
+        if (tri.w >= out.materials.size()) {
+            err = "mesh triangle references material out of range";
             return false;
         }
     }

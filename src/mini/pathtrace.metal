@@ -71,7 +71,8 @@ inline bool intersectUnitSphere(float3 ro, float3 rd, thread float& tOut, thread
 
 struct MiniHit {
     float t;
-    float3 n;      // world-space geometric normal
+    float3 n;      // world-space shading normal (interpolated when provided)
+    float2 uv;     // mesh uv, (-1,-1) for analytic objects / no texcoords
     int objIdx;    // >=0 analytic object, -2 mesh triangle, -1 miss
     uint matId;
 };
@@ -82,9 +83,11 @@ inline bool sceneIntersect(float3 ro, float3 rd,
                            device const MiniObject* objects, uint numObjects,
                            device const RtBvhNode* nodes, uint numNodes,
                            device const uint4* tris, device const float3* positions,
+                           device const float3* normals, device const float2* uvs,
                            thread MiniHit& hit)
 {
     hit.t = INFINITY;
+    hit.uv = float2(-1.0f);
     hit.objIdx = -1;
     hit.matId = 0;
     for (uint i = 0; i < numObjects; i++) {
@@ -108,7 +111,8 @@ inline bool sceneIntersect(float3 ro, float3 rd,
     rt_closest_hit(ro, rd, nodes, numNodes, tris, positions, rhit);
     if (rhit.hit) {
         hit.t = rhit.t;
-        hit.n = rhit.n;
+        hit.n = rt_shading_normal(tris, normals, rhit);
+        hit.uv = rt_interp_uv(tris, uvs, rhit);
         hit.matId = rhit.userData;
         hit.objIdx = -2;
     }
@@ -134,15 +138,19 @@ inline void generateCameraRay(constant MiniParams& P, uint2 gid, thread MiniRng&
 // constant in wf_shade (branch folds at pipeline creation).
 // Returns false when the sample is absorbed.
 inline bool miniScatter(uint type, device const MiniMaterial& mat, float3 p, float3 n,
+                        float2 uv, device const RhiTex* texHeap,
                         thread float3& ro, thread float3& rd,
                         thread float3& throughput, thread MiniRng& rng)
 {
     float3 nF = dot(n, rd) < 0.0f ? n : -n;
     bool alive;
     if (type == MINI_MAT_DIFFUSE) {
+        float3 albedo = float3(mat.rgb);
+        if (mat.texIdx != MINI_TEX_NONE)
+            albedo *= tex_heap_sample(texHeap, mat.texIdx, uv).xyz;
         float u1 = mini_rand(rng);
         float u2 = mini_rand(rng);
-        alive = bsdf_sample_lambert(float3(mat.rgb), nF, u1, u2, rd, throughput);
+        alive = bsdf_sample_lambert(albedo, nF, u1, u2, rd, throughput);
     } else if (type == MINI_MAT_CONDUCTOR) {
         float u1 = mini_rand(rng);
         float u2 = mini_rand(rng);
@@ -169,6 +177,8 @@ kernel void pathtraceKernel(constant MiniParams& P                [[buffer(0)]],
                             device const uint4* tris              [[buffer(5)]],
                             device const float3* positions        [[buffer(6)]],
                             device const RhiTex* texHeap          [[buffer(7)]],
+                            device const float3* normals          [[buffer(8)]],
+                            device const float2* uvs              [[buffer(9)]],
                             uint2 gid [[thread_position_in_grid]])
 {
     if (gid.x >= P.width || gid.y >= P.height)
@@ -189,7 +199,7 @@ kernel void pathtraceKernel(constant MiniParams& P                [[buffer(0)]],
     for (uint depth = 0; depth < P.maxDepth; depth++) {
         MiniHit hit;
         if (!sceneIntersect(ro, rd, objects, P.numObjects, bvhNodes, P.bvhNumNodes,
-                            tris, positions, hit)) {
+                            tris, positions, normals, uvs, hit)) {
             // Escaped: environment radiance if the scene has a SKYBOX, else black.
             if (P.envMapIdx != MINI_ENV_NONE)
                 L += throughput
@@ -201,7 +211,8 @@ kernel void pathtraceKernel(constant MiniParams& P                [[buffer(0)]],
             L += throughput * float3(mat.rgb) * mat.emittance;
             break;
         }
-        if (!miniScatter(mat.type, mat, ro + rd * hit.t, hit.n, ro, rd, throughput, rng))
+        if (!miniScatter(mat.type, mat, ro + rd * hit.t, hit.n, hit.uv, texHeap,
+                         ro, rd, throughput, rng))
             break;
     }
 
@@ -218,7 +229,7 @@ struct WfPath {
     packed_float3 dir;        uint pixel;
     packed_float3 throughput; uint rng;
     packed_float3 normal;     uint depth;
-    uint matId; uint pad0; uint pad1; uint pad2;
+    uint matId; float u; float v; uint pad0;   // uv of the pending hit
 };
 static_assert(sizeof(WfPath) == WF_PATHSTATE_SIZE, "host allocates queues with this stride");
 
@@ -249,6 +260,9 @@ kernel void wf_raygen(constant MiniParams& P     [[buffer(0)]],
     path.rng = rng.state;
     path.depth = 0;
     path.matId = 0;
+    path.u = 0.0f;
+    path.v = 0.0f;
+    path.pad0 = 0;
     rays[idx] = path;
 
     if (idx == 0) {
@@ -305,6 +319,8 @@ kernel void wf_intersect(constant WfCtl& C                 [[buffer(0)]],
                          device WfPath* qConductor         [[buffer(10)]],
                          device WfPath* qGlass             [[buffer(11)]],
                          device const RhiTex* texHeap      [[buffer(12)]],
+                         device const float3* normals      [[buffer(13)]],
+                         device const float2* uvs          [[buffer(14)]],
                          uint tid [[thread_position_in_grid]])
 {
     if (tid >= atomic_load_explicit(&counts[C.srcCounter], memory_order_relaxed))
@@ -312,7 +328,7 @@ kernel void wf_intersect(constant WfCtl& C                 [[buffer(0)]],
     WfPath path = raysIn[tid];
     MiniHit hit;
     if (!sceneIntersect(float3(path.origin), float3(path.dir), objects, C.numObjects,
-                        bvhNodes, C.bvhNumNodes, tris, positions, hit)) {
+                        bvhNodes, C.bvhNumNodes, tris, positions, normals, uvs, hit)) {
         // Escaped: environment radiance (resolved inline like emissive hits),
         // then simply not re-enqueued.
         if (C.envMapIdx != MINI_ENV_NONE) {
@@ -337,6 +353,8 @@ kernel void wf_intersect(constant WfCtl& C                 [[buffer(0)]],
     path.t = hit.t;
     path.normal = hit.n;
     path.matId = hit.matId;
+    path.u = hit.uv.x;
+    path.v = hit.uv.y;
     if (mat.type == MINI_MAT_DIFFUSE)
         qDiffuse[prim_queue_alloc(&counts[WF_COUNT_SHADE_DIFFUSE])] = path;
     else if (mat.type == MINI_MAT_CONDUCTOR)
@@ -356,6 +374,7 @@ kernel void wf_shade(constant WfCtl& C                    [[buffer(0)]],
                      device const WfPath* queue           [[buffer(2)]],
                      device WfPath* raysOut               [[buffer(3)]],
                      device const MiniMaterial* materials [[buffer(4)]],
+                     device const RhiTex* texHeap         [[buffer(5)]],
                      uint tid [[thread_position_in_grid]])
 {
     if (tid >= atomic_load_explicit(&counts[C.srcCounter], memory_order_relaxed))
@@ -369,7 +388,8 @@ kernel void wf_shade(constant WfCtl& C                    [[buffer(0)]],
     float3 rd = float3(path.dir);
     float3 throughput = float3(path.throughput);
     if (!miniScatter(kShadeMatType, materials[path.matId], ro + rd * path.t,
-                     float3(path.normal), ro, rd, throughput, rng))
+                     float3(path.normal), float2(path.u, path.v), texHeap,
+                     ro, rd, throughput, rng))
         return;
     path.origin = ro;
     path.dir = rd;

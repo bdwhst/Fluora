@@ -125,6 +125,40 @@ int main(int argc, char** argv)
         intersector->build(accel);
         auto rt = intersector->bindings();  // {nodes, tris, positions}
 
+        // Mesh vertex attributes (unified indices with positions); dummy-sized
+        // when the scene has no meshes (Metal rejects zero-length buffers).
+        auto makeUpload = [&](const void* data, size_t bytes, const char* name) {
+            auto buf = device->createBuffer(
+                { std::max<size_t>(bytes, 16), rhi::MemoryLocation::Shared, name });
+            if (data && bytes)
+                std::memcpy(buf->hostPtr(), data, bytes);
+            return buf;
+        };
+        auto normalBuf = makeUpload(scene.normals.data(),
+                                    scene.normals.size() * sizeof(simd_float3), "normals");
+        auto uvBuf = makeUpload(scene.uvs.data(),
+                                scene.uvs.size() * sizeof(simd_float2), "uvs");
+
+        // Base-color textures first, in texturePaths order, so heap indices
+        // match MiniMaterial.texIdx (invariant I-1: index, not handle). A 1x1
+        // white fallback keeps indices aligned when a file fails to load.
+        std::vector<std::unique_ptr<rhi::Texture>> matTextures;
+        for (const auto& texPath : scene.texturePaths) {
+            LdrImage img;
+            if (!loadLdrImage(texPath, img)) {
+                std::cout << "mini: failed to load texture " << texPath << ", using white\n";
+                img.width = img.height = 1;
+                img.rgba = { 255, 255, 255, 255 };
+            }
+            auto tex = device->createTexture(
+                { img.width, img.height, rhi::TextureFormat::RGBA8Unorm,
+                  true, /*srgb=*/true, "basecolor" });
+            tex->upload(img.rgba.data(), img.rgba.size());
+            matTextures.push_back(std::move(tex));
+        }
+        if (!scene.texturePaths.empty())
+            std::cout << "mini: " << scene.texturePaths.size() << " material textures\n";
+
         // Environment map: an RGBA32F texture in the bindless heap; kernels
         // get the heap index through params (invariant I-1: index, not handle).
         uint32_t envMapIdx = MINI_ENV_NONE;
@@ -216,7 +250,8 @@ int main(int argc, char** argv)
             if (mode == "mega") {
                 stream->dispatch(*pipeline, grid, block, &params, sizeof(params),
                                  { accum.get(), matBuf.get(), objBuf.get(),
-                                   rt[0], rt[1], rt[2], texHeap });
+                                   rt[0], rt[1], rt[2], texHeap,
+                                   normalBuf.get(), uvBuf.get() });
             } else {
                 stream->dispatch(*raygenPipe, grid, block, &params, sizeof(params),
                                  { raysA.get(), counts.get() });
@@ -241,7 +276,7 @@ int main(int argc, char** argv)
                                              { counts.get(), raysCur, objBuf.get(),
                                                rt[0], rt[1], rt[2], matBuf.get(), accum.get(),
                                                qDiffuse.get(), qConductor.get(), qGlass.get(),
-                                               texHeap });
+                                               texHeap, normalBuf.get(), uvBuf.get() });
                     stream->dispatch(*prepShadePipe, one, one, &c, sizeof(c),
                                      { counts.get(), indirectArgs.get() });
 
@@ -256,7 +291,8 @@ int main(int argc, char** argv)
                         c.srcCounter = pass.counter;
                         stream->dispatchIndirect(*pass.pipe, tile, *indirectArgs,
                                                  pass.argSlot * 16, &c, sizeof(c),
-                                                 { counts.get(), pass.queue, raysNext, matBuf.get() });
+                                                 { counts.get(), pass.queue, raysNext,
+                                                   matBuf.get(), texHeap });
                     }
                     cur = next;
                 }
