@@ -14,6 +14,7 @@
 #include <stb_image_write.h>
 
 #include "../rhi/rhi.h"
+#include "../rhi/primitives_shared.h"
 #include "mini_scene.h"
 
 namespace {
@@ -41,17 +42,24 @@ float acesFilm(float x)
 int main(int argc, char** argv)
 {
     if (argc < 2) {
-        std::cout << "usage: FluoraMini <scene.txt> [--spp N] [--out name.png]\n";
+        std::cout << "usage: FluoraMini <scene.txt> [--spp N] [--out name.png] [--mode wavefront|mega]\n";
         return 1;
     }
     std::string scenePath = argv[1];
     int sppOverride = -1;
     std::string outOverride;
+    std::string mode = "wavefront";
     for (int i = 2; i < argc - 1; i++) {
         if (std::string(argv[i]) == "--spp")
             sppOverride = std::atoi(argv[i + 1]);
         else if (std::string(argv[i]) == "--out")
             outOverride = argv[i + 1];
+        else if (std::string(argv[i]) == "--mode")
+            mode = argv[i + 1];
+    }
+    if (mode != "wavefront" && mode != "mega") {
+        std::cerr << "unknown --mode " << mode << "\n";
+        return 1;
     }
 
     MiniScene scene;
@@ -64,13 +72,17 @@ int main(int argc, char** argv)
     const int height = scene.camera.height;
     const int spp = sppOverride > 0 ? sppOverride : scene.camera.iterations;
     std::cout << "mini: " << scene.objects.size() << " objects, " << scene.materials.size()
-              << " materials, " << width << "x" << height << ", " << spp << " spp\n";
+              << " materials, " << width << "x" << height << ", " << spp << " spp, "
+              << mode << " mode\n";
 
     try {
-        // Runtime MSL compile: shared structs header + kernel source, concatenated
+        // Runtime MSL compile: shared structs + RHI primitives (the wavefront
+        // kernels use prim_queue_alloc) + renderer kernels, concatenated
         // (see DeviceDesc::shaderSource in rhi.h).
         rhi::DeviceDesc deviceDesc;
         deviceDesc.shaderSource = readTextFile(std::string(MINI_SHADER_DIR) + "/mini_shared.h")
+                                + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives_shared.h")
+                                + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives.metal")
                                 + "\n" + readTextFile(std::string(MINI_SHADER_DIR) + "/pathtrace.metal");
         auto device = rhi::createDevice(rhi::BackendKind::Metal, deviceDesc);
         auto stream = device->createStream();
@@ -108,11 +120,65 @@ int main(int argc, char** argv)
 
         const rhi::Dim3 grid{ (unsigned)(width + 15) / 16, (unsigned)(height + 15) / 16, 1 };
         const rhi::Dim3 block{ 16, 16, 1 };
+
+        // Wavefront-mode resources: ping-pong ray queues + shade queue (GPU
+        // only, host never reads paths), queue counters, indirect-args slots.
+        std::unique_ptr<rhi::Buffer> raysA, raysB, shadeQ, counts, indirectArgs;
+        std::unique_ptr<rhi::ComputePipeline> raygenPipe, preparePipe, intersectPipe, shadePipe;
+        if (mode == "wavefront") {
+            const size_t queueBytes = (size_t)width * height * WF_PATHSTATE_SIZE;
+            raysA = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.raysA" });
+            raysB = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.raysB" });
+            shadeQ = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.shade" });
+            counts = device->createBuffer({ WF_NUM_COUNTERS * 4, rhi::MemoryLocation::DeviceLocal, "wf.counts" });
+            indirectArgs = device->createBuffer({ 32, rhi::MemoryLocation::DeviceLocal, "wf.args" });
+            raygenPipe = device->createPipeline({ "wf_raygen" });
+            preparePipe = device->createPipeline({ "wf_prepare" });
+            intersectPipe = device->createPipeline({ "wf_intersect" });
+            shadePipe = device->createPipeline({ "wf_shade" });
+        }
+        const rhi::Dim3 one{ 1, 1, 1 };
+        const rhi::Dim3 tile{ PRIM_TILE, 1, 1 };
+
         for (int i = 0; i < spp; i++) {
             params.iter = (unsigned)i;
-            stream->dispatch(*pipeline, grid, block, &params, sizeof(params),
-                             { accum.get(), matBuf.get(), objBuf.get() });
-            if ((i + 1) % 8 == 0)
+            if (mode == "mega") {
+                stream->dispatch(*pipeline, grid, block, &params, sizeof(params),
+                                 { accum.get(), matBuf.get(), objBuf.get() });
+            } else {
+                stream->dispatch(*raygenPipe, grid, block, &params, sizeof(params),
+                                 { raysA.get(), counts.get() });
+                unsigned cur = WF_COUNT_RAY_A;
+                for (unsigned d = 0; d < params.maxDepth; d++) {
+                    unsigned next = (cur == WF_COUNT_RAY_A) ? WF_COUNT_RAY_B : WF_COUNT_RAY_A;
+                    rhi::Buffer* raysCur = (cur == WF_COUNT_RAY_A) ? raysA.get() : raysB.get();
+                    rhi::Buffer* raysNext = (cur == WF_COUNT_RAY_A) ? raysB.get() : raysA.get();
+
+                    WfCtl c = {};
+                    c.numObjects = params.numObjects;
+                    c.maxDepth = params.maxDepth;
+
+                    c.srcCounter = cur;
+                    c.zeroCounter = WF_COUNT_SHADE;
+                    c.argSlot = 0;
+                    stream->dispatch(*preparePipe, one, one, &c, sizeof(c),
+                                     { counts.get(), indirectArgs.get() });
+                    c.dstCounter = WF_COUNT_SHADE;
+                    stream->dispatchIndirect(*intersectPipe, tile, *indirectArgs, 0, &c, sizeof(c),
+                                             { counts.get(), raysCur, shadeQ.get(), objBuf.get() });
+
+                    c.srcCounter = WF_COUNT_SHADE;
+                    c.zeroCounter = next;
+                    c.argSlot = 1;
+                    stream->dispatch(*preparePipe, one, one, &c, sizeof(c),
+                                     { counts.get(), indirectArgs.get() });
+                    c.dstCounter = next;
+                    stream->dispatchIndirect(*shadePipe, tile, *indirectArgs, 16, &c, sizeof(c),
+                                             { counts.get(), shadeQ.get(), raysNext, matBuf.get(), accum.get() });
+                    cur = next;
+                }
+            }
+            if ((i + 1) % 4 == 0)
                 stream->submit();
             if (spp >= 10 && (i + 1) % (spp / 10) == 0)
                 std::cout << "  " << (i + 1) << "/" << spp << " spp\r" << std::flush;

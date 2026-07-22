@@ -1,8 +1,8 @@
 # Metal RHI: design and migration plan
 
-Status: M1 landed (Cornell renders on macOS/Metal; 800×800×1000spp ≈ 1.5 s on this
-machine); M2 (GPU primitives + queues) in progress · Owner: bdwhst · Last updated:
-2026-07-22
+Status: M0–M2 landed (Cornell renders on macOS/Metal in megakernel and wavefront
+modes, bitwise-identical; primitives + queue tested via RhiTest) · Next: M3 device
+ports · Owner: bdwhst · Last updated: 2026-07-22
 
 ## 1. Context and goal
 
@@ -139,9 +139,15 @@ Unverified on CUDA until M4.
   mechanism; the primitives stay for A/B measurement and future needs. The ray-ordering
   loss from queues is judged minor — paths decorrelate after the first bounce in
   mostly-diffuse scenes anyway — but the A/B on CUDA in M4 confirms it.
-- Then: restructure FluoraMini's megakernel into wavefront stages
-  (raygen → intersect → shade queues, indirect dispatch) to validate the pattern
-  end-to-end on Metal.
+- FluoraMini restructured into wavefront stages (raygen → per-bounce
+  intersect/shade with ping-pong queues and indirect dispatch; terminated paths
+  simply aren't re-enqueued). `--mode wavefront|mega` selects; both share every
+  shading helper and produce **bitwise-identical PNGs** (verified at 500 spp).
+- Measured on the Cornell toy scene (800×800×500spp): mega 0.89 s, wavefront
+  3.15 s — per-sample dispatch overhead (~34 encoders) and 80 B/path queue
+  traffic dominate when intersect/shade are trivial. Expected to invert once
+  real BSDFs/BVH make stages expensive and divergent; re-measure in M3/M4
+  before drawing conclusions.
 
 **M3 — shared device code + full scenes on Metal** *(Mac)*: portability shim (math
 header mapping glm↔MSL vectors, PCG RNG replacing `thrust::random`, atomics/texture

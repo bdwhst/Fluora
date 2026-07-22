@@ -62,4 +62,27 @@ struct MiniParams {
     unsigned int pad0;
 };
 
+// ---- wavefront mode (design doc M2) ----
+// Path queues ping-pong between two ray buffers; shade has its own. Counter
+// slots in the counts buffer:
+#define WF_COUNT_RAY_A 0
+#define WF_COUNT_RAY_B 1
+#define WF_COUNT_SHADE 2
+#define WF_NUM_COUNTERS 4  // last slot is padding
+
+// WfPath is MSL-only (the host never reads paths); the host allocates queues
+// with this stride and MSL static_asserts the real sizeof matches.
+#define WF_PATHSTATE_SIZE 80
+
+// Per-dispatch control block for the wavefront kernels.
+struct WfCtl {
+    unsigned int srcCounter;   // queue this dispatch consumes
+    unsigned int dstCounter;   // queue this dispatch pushes to
+    unsigned int zeroCounter;  // wf_prepare: counter to reset
+    unsigned int argSlot;      // wf_prepare: indirect-args slot (16-byte stride)
+    unsigned int numObjects;
+    unsigned int maxDepth;
+    unsigned int pad0, pad1;
+};
+
 #endif // MINI_SHARED_H
