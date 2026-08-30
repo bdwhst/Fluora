@@ -250,6 +250,42 @@ convenience; fine until M4 packaging).
 - Old glm in `external/include` is not used by the Mac targets (Apple `simd` instead);
   revisit when M3 shims unify math types.
 
+## 8b. Code-review follow-ups (2026-07-22)
+
+Confirmed findings from the pre-push review of M0–M3, deferred to the milestones
+that naturally own them (quick loader/robustness fixes were applied directly):
+
+- **CUDA: material pool re-uploaded per camera move** (`pathtrace.cu`,
+  `materialPool.upload(alloc)` in `pathtraceInit`): every `camchanged` reset
+  bump-allocates a fresh device pool that the monotonic allocator never
+  reclaims — unbounded growth while dragging the camera. Fix in M4 (first CUDA
+  build): upload once at scene load, or before `pathtraceInit` re-runs.
+- **CMake: Windows Debug drops default nvcc flags**: the Debug-mode
+  `set(CMAKE_CUDA_FLAGS ... "-g -G")` near the top now runs before
+  `enable_language(CUDA)` (CUDA left `project()` for the Apple branch); under
+  CMP0126 the normal variable shadows the compiler-detected defaults on a fresh
+  configure. Fix in M4: append `-g -G` after `enable_language(CUDA)` (or use
+  `add_compile_options` with a CUDA generator expression).
+- **Shader-source concat lists**: the "move to metallib in M3" plan (§8) is
+  overdue — mini_main carries a 10-file dependency-ordered list, RhiTest a
+  second 3-file one, from absolute configure-time paths. Do alongside the M3
+  loader migration: a build-time metallib step or one shared concat helper
+  owned by the rhi backend.
+- **Wavefront queue mapping restated ~6×** (`WF_COUNT_*`/`WF_ARG_*` defines,
+  prep kernels' hardcoded zeroing/twin arrays, wf_intersect's if/else + buffer
+  slots, mini_main's shadePasses): derive counter/slot as BASE + matType and
+  loop over a type count before adding the next BSDF queue; `WfCtl.argSlot` is
+  dead — remove it.
+- **Duplicate BVH builder**: `core/bvh_builder` re-implements the six-direction
+  threaded build with a median split while `bvh.cpp`'s SAH builder (host-only,
+  blocked just by `sceneStructs.h` pulling `cuda_runtime.h`) was the planned
+  reuse (§5). Extract the SAH builder into `src/core` during the loader
+  migration — also required for M4 cross-backend traversal parity.
+- **`mini_scene` capability creep**: texture-path dedupe, MTL→material mapping,
+  and SKYBOX parsing landed in `src/mini` against the layout rule. Absorbed by
+  the planned "migrate the real scene loader into `src/core` so `mini_scene`
+  dies" item — do not grow `mini_scene` further before that lands.
+
 ## 9. Verification
 
 - M1: visual check against `img/REFERENCE_cornell.5000samp.png` (framing, colors,
