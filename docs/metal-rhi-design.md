@@ -206,10 +206,13 @@ Unverified on CUDA until M4.
   command-buffer faults instead of rendering black. Verified: dragon-skybox
   (871k tris, vnormal) and lost-empire (textured, per-face MTL materials)
   render in both modes bitwise identical; cornell and bunny byte-unchanged.
-- *Remaining:* math/RNG shims for sharing device code with CUDA; port the
-  remaining real BSDFs (rough dielectric, metallic workflow) and the spectral
-  pipeline; migrate the remaining scene-loading (glTF/PLY, lights, full
-  material params) into `src/core` so `mini_scene` dies. This is the long pole.
+- *Remaining:* math/RNG shims for sharing device code with CUDA — scoped and
+  designed in `docs/portable-device-code.md` (`src/rhi/gpu_portable.h` +
+  host-side value tests; a custom shader language was considered and rejected,
+  Slang scoped there as the escalation path); port the remaining real BSDFs
+  (rough dielectric, metallic workflow) and the spectral pipeline; migrate the
+  remaining scene-loading (glTF/PLY, lights, full material params) into
+  `src/core` so `mini_scene` dies. This is the long pole.
 
 **Code layout rule:** portable host code (loaders, builders, eventually the renderer
 core) lives in `src/core/`; backend seams, device-code files, and primitives in
