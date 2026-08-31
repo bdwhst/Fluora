@@ -108,7 +108,7 @@ Concatenated first for runtime MSL; `#include`-able everywhere else. Contents:
 #if defined(__METAL_VERSION__)
   #define GPU_DEVICE   device      // address-space qualifiers
   #define GPU_THREAD   thread
-  #define GPU_FN       inline
+  #define GPU_FN                   // function qualifier: nothing under MSL
   typedef metal::float2 gpu_float2;   // 16B float3: matches MSL layout rules
   typedef metal::float3 gpu_float3;
   typedef metal::float4 gpu_float4;
@@ -120,26 +120,31 @@ Concatenated first for runtime MSL; `#include`-able everywhere else. Contents:
   // __device__ only, NOT __host__ __device__: shared code calls rsqrt and
   // float min/max, which nvcc provides as device-only builtins; a host pass
   // would fail. Host-side compilation is the third personality's job.
-  #define GPU_FN       __device__ inline
+  #define GPU_FN       __device__
   typedef glm::vec2 gpu_float2;  typedef glm::vec3 gpu_float3;  // glm is CUDA-safe,
   typedef glm::vec4 gpu_float4;  typedef glm::vec3 gpu_packed3; // already in tree
   // vector math via ADL on glm types; scalar via CUDA builtins
-#else  // host C++ (tests, loaders) — CUDA spelling with GPU_FN = inline,
+#else  // host C++ (tests, loaders) — CUDA spelling with GPU_FN empty,
        // plus host definitions of the scalar gaps (rsqrt, float min/max)
 #endif
 
 #define GPU_PI 3.14159265358979323846f
-GPU_FN gpu_float3 gpu_xyz(gpu_float4 v);          // the one swizzle we use
+GPU_FN inline gpu_float3 gpu_xyz(gpu_float4 v);   // the one swizzle we use
 struct GpuRng { unsigned state; };                 // MiniRng's PCG, verbatim
-GPU_FN float gpu_rand(GPU_THREAD GpuRng& r);
+GPU_FN inline float gpu_rand(GPU_THREAD GpuRng& r);
 ```
 
-Shared code then reads:
+`GPU_FN` carries only what genuinely differs per backend (the `__device__`
+qualifier); the `inline` — ODR linkage for functions defined in headers
+included by many host/CUDA TUs, not an inlining hint — is spelled explicitly
+at every definition, matching the CUDA renderer's own `__device__ inline`
+idiom and defines.h's qualifier-only `GPU_FUNC`. Shared code then reads:
 
 ```cpp
-GPU_FN bool bsdf_sample_lambert(gpu_float3 rgb, gpu_float3 nF, float u1, float u2,
-                                GPU_THREAD gpu_float3& rd,
-                                GPU_THREAD gpu_float3& throughput);
+GPU_FN inline bool bsdf_sample_lambert(gpu_float3 rgb, gpu_float3 nF,
+                                       float u1, float u2,
+                                       GPU_THREAD gpu_float3& rd,
+                                       GPU_THREAD gpu_float3& throughput);
 ```
 
 Design rules (enforceable by eyeball / the host test):
@@ -157,6 +162,17 @@ personality and asserts a table of known input→output values (BSDF samples, RN
 sequence, equirect UVs, ACES) matches values captured from the Metal path via
 RhiTest. This proves both personalities parse *and agree numerically* — the
 whole point of the layer. It also becomes the regression net for M4.
+
+**Status: LANDED** (all seven steps in one chunk). Verification results:
+GPU output proven bitwise-unchanged — an A/B experiment pinning the PNG writer
+to the old simd path reproduced the pre-shim images byte-for-byte, isolating
+the only drift to the host writer's ACES switching simd→glm codegen (3–8
+single-LSB channel flips per multi-megapixel image at 8-bit quantization
+boundaries; one-time, new goldens from here). Wavefront ≡ mega stays bitwise
+on cornell/bunny/lost-empire; RhiTest green through the wave shims;
+SharedHostTest passes (13-slot host-C++ vs MSL value parity). The three
+`.metal` renderer files are now `_gpu.h` single-source files; only
+`texture.metal` (sampler body) remains backend-specific, as designed.
 
 **Migration plan (each step lands green, mini images bitwise-unchanged):**
 1. `gpu_portable.h` + `SharedHostTest` scaffold. *(small)*
@@ -259,3 +275,51 @@ debugging, one more toolchain on both platforms.
 **Decision for now:** build the shim (§3). It is the M3 plan of record; every
 piece of it (types, wrapper convention, value tests) remains necessary-or-useful
 groundwork even under a later Slang migration.
+
+## 5. Review follow-ups (2026-08-31)
+
+Confirmed findings from the post-landing review, deferred (the cheap ones —
+the wave-handle API preventing the CUDA reconvergence bug, the
+GPU_HAS_SPEC_CONST guard, the probe arg-order/PROBE_SLOTS fixes, stale
+comments — were applied directly):
+
+- **min/max NaN semantics diverge per personality**: MSL vector min/max are
+  NaN-suppressing fmin/fmax; glm's are NaN-propagating ternaries. Constructible
+  parity break in the slab tests when a ray origin lies exactly on a node
+  plane with a zero direction component (0·inf = NaN). Fix during M4 parity
+  work (NaN-consistent gpu-level min/max or explicit fmin/fmax shims),
+  alongside the already-noted fast-math/fma flag matching.
+- **CUDA gpu_atomic_load/store are volatile accesses, not atomics** — safe for
+  every current call site (no same-index concurrent load/fetch_add exists),
+  but the portable API promises Metal-equivalent atomicity. M4: cuda::atomic_ref
+  or document the disjoint-index restriction on the API.
+- **Host personality covers only the leaf math headers**: kernel/wave/atomic
+  macros have no host lowering, and on Apple hosts `gpu_storage4x4 * gpu_float4`
+  (simd × glm) cannot compile — a matrix-load seam (gpu_load4x4 analog of
+  gpu_load3) is missing. Either add serial host lowerings (kernels as plain
+  functions, waves width-1, barrier no-op) or keep §3b's CPU-debugging claim
+  scoped to leaf headers. Decide when the first real CPU-debug need appears.
+- **Global-namespace injection on hosts** (`uint`/`uchar` typedefs, float
+  `max`/`min`/`rsqrt`): windows.h macro clash is defused by NOMINMAX, but the
+  float overloads can silently win over std:: for int/double args in any host
+  TU including a shared header. Move behind a `gpu_` prefix or namespace when
+  the loader migration broadens the include surface.
+- **SharedHostTest pins no golden values** — it proves personalities agree,
+  not that semantics didn't change; a small pinned-expected-values table adds
+  the regression net §3 promises for M4.
+- **M4 perf notes**: CUDA `gpu_load3` compiles to three scalar loads from the
+  alignas(16) struct — a reinterpret-as-float4 load in the CUDA branch fixes
+  the BVH inner loop; wave-op costs are now one group capture per scope
+  (handle API) but coalesced-group collectives remain slower than full-warp
+  intrinsics in uniform contexts (tg_exclusive_scan) — measure before acting.
+- **GPU_FN vs defines.h GPU_FUNC/CPU_GPU_FUNC**: two function-qualifier
+  vocabularies will meet in M4 nvcc TUs; unify (define one in terms of the
+  other) during the CUDA bring-up. Both are qualifier-only now (`GPU_FN` no
+  longer bakes in `inline`; sites spell `GPU_FN inline`), so the unification
+  is a straight rename.
+- **Unqualified atan2/asin** double-promote on Linux/libstdc++ hosts (MSVC and
+  CUDA provide float overloads; Apple fine). Only matters if a Linux host
+  personality ever ships; std::-qualify or wrap then.
+- **Concat lists now exist in three binaries** (mini_main, RhiTest,
+  SharedHostTest) — subsumed by the §8b metallib/concat-helper item in the
+  main design doc, which this makes more urgent.

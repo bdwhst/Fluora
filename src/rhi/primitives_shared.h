@@ -1,10 +1,10 @@
 #ifndef RHI_PRIMITIVES_SHARED_H
 #define RHI_PRIMITIVES_SHARED_H
-// Parameter block shared by the parallel-primitive kernels (primitives.metal)
+// Parameter block shared by the parallel-primitive kernels (primitives_gpu.h)
 // and their host wrappers (rhi_algorithms.cpp). Plain unsigned ints only, so
 // host/MSL layout agreement is trivial (invariant I-3). One struct serves all
 // kernels; fields are ignored where irrelevant. Textually prepended to
-// primitives.metal at runtime compile — keep self-contained.
+// primitives_gpu.h at runtime MSL compile — keep self-contained.
 
 #define PRIM_TILE 256u
 #define PRIM_RADIX_BITS 4u

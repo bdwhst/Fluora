@@ -6,19 +6,15 @@
 // below have identical size/alignment. Keep fields 16-byte-friendly: float3
 // members first, scalars packed in groups of four.
 //
-// NOTE: at runtime this header is textually prepended to pathtrace.metal
-// before newLibraryWithSource (runtime MSL compilation cannot resolve
-// #includes) — keep it self-contained.
+// NOTE: under MSL this header is concatenated after gpu_portable.h (runtime
+// MSL compilation cannot resolve #includes, so the #include below is inert
+// there and the concat order must put gpu_portable.h first).
 
-#ifdef __METAL_VERSION__
-#include <metal_stdlib>
-typedef metal::float3   mini_float3;
-typedef metal::float4x4 mini_float4x4;
-#else
-#include <simd/simd.h>
-typedef simd_float3   mini_float3;
-typedef simd_float4x4 mini_float4x4;
+#ifndef __METAL_VERSION__
+#include "../rhi/gpu_portable.h"
 #endif
+typedef gpu_storage3   mini_float3;
+typedef gpu_storage4x4 mini_float4x4;
 
 #define MINI_GEOM_CUBE   0
 #define MINI_GEOM_SPHERE 1

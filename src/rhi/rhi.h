@@ -160,7 +160,7 @@ public:
 //
 // Host side: the CPU builds the acceleration structure (src/core/bvh_builder,
 // backend-neutral); the intersector owns its GPU residency. Device side:
-// kernels call rt_closest_hit() (src/rhi/raytrace.metal), compiled per
+// kernels call rt_closest_hit() (src/rhi/raytrace_gpu.h), compiled per
 // backend — the compute threaded-BVH traversal today, MSL intersection_query
 // against an MTLAccelerationStructure as the M5 fast path (which would ignore
 // `nodes` and build from the triangles instead). Kernel code cannot tell

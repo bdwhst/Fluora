@@ -136,7 +136,7 @@ private:
 
 // SKETCH: CudaRayIntersector::build uploads the node/triangle/position arrays
 // with cudaMalloc + memcpy (mirroring MetalRayIntersector), and a __device__
-// rt_closest_hit twin of raytrace.metal walks the same threaded BVH — or
+// rt_closest_hit in raytrace_gpu.h walks the same threaded BVH — or
 // bridges to the existing MTBVH traversal in intersections.cu for parity
 // testing. CudaTexture wraps the cudaArray/cudaTextureObject_t path that
 // Scene::loadTextureFromFile implements. CudaDevice::presentTarget keeps the

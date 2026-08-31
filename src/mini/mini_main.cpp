@@ -81,16 +81,17 @@ int main(int argc, char** argv)
         // kernels use prim_queue_alloc) + renderer kernels, concatenated
         // (see DeviceDesc::shaderSource in rhi.h).
         rhi::DeviceDesc deviceDesc;
-        deviceDesc.shaderSource = readTextFile(std::string(MINI_SHADER_DIR) + "/mini_shared.h")
+        deviceDesc.shaderSource = readTextFile(std::string(RHI_SHADER_DIR) + "/gpu_portable.h")
+                                + "\n" + readTextFile(std::string(MINI_SHADER_DIR) + "/mini_shared.h")
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/accel_shared.h")
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/bsdf_shared.h")
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/tonemap_shared.h")
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/envmap_shared.h")
                                 + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives_shared.h")
-                                + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives.metal")
-                                + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/raytrace.metal")
+                                + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives_gpu.h")
+                                + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/raytrace_gpu.h")
                                 + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/texture.metal")
-                                + "\n" + readTextFile(std::string(MINI_SHADER_DIR) + "/pathtrace.metal");
+                                + "\n" + readTextFile(std::string(MINI_SHADER_DIR) + "/pathtrace_gpu.h");
         auto device = rhi::createDevice(rhi::BackendKind::Metal, deviceDesc);
         auto stream = device->createStream();
         auto pipeline = device->createPipeline({ "pathtraceKernel" });
@@ -338,7 +339,7 @@ int main(int argc, char** argv)
                 // images are comparable with img/ references.
                 size_t src = (size_t)y * width + x;
                 size_t dst = (size_t)y * width + (width - 1 - x);
-                simd_float3 v = tonemap_aces(simd_make_float3(
+                gpu_float3 v = tonemap_aces(gpu_float3(
                     acc[src * 4 + 0], acc[src * 4 + 1], acc[src * 4 + 2])
                     / (float)completed);
                 for (int ch = 0; ch < 3; ch++)

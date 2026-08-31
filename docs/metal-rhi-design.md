@@ -206,13 +206,20 @@ Unverified on CUDA until M4.
   command-buffer faults instead of rendering black. Verified: dragon-skybox
   (871k tris, vnormal) and lost-empire (textured, per-face MTL materials)
   render in both modes bitwise identical; cornell and bunny byte-unchanged.
-- *Remaining:* math/RNG shims for sharing device code with CUDA — scoped and
-  designed in `docs/portable-device-code.md` (`src/rhi/gpu_portable.h` +
-  host-side value tests; a custom shader language was considered and rejected,
-  Slang scoped there as the escalation path); port the remaining real BSDFs
-  (rough dielectric, metallic workflow) and the spectral pipeline; migrate the
-  remaining scene-loading (glTF/PLY, lights, full material params) into
-  `src/core` so `mini_scene` dies. This is the long pole.
+- *Landed:* the portable device-code shim (`src/rhi/gpu_portable.h`, designed
+  in `docs/portable-device-code.md`) — shaders are now single-source across
+  MSL/CUDA/host-C++: kernels declared via GPU_KERNEL signature macros,
+  primitives on wave shims, BSDF/traversal/env/tonemap on gpu_* value types
+  with 16-byte-true storage types (I-3). `pathtrace/primitives/raytrace`
+  became `_gpu.h` files; only `texture.metal` stays per-backend.
+  `SharedHostTest` proves host-C++ (the CUDA spelling) and MSL agree
+  numerically; GPU renders verified bitwise-unchanged (the sole drift was the
+  host PNG writer's ACES codegen, simd→glm: ≤1 LSB on a handful of channels,
+  one-time). CUDA execution of the same sources lands in M4.
+- *Remaining:* port the remaining real BSDFs (rough dielectric, metallic
+  workflow) and the spectral pipeline; migrate the remaining scene-loading
+  (glTF/PLY, lights, full material params) into `src/core` so `mini_scene`
+  dies. This is the long pole.
 
 **Code layout rule:** portable host code (loaders, builders, eventually the renderer
 core) lives in `src/core/`; backend seams, device-code files, and primitives in

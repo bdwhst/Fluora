@@ -468,7 +468,7 @@ private:
 };
 
 // Compute-traversal intersector: uploads the CPU-built threaded BVH; the
-// paired device code is rt_closest_hit in raytrace.metal. The M5 hardware-RT
+// paired device code is rt_closest_hit in raytrace_gpu.h. The M5 hardware-RT
 // variant replaces this class without touching kernel call sites.
 class MetalRayIntersector final : public RayIntersector {
 public:

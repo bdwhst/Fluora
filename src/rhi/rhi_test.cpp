@@ -51,8 +51,9 @@ int main()
 {
     try {
         rhi::DeviceDesc desc;
-        desc.shaderSource = readTextFile(std::string(RHI_SHADER_DIR) + "/primitives_shared.h")
-                          + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives.metal")
+        desc.shaderSource = readTextFile(std::string(RHI_SHADER_DIR) + "/gpu_portable.h")
+                          + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives_shared.h")
+                          + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives_gpu.h")
                           + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/texture.metal")
                           // Samples the bindless heap at (uv.xy, index=uv.z).
                           + R"MSL(

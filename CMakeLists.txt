@@ -61,6 +61,20 @@ if(APPLE)
     target_compile_definitions(RhiTest PRIVATE RHI_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/rhi")
     target_link_libraries(RhiTest "-framework Metal" "-framework Foundation"
         "-framework AppKit" "-framework QuartzCore")
+
+    # Dual-personality value test for the portable device-code shim: the same
+    # shared headers compiled as host C++ (the CUDA-side spelling) and as MSL,
+    # asserting numeric agreement (docs/portable-device-code.md).
+    add_executable(SharedHostTest
+        src/rhi/shared_host_test.cpp
+        src/rhi/rhi_metal.mm
+    )
+    target_include_directories(SharedHostTest PRIVATE external/include)
+    target_compile_definitions(SharedHostTest PRIVATE
+        CORE_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+        RHI_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/rhi")
+    target_link_libraries(SharedHostTest "-framework Metal" "-framework Foundation"
+        "-framework AppKit" "-framework QuartzCore")
     return()
 endif()
 

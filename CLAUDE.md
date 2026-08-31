@@ -26,8 +26,11 @@ Run with a scene file as the only argument: `Fluora.exe scenes/cornell-sphere.tx
 cmake -B build-mac -DCMAKE_BUILD_TYPE=Release
 cmake --build build-mac
 ./build-mac/bin/FluoraMini scenes/cornell-sphere.txt --spp 1000 --out out.png
-./build-mac/bin/RhiTest    # unit tests for the RHI parallel primitives — run after touching src/rhi/
+./build-mac/bin/RhiTest        # RHI parallel-primitive tests — run after touching src/rhi/
+./build-mac/bin/SharedHostTest # host-C++ vs MSL value parity for shared device code
 ```
+
+Device code is single-source (docs/portable-device-code.md): shared `_gpu.h`/`_shared.h` files compile under MSL, CUDA, and host C++ through `src/rhi/gpu_portable.h` (gpu_* types, GPU_KERNEL macros, wave shims). Never fork a shader per backend; raw `kernel void`/`__global__` in renderer device code is a review flag (backend-private and test scaffolding kernels are exempt).
 
 FluoraMini opens a live preview window by default (updates per iteration, freezes at the final frame until closed; q/Esc also close it). Pass `--no-preview` for headless/scripted renders — preview and headless output are bitwise identical, and the window shows the same orientation as the saved PNG.
 

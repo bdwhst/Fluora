@@ -1,6 +1,6 @@
 #pragma once
 // Portable CPU build of the six-direction threaded BVH consumed by the device
-// traversal in src/rhi/raytrace.metal (see RtBvhNode in accel_shared.h).
+// traversal in src/rhi/raytrace_gpu.h (see RtBvhNode in accel_shared.h).
 // Median split on the longest centroid axis; SAH is a quality upgrade for
 // later, and parity with the CUDA renderer's SAH builder (bvh.cpp) is
 // revisited in M4.

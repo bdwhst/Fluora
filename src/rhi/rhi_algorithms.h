@@ -1,7 +1,7 @@
 #pragma once
 // Backend-agnostic parallel primitives built on the RHI (design doc M2).
 // Host code here dispatches only named kernels through rhi:: interfaces
-// (invariant I-4); the Metal implementations live in primitives.metal, and the
+// (invariant I-4); the kernel implementations live in primitives_gpu.h, and the
 // CUDA backend later registers same-named equivalents.
 //
 // Element type is uint32 for now — enough for flags/indices/keys, which is
