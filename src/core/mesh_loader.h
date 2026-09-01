@@ -1,16 +1,18 @@
 #pragma once
 // Portable mesh loading for the renderer core (no backend headers, invariant
-// I-4). Currently OBJ via tinyobjloader; the glTF/PLY paths in scene.cpp
-// migrate here as the real loader is made host-portable (design doc M3).
+// I-4). OBJ via tinyobjloader; PLY migrates here with the .json volume scenes
+// (the glTF path in scene.cpp is dead code and does not).
 #include <cstdint>
 #include <string>
 #include <vector>
-#include <simd/simd.h>
+#include <glm/glm.hpp>
+
+#include "../rhi/gpu_portable.h"
 
 // Material pulled from the OBJ's .mtl (used when the scene binds material -1,
 // like Scene::loadModel): rendered as diffuse Kd, optionally textured.
 struct MeshMaterial {
-    simd_float3 kd = { 0.5f, 0.5f, 0.5f };
+    glm::vec3 kd { 0.5f, 0.5f, 0.5f };
     std::string diffuseTexPath;  // joined with the .mtl directory; empty if none
     std::string name;
 };
@@ -26,11 +28,11 @@ struct MeshMaterial {
 // scene material, like the "material N" scene line); otherwise
 // localMaterialBase + the face's MTL material index, with the MTL materials
 // appended to outMaterials in index order.
-bool loadObjMesh(const std::string& path, const simd_float4x4& transform,
+bool loadObjMesh(const std::string& path, const glm::mat4& transform,
                  int sceneMaterialId, uint32_t localMaterialBase,
                  bool useVertexNormal,
-                 std::vector<simd_float3>& positions,
-                 std::vector<simd_float3>& normals,
-                 std::vector<simd_float2>& uvs,
-                 std::vector<simd_uint4>& tris,
+                 std::vector<gpu_storage3>& positions,
+                 std::vector<gpu_storage3>& normals,
+                 std::vector<gpu_float2>& uvs,
+                 std::vector<gpu_uint4>& tris,
                  std::vector<MeshMaterial>& outMaterials);

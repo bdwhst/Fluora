@@ -1,8 +1,12 @@
 #include "bvh_builder.h"
 
+#include <glm/glm.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+
+#include "host_math.h"
 
 namespace {
 
@@ -19,25 +23,25 @@ constexpr float kSahTraversalCost = 0.1f;   // SAH_RAY_BOX_INTERSECTION_COST
 constexpr uint32_t kMaxLeafPrims = 2;       // MAX_NUM_PRIMS_IN_LEAF
 
 struct Box {
-    simd_float3 mn = simd_make_float3(1e38f, 1e38f, 1e38f);
-    simd_float3 mx = simd_make_float3(-1e38f, -1e38f, -1e38f);
-    void grow(simd_float3 p) { mn = simd_min(mn, p); mx = simd_max(mx, p); }
-    void grow(const Box& b) { mn = simd_min(mn, b.mn); mx = simd_max(mx, b.mx); }
-    simd_float3 center() const { return (mn + mx) * 0.5f; }
+    glm::vec3 mn { 1e38f, 1e38f, 1e38f };
+    glm::vec3 mx { -1e38f, -1e38f, -1e38f };
+    void grow(glm::vec3 p) { mn = glm::min(mn, p); mx = glm::max(mx, p); }
+    void grow(const Box& b) { mn = glm::min(mn, b.mn); mx = glm::max(mx, b.mx); }
+    glm::vec3 center() const { return (mn + mx) * 0.5f; }
     float area() const
     {
-        simd_float3 d = mx - mn;
+        glm::vec3 d = mx - mn;
         return 2.0f * (d.x * d.y + d.x * d.z + d.y * d.z);
     }
 };
 
 struct Prim {
     Box box;              // expanded per-triangle bbox
-    simd_uint4 tri;       // partitioned along with it, like bvh.cpp's Primitive
+    gpu_uint4 tri;        // partitioned along with it, like bvh.cpp's Primitive
 };
 
 struct BuildNode {
-    simd_float3 bmin, bmax, centroid;
+    glm::vec3 bmin, bmax, centroid;
     int left = -1, right = -1;        // indices into the build-node pool
     uint32_t triStart = 0, triCount = 0;
     uint32_t subtreeSize = 1;
@@ -55,7 +59,7 @@ struct Builder {
             bCenter.grow(prims[i].box.center());
         }
         uint32_t count = end - start;
-        simd_float3 cd = bCenter.mx - bCenter.mn;
+        glm::vec3 cd = bCenter.mx - bCenter.mn;
         int axis = cd.x >= cd.y && cd.x >= cd.z ? 0 : (cd.y >= cd.z ? 1 : 2);
 
         BuildNode n;
@@ -130,8 +134,8 @@ struct Builder {
     {
         const BuildNode& n = nodes[ni];
         RtBvhNode g = {};
-        g.bmin = n.bmin;
-        g.bmax = n.bmax;
+        g.bmin = hostStore3(n.bmin);
+        g.bmax = hostStore3(n.bmax);
         g.missLink = missLink;
         g.triStart = n.triStart;
         g.triCount = n.triCount;
@@ -155,8 +159,8 @@ struct Builder {
 
 } // namespace
 
-BvhBuildResult buildThreadedBvh6(const std::vector<simd_float3>& positions,
-                                 std::vector<simd_uint4>& tris)
+BvhBuildResult buildThreadedBvh6(const std::vector<gpu_storage3>& positions,
+                                 std::vector<gpu_uint4>& tris)
 {
     BvhBuildResult result;
     if (tris.empty())
@@ -165,7 +169,7 @@ BvhBuildResult buildThreadedBvh6(const std::vector<simd_float3>& positions,
     for (size_t i = 0; i < tris.size(); i++) {
         Prim p;
         for (int k = 0; k < 3; k++)
-            p.box.grow(positions[tris[i][k]]);
+            p.box.grow(gpu_load3(positions[tris[i][k]]));
         p.box.mn -= kBboxExpand;
         p.box.mx += kBboxExpand;
         p.tri = tris[i];

@@ -3,9 +3,13 @@
 #define TINYOBJLOADER_IMPLEMENTATION
 #include <tiny_obj_loader.h>
 
+#include <glm/gtc/matrix_inverse.hpp>
+
 #include <algorithm>
 #include <iostream>
 #include <unordered_map>
+
+#include "host_math.h"
 
 namespace {
 
@@ -28,13 +32,13 @@ struct IndexTripleHash {
 
 } // namespace
 
-bool loadObjMesh(const std::string& path, const simd_float4x4& transform,
+bool loadObjMesh(const std::string& path, const glm::mat4& transform,
                  int sceneMaterialId, uint32_t localMaterialBase,
                  bool useVertexNormal,
-                 std::vector<simd_float3>& positions,
-                 std::vector<simd_float3>& normals,
-                 std::vector<simd_float2>& uvs,
-                 std::vector<simd_uint4>& tris,
+                 std::vector<gpu_storage3>& positions,
+                 std::vector<gpu_storage3>& normals,
+                 std::vector<gpu_float2>& uvs,
+                 std::vector<gpu_uint4>& tris,
                  std::vector<MeshMaterial>& outMaterials)
 {
     tinyobj::attrib_t attrib;
@@ -51,7 +55,7 @@ bool loadObjMesh(const std::string& path, const simd_float4x4& transform,
     if (sceneMaterialId < 0) {
         for (const auto& m : objMaterials) {
             MeshMaterial mm;
-            mm.kd = simd_make_float3(m.diffuse[0], m.diffuse[1], m.diffuse[2]);
+            mm.kd = glm::vec3(m.diffuse[0], m.diffuse[1], m.diffuse[2]);
             if (!m.diffuse_texname.empty())
                 mm.diffuseTexPath = dir + m.diffuse_texname;
             mm.name = m.name;
@@ -59,9 +63,9 @@ bool loadObjMesh(const std::string& path, const simd_float4x4& transform,
         }
     }
 
-    // Normals transform with the inverse transpose (matches invTranspose on
-    // analytic objects); normalized at interpolation time on device.
-    simd_float4x4 invT = simd_transpose(simd_inverse(transform));
+    // Normals transform with the inverse transpose (glm::inverseTranspose,
+    // like Scene::loadModel); normalized at interpolation time on device.
+    glm::mat4 invT = glm::inverseTranspose(transform);
 
     std::unordered_map<IndexTriple, uint32_t, IndexTripleHash> vertexSet;
     size_t triCount = 0;
@@ -80,28 +84,28 @@ bool loadObjMesh(const std::string& path, const simd_float4x4& transform,
                                  useVertexNormal ? idx.normal_index : -1 };
                 auto it = vertexSet.find(key);
                 if (it == vertexSet.end()) {
-                    simd_float4 p = { attrib.vertices[3 * idx.vertex_index + 0],
-                                      attrib.vertices[3 * idx.vertex_index + 1],
-                                      attrib.vertices[3 * idx.vertex_index + 2], 1.0f };
-                    simd_float3 n = { 0, 0, 0 };
+                    glm::vec4 p(attrib.vertices[3 * idx.vertex_index + 0],
+                                attrib.vertices[3 * idx.vertex_index + 1],
+                                attrib.vertices[3 * idx.vertex_index + 2], 1.0f);
+                    glm::vec3 n(0.0f);
                     if (useVertexNormal && idx.normal_index >= 0) {
-                        simd_float4 nn = { attrib.normals[3 * idx.normal_index + 0],
-                                           attrib.normals[3 * idx.normal_index + 1],
-                                           attrib.normals[3 * idx.normal_index + 2], 0.0f };
-                        n = simd_mul(invT, nn).xyz;
+                        glm::vec4 nn(attrib.normals[3 * idx.normal_index + 0],
+                                     attrib.normals[3 * idx.normal_index + 1],
+                                     attrib.normals[3 * idx.normal_index + 2], 0.0f);
+                        n = glm::vec3(invT * nn);
                     }
-                    simd_float2 uv = { -1.0f, -1.0f };
+                    gpu_float2 uv(-1.0f, -1.0f);
                     if (idx.texcoord_index >= 0)
-                        uv = simd_make_float2(attrib.texcoords[2 * idx.texcoord_index + 0],
-                                              attrib.texcoords[2 * idx.texcoord_index + 1]);
+                        uv = gpu_float2(attrib.texcoords[2 * idx.texcoord_index + 0],
+                                        attrib.texcoords[2 * idx.texcoord_index + 1]);
                     it = vertexSet.emplace(key, (uint32_t)positions.size()).first;
-                    positions.push_back(simd_mul(transform, p).xyz);
-                    normals.push_back(n);
+                    positions.push_back(hostStore3(glm::vec3(transform * p)));
+                    normals.push_back(hostStore3(n));
                     uvs.push_back(uv);
                 }
                 corner[k] = it->second;
             }
-            tris.push_back(simd_make_uint4(corner[0], corner[1], corner[2], matId));
+            tris.push_back(gpu_uint4(corner[0], corner[1], corner[2], matId));
             triCount++;
         }
     }

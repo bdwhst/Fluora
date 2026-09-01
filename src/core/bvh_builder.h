@@ -6,8 +6,8 @@
 // for node-for-node traversal parity and retires bvh.cpp's copy.
 #include <cstdint>
 #include <vector>
-#include <simd/simd.h>
 
+#include "../rhi/gpu_portable.h"
 #include "accel_shared.h"
 
 struct BvhBuildResult {
@@ -16,5 +16,5 @@ struct BvhBuildResult {
 };
 
 // Reorders `tris` in place (leaves reference contiguous ranges).
-BvhBuildResult buildThreadedBvh6(const std::vector<simd_float3>& positions,
-                                 std::vector<simd_uint4>& tris);
+BvhBuildResult buildThreadedBvh6(const std::vector<gpu_storage3>& positions,
+                                 std::vector<gpu_uint4>& tris);

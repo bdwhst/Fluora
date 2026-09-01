@@ -1,78 +1,37 @@
-#include "mini_scene.h"
+#include "scene_loader.h"
 
-#include "../core/mesh_loader.h"
-#include "../core/bvh_builder.h"
+#include <glm/gtc/matrix_inverse.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
-#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <unordered_map>
 
+#include "host_math.h"
+#include "mesh_loader.h"
+
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
 
-simd_float4x4 makeTranslate(simd_float3 t)
+// utilityCore::buildTransformationMatrix, statement for statement, so baked
+// transforms are float-identical across backend hosts.
+glm::mat4 buildTransform(glm::vec3 translation, glm::vec3 rotationDeg, glm::vec3 scale)
 {
-    simd_float4x4 m = matrix_identity_float4x4;
-    m.columns[3] = simd_make_float4(t, 1.0f);
-    return m;
+    glm::mat4 translationMat = glm::translate(glm::mat4(), translation);
+    glm::mat4 rotationMat = glm::rotate(glm::mat4(), rotationDeg.x * kPi / 180, glm::vec3(1, 0, 0));
+    rotationMat = rotationMat * glm::rotate(glm::mat4(), rotationDeg.y * kPi / 180, glm::vec3(0, 1, 0));
+    rotationMat = rotationMat * glm::rotate(glm::mat4(), rotationDeg.z * kPi / 180, glm::vec3(0, 0, 1));
+    glm::mat4 scaleMat = glm::scale(glm::mat4(), scale);
+    return translationMat * rotationMat * scaleMat;
 }
 
-simd_float4x4 makeScale(simd_float3 s)
-{
-    simd_float4x4 m = matrix_identity_float4x4;
-    m.columns[0][0] = s.x;
-    m.columns[1][1] = s.y;
-    m.columns[2][2] = s.z;
-    return m;
-}
-
-simd_float4x4 makeRotX(float a)
-{
-    float c = std::cos(a), s = std::sin(a);
-    simd_float4x4 m = matrix_identity_float4x4;
-    m.columns[1] = simd_make_float4(0.0f, c, s, 0.0f);
-    m.columns[2] = simd_make_float4(0.0f, -s, c, 0.0f);
-    return m;
-}
-
-simd_float4x4 makeRotY(float a)
-{
-    float c = std::cos(a), s = std::sin(a);
-    simd_float4x4 m = matrix_identity_float4x4;
-    m.columns[0] = simd_make_float4(c, 0.0f, -s, 0.0f);
-    m.columns[2] = simd_make_float4(s, 0.0f, c, 0.0f);
-    return m;
-}
-
-simd_float4x4 makeRotZ(float a)
-{
-    float c = std::cos(a), s = std::sin(a);
-    simd_float4x4 m = matrix_identity_float4x4;
-    m.columns[0] = simd_make_float4(c, s, 0.0f, 0.0f);
-    m.columns[1] = simd_make_float4(-s, c, 0.0f, 0.0f);
-    return m;
-}
-
-// Same composition as utilityCore::buildTransformationMatrix: T * Rx * Ry * Rz * S,
-// rotations in degrees.
-simd_float4x4 buildTransform(simd_float3 t, simd_float3 rDeg, simd_float3 s)
-{
-    simd_float4x4 m = makeTranslate(t);
-    m = simd_mul(m, makeRotX(rDeg.x * kPi / 180.0f));
-    m = simd_mul(m, makeRotY(rDeg.y * kPi / 180.0f));
-    m = simd_mul(m, makeRotZ(rDeg.z * kPi / 180.0f));
-    m = simd_mul(m, makeScale(s));
-    return m;
-}
-
-simd_float3 readVec3(std::istringstream& ss)
+glm::vec3 readVec3(std::istringstream& ss)
 {
     float x = 0, y = 0, z = 0;
     ss >> x >> y >> z;
-    return simd_make_float3(x, y, z);
+    return glm::vec3(x, y, z);
 }
 
 struct PendingObject {
@@ -80,15 +39,15 @@ struct PendingObject {
     std::string meshPath;
     bool useVertexNormal = false;
     int materialId = -1;
-    simd_float3 trans = { 0, 0, 0 };
-    simd_float3 rot = { 0, 0, 0 };
-    simd_float3 scale = { 1, 1, 1 };
+    glm::vec3 trans { 0, 0, 0 };
+    glm::vec3 rot { 0, 0, 0 };
+    glm::vec3 scale { 1, 1, 1 };
     bool active = false;
 };
 
 } // namespace
 
-bool miniLoadScene(const std::string& path, MiniScene& out, std::string& err)
+bool loadTxtScene(const std::string& path, CoreScene& out, std::string& err)
 {
     std::ifstream file(path);
     if (!file) {
@@ -98,7 +57,7 @@ bool miniLoadScene(const std::string& path, MiniScene& out, std::string& err)
 
     enum class Mode { None, Material, Camera, Object };
     Mode mode = Mode::None;
-    MiniMaterial curMat = {};
+    CoreMaterial curMat;
     PendingObject curObj;
 
     std::string sceneDir = "./";
@@ -107,11 +66,11 @@ bool miniLoadScene(const std::string& path, MiniScene& out, std::string& err)
 
     // Texture paths dedupe to one heap slot (MTL files commonly bind the same
     // atlas to every material).
-    std::unordered_map<std::string, unsigned> pathToTexIdx;
+    std::unordered_map<std::string, uint32_t> pathToTexIdx;
     auto textureIndex = [&](const std::string& p) {
         auto it = pathToTexIdx.find(p);
         if (it == pathToTexIdx.end()) {
-            it = pathToTexIdx.emplace(p, (unsigned)out.texturePaths.size()).first;
+            it = pathToTexIdx.emplace(p, (uint32_t)out.texturePaths.size()).first;
             out.texturePaths.push_back(p);
         }
         return it->second;
@@ -122,12 +81,13 @@ bool miniLoadScene(const std::string& path, MiniScene& out, std::string& err)
         if (!curObj.active)
             return;
         if (curObj.geometry == "cube" || curObj.geometry == "sphere") {
-            MiniObject o = {};
-            o.geomType = curObj.geometry == "cube" ? MINI_GEOM_CUBE : MINI_GEOM_SPHERE;
+            glm::mat4 t = buildTransform(curObj.trans, curObj.rot, curObj.scale);
+            CoreObject o;
+            o.geomType = curObj.geometry == "cube" ? CORE_GEOM_CUBE : CORE_GEOM_SPHERE;
             o.materialId = curObj.materialId;
-            o.transform = buildTransform(curObj.trans, curObj.rot, curObj.scale);
-            o.invTransform = simd_inverse(o.transform);
-            o.invTranspose = simd_transpose(o.invTransform);
+            o.transform = hostStore4x4(t);
+            o.invTransform = hostStore4x4(glm::inverse(t));
+            o.invTranspose = hostStore4x4(glm::inverseTranspose(t));
             out.objects.push_back(o);
         } else if (curObj.geometry == "mesh") {
             // Model paths in scene files are relative to the scene directory.
@@ -146,16 +106,15 @@ bool miniLoadScene(const std::string& path, MiniScene& out, std::string& err)
                 return;
             }
             for (const auto& mm : mtlMats) {
-                MiniMaterial m = {};
-                m.type = MINI_MAT_DIFFUSE;
+                CoreMaterial m;
+                m.type = CoreMaterialType::Diffuse;
                 m.rgb = mm.kd;
-                m.ior = 1.5f;
-                m.texIdx = mm.diffuseTexPath.empty() ? MINI_TEX_NONE
+                m.texIdx = mm.diffuseTexPath.empty() ? kCoreTexNone
                                                      : textureIndex(mm.diffuseTexPath);
-                out.materials.push_back(m);
+                out.materials.push_back(std::move(m));
             }
         } else {
-            std::cout << "mini: skipping unsupported geometry '" << curObj.geometry << "'\n";
+            std::cout << "core: skipping unsupported geometry '" << curObj.geometry << "'\n";
         }
         curObj = PendingObject{};
     };
@@ -175,10 +134,7 @@ bool miniLoadScene(const std::string& path, MiniScene& out, std::string& err)
             flushMaterial();
             flushObject();
             mode = Mode::Material;
-            curMat = MiniMaterial{};
-            curMat.rgb = simd_make_float3(0.5f, 0.5f, 0.5f);
-            curMat.ior = 1.5f;
-            curMat.texIdx = MINI_TEX_NONE;
+            curMat = CoreMaterial{};
         } else if (tok == "CAMERA") {
             flushMaterial();
             flushObject();
@@ -207,16 +163,16 @@ bool miniLoadScene(const std::string& path, MiniScene& out, std::string& err)
             std::string type;
             ss >> type;
             if (type == "diffuse")
-                curMat.type = MINI_MAT_DIFFUSE;
+                curMat.type = CoreMaterialType::Diffuse;
             else if (type == "emitting")
-                curMat.type = MINI_MAT_EMITTING;
+                curMat.type = CoreMaterialType::Emissive;
             else if (type == "frenselSpecular")
-                curMat.type = MINI_MAT_GLASS;
-            else if (type == "microfacet")
-                curMat.type = MINI_MAT_CONDUCTOR;
+                curMat.type = CoreMaterialType::Dielectric;
+            else if (type == "microfacet" || type == "conductor")
+                curMat.type = CoreMaterialType::Conductor;
             else {
-                std::cout << "mini: material type '" << type << "' unsupported, using diffuse\n";
-                curMat.type = MINI_MAT_DIFFUSE;
+                std::cout << "core: material type '" << type << "' unsupported, using diffuse\n";
+                curMat.type = CoreMaterialType::Diffuse;
             }
         } else if (mode == Mode::Material && tok == "RGB") {
             curMat.rgb = readVec3(ss);
@@ -224,6 +180,14 @@ bool miniLoadScene(const std::string& path, MiniScene& out, std::string& err)
             ss >> curMat.ior;
             if (curMat.ior <= 0.0f)
                 curMat.ior = 1.5f;
+        } else if (mode == Mode::Material
+                   && (tok == "REFRIOR_NAMED" || tok == "REFRIOR_REAL_NAMED")) {
+            ss >> curMat.etaNamed;
+        } else if (mode == Mode::Material && tok == "REFRIOR_IMAG_NAMED") {
+            ss >> curMat.kNamed;
+        } else if (mode == Mode::Material && tok == "REFRIOR_RGB") {
+            curMat.etaRgb = readVec3(ss);
+            curMat.hasEtaRgb = true;
         } else if (mode == Mode::Material && tok == "EMITTANCE") {
             ss >> curMat.emittance;
         } else if (mode == Mode::Material && tok == "ROUGHNESS") {
@@ -271,7 +235,7 @@ bool miniLoadScene(const std::string& path, MiniScene& out, std::string& err)
     if (meshLoadFailed)
         return false;  // err set at the failure site
     if (out.objects.empty() && out.tris.empty()) {
-        err = "scene has no geometry that FluoraMini can render";
+        err = "scene has no renderable geometry";
         return false;
     }
     for (const auto& o : out.objects) {

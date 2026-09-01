@@ -15,11 +15,15 @@
 
 #include <stb_image_write.h>
 
+#include <glm/glm.hpp>
+
+#include "../core/host_math.h"
 #include "../core/image_loader.h"
+#include "../core/scene_loader.h"
 #include "../core/tonemap_shared.h"
 #include "../rhi/rhi.h"
 #include "../rhi/primitives_shared.h"
-#include "mini_scene.h"
+#include "mini_shared.h"
 
 namespace {
 
@@ -63,9 +67,9 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    MiniScene scene;
+    CoreScene scene;
     std::string err;
-    if (!miniLoadScene(scenePath, scene, err)) {
+    if (!loadTxtScene(scenePath, scene, err)) {
         std::cerr << "scene load failed: " << err << "\n";
         return 1;
     }
@@ -75,6 +79,38 @@ int main(int argc, char** argv)
     std::cout << "mini: " << scene.objects.size() << " objects, " << scene.materials.size()
               << " materials, " << width << "x" << height << ", " << spp << " spp, "
               << mode << " mode\n";
+
+    // CoreScene -> device PODs. This mapping (and the RTIOW-grade material
+    // downgrade it encodes) is the mini scaffolding now; it dissolves as real
+    // materials port to src/core.
+    std::vector<MiniMaterial> materials;
+    materials.reserve(scene.materials.size());
+    for (const auto& m : scene.materials) {
+        MiniMaterial mm = {};
+        switch (m.type) {
+        case CoreMaterialType::Diffuse: mm.type = MINI_MAT_DIFFUSE; break;
+        case CoreMaterialType::Emissive: mm.type = MINI_MAT_EMITTING; break;
+        case CoreMaterialType::Dielectric: mm.type = MINI_MAT_GLASS; break;
+        case CoreMaterialType::Conductor: mm.type = MINI_MAT_CONDUCTOR; break;
+        }
+        mm.rgb = hostStore3(m.rgb);
+        mm.emittance = m.emittance;
+        mm.ior = m.ior;
+        mm.roughness = m.roughness;
+        mm.texIdx = m.texIdx == kCoreTexNone ? MINI_TEX_NONE : m.texIdx;
+        materials.push_back(mm);
+    }
+    std::vector<MiniObject> objects;
+    objects.reserve(scene.objects.size());
+    for (const auto& o : scene.objects) {
+        MiniObject mo = {};
+        mo.geomType = o.geomType == CORE_GEOM_SPHERE ? MINI_GEOM_SPHERE : MINI_GEOM_CUBE;
+        mo.materialId = o.materialId;
+        mo.transform = o.transform;
+        mo.invTransform = o.invTransform;
+        mo.invTranspose = o.invTranspose;
+        objects.push_back(mo);
+    }
 
     try {
         // Runtime MSL compile: shared structs + RHI primitives (the wavefront
@@ -101,15 +137,15 @@ int main(int argc, char** argv)
         std::memset(accum->hostPtr(), 0, accumBytes);
 
         auto matBuf = device->createBuffer(
-            { std::max<size_t>(scene.materials.size(), 1) * sizeof(MiniMaterial),
+            { std::max<size_t>(materials.size(), 1) * sizeof(MiniMaterial),
               rhi::MemoryLocation::Shared, "materials" });
-        std::memcpy(matBuf->hostPtr(), scene.materials.data(),
-                    scene.materials.size() * sizeof(MiniMaterial));
+        std::memcpy(matBuf->hostPtr(), materials.data(),
+                    materials.size() * sizeof(MiniMaterial));
         auto objBuf = device->createBuffer(
-            { std::max<size_t>(scene.objects.size(), 1) * sizeof(MiniObject),
+            { std::max<size_t>(objects.size(), 1) * sizeof(MiniObject),
               rhi::MemoryLocation::Shared, "objects" });
-        std::memcpy(objBuf->hostPtr(), scene.objects.data(),
-                    scene.objects.size() * sizeof(MiniObject));
+        std::memcpy(objBuf->hostPtr(), objects.data(),
+                    objects.size() * sizeof(MiniObject));
 
         // Mesh geometry lives behind the ray-tracing seam: the CPU-built BVH
         // (core/bvh_builder) is handed to the RayIntersector, whose buffers we
@@ -120,9 +156,9 @@ int main(int argc, char** argv)
         accel.nodeBytes = scene.bvh.nodes.size() * sizeof(RtBvhNode);
         accel.numNodesPerDir = scene.bvh.numNodesPerDir;
         accel.triangles = scene.tris.data();
-        accel.triangleBytes = scene.tris.size() * sizeof(simd_uint4);
+        accel.triangleBytes = scene.tris.size() * sizeof(gpu_uint4);
         accel.positions = scene.positions.data();
-        accel.positionBytes = scene.positions.size() * sizeof(simd_float3);
+        accel.positionBytes = scene.positions.size() * sizeof(gpu_storage3);
         intersector->build(accel);
         auto rt = intersector->bindings();  // {nodes, tris, positions}
 
@@ -136,9 +172,9 @@ int main(int argc, char** argv)
             return buf;
         };
         auto normalBuf = makeUpload(scene.normals.data(),
-                                    scene.normals.size() * sizeof(simd_float3), "normals");
+                                    scene.normals.size() * sizeof(gpu_storage3), "normals");
         auto uvBuf = makeUpload(scene.uvs.data(),
-                                scene.uvs.size() * sizeof(simd_float2), "uvs");
+                                scene.uvs.size() * sizeof(gpu_float2), "uvs");
 
         // Base-color textures first, in texturePaths order, so heap indices
         // match MiniMaterial.texIdx (invariant I-1: index, not handle). A 1x1
@@ -185,10 +221,11 @@ int main(int argc, char** argv)
         // uses tan(fovy in degrees->radians) un-halved, and the UP vector is used
         // as given rather than re-orthogonalized.
         MiniParams params = {};
-        params.camPos = scene.camera.eye;
-        params.camView = simd_normalize(scene.camera.lookAt - scene.camera.eye);
-        params.camUp = scene.camera.up;
-        params.camRight = simd_normalize(simd_cross(params.camView, scene.camera.up));
+        glm::vec3 camView = glm::normalize(scene.camera.lookAt - scene.camera.eye);
+        params.camPos = hostStore3(scene.camera.eye);
+        params.camView = hostStore3(camView);
+        params.camUp = hostStore3(scene.camera.up);
+        params.camRight = hostStore3(glm::normalize(glm::cross(camView, scene.camera.up)));
         float yscaled = std::tan(scene.camera.fovyDeg * 3.14159265358979323846f / 180.0f);
         float xscaled = yscaled * width / (float)height;
         params.pixelLenX = 2.0f * xscaled / (float)width;
@@ -196,7 +233,7 @@ int main(int argc, char** argv)
         params.width = width;
         params.height = height;
         params.maxDepth = scene.camera.maxDepth;
-        params.numObjects = (unsigned)scene.objects.size();
+        params.numObjects = (unsigned)objects.size();
         params.bvhNumNodes = intersector->numNodes();
         params.envMapIdx = envMapIdx;
 

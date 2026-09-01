@@ -34,7 +34,7 @@ if(APPLE)
     set(CMAKE_OBJCXX_STANDARD 20)
     add_executable(FluoraMini
         src/mini/mini_main.cpp
-        src/mini/mini_scene.cpp
+        src/core/scene_loader.cpp
         src/core/mesh_loader.cpp
         src/core/bvh_builder.cpp
         src/core/image_loader.cpp

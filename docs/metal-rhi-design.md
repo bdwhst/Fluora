@@ -1,7 +1,7 @@
 # Metal RHI: design and migration plan
 
-Status: M0–M2 landed; M3 in progress (mesh scenes render on macOS via threaded-BVH
-traversal behind the RayIntersector seam) · Owner: bdwhst · Last updated: 2026-07-22
+Status: M0–M2 landed; M3 in progress (remaining: BSDF ports + spectral pipeline)
+· Owner: bdwhst · Last updated: 2026-09-01
 
 ## 1. Context and goal
 
@@ -150,7 +150,7 @@ Unverified on CUDA until M4.
 
 **M3 — shared device code + full scenes on Metal** *(Mac, in progress)*:
 - *Landed:* mesh scenes render — OBJ loading (`src/core/mesh_loader`), CPU-built
-  six-direction threaded BVH (`src/core/bvh_builder`, median split; SAH later), and
+  six-direction threaded BVH (`src/core/bvh_builder`; SAH split landed later, below), and
   stackless traversal behind the `rt_closest_hit` seam (`src/rhi/raytrace.metal`) with
   GPU residency owned by `RayIntersector`. Glass-bunny (144k tris) renders in both
   modes, bitwise identical; with real traversal cost the wavefront/mega gap collapses
@@ -216,10 +216,26 @@ Unverified on CUDA until M4.
   numerically; GPU renders verified bitwise-unchanged (the sole drift was the
   host PNG writer's ACES codegen, simd→glm: ≤1 LSB on a handful of channels,
   one-time). CUDA execution of the same sources lands in M4.
+- *Landed:* the scene loader lives in the core. `src/core/scene_loader`
+  parses the full .txt key set (including the spectral REFRIOR_NAMED /
+  REFRIOR_RGB / REFRIOR_REAL_NAMED / REFRIOR_IMAG_NAMED parameters, carried
+  in `CoreMaterial` for the spectral port) into a backend-neutral `CoreScene`;
+  `mini_scene` is deleted and `mini_main` only maps `CoreScene` to its device
+  PODs. In the same pass the core BVH builder gained bvh.cpp's bucketed SAH
+  split (same constants and float expressions — M4 points the CUDA backend
+  here and retires bvh.cpp's copy), and all core loader host math moved from
+  Apple simd to glm (`utilityCore`'s exact transform composition,
+  `glm::inverse`/`inverseTranspose`), so host math is identical across
+  backend hosts in M4; storage types come from the gpu_portable shim.
+  Scope notes: glTF did NOT migrate — it is commented-out dead code in
+  scene.cpp; PLY migrates with the .json volume scenes in the spectral/volume
+  port. One-time golden drift from both changes, quantified: SAH re-ties 5-9
+  px per multi-MP image (≤ a few LSB); simd→glm host math ULP-shifts
+  transforms/normals, which refraction amplifies (glass dragon: 6.5% of px,
+  unbiased ±0, visually identical; others ≤0.1%). Mega and wavefront remain
+  bitwise identical to each other on every scene.
 - *Remaining:* port the remaining real BSDFs (rough dielectric, metallic
-  workflow) and the spectral pipeline; migrate the remaining scene-loading
-  (glTF/PLY, lights, full material params) into `src/core` so `mini_scene`
-  dies. This is the long pole.
+  workflow) and the spectral pipeline. This is the long pole.
 
 **Code layout rule:** portable host code (loaders, builders, eventually the renderer
 core) lives in `src/core/`; backend seams, device-code files, and primitives in
@@ -286,15 +302,13 @@ that naturally own them (quick loader/robustness fixes were applied directly):
   slots, mini_main's shadePasses): derive counter/slot as BASE + matType and
   loop over a type count before adding the next BSDF queue; `WfCtl.argSlot` is
   dead — remove it.
-- **Duplicate BVH builder**: `core/bvh_builder` re-implements the six-direction
-  threaded build with a median split while `bvh.cpp`'s SAH builder (host-only,
-  blocked just by `sceneStructs.h` pulling `cuda_runtime.h`) was the planned
-  reuse (§5). Extract the SAH builder into `src/core` during the loader
-  migration — also required for M4 cross-backend traversal parity.
-- **`mini_scene` capability creep**: texture-path dedupe, MTL→material mapping,
-  and SKYBOX parsing landed in `src/mini` against the layout rule. Absorbed by
-  the planned "migrate the real scene loader into `src/core` so `mini_scene`
-  dies" item — do not grow `mini_scene` further before that lands.
+- **Duplicate BVH builder** *(resolved in M3)*: `core/bvh_builder` now carries
+  bvh.cpp's bucketed SAH split (ported, since `sceneStructs.h` pulling
+  `cuda_runtime.h` blocks literal reuse); M4 swaps the CUDA renderer onto the
+  core builder and deletes bvh.cpp's copy.
+- **`mini_scene` capability creep** *(resolved in M3)*: `mini_scene` is
+  deleted; parsing, texture-path dedupe, MTL→material mapping, and SKYBOX
+  handling live in `src/core/scene_loader`.
 
 ## 9. Verification
 
