@@ -27,14 +27,24 @@ typedef gpu_storage4x4 mini_float4x4;
 #define MINI_ENV_NONE 0xFFFFFFFFu  // envMapIdx sentinel: black environment
 #define MINI_TEX_NONE 0xFFFFFFFFu  // texIdx sentinel: untextured
 
+// CUDA parity note (scene.cpp): env-map radiance is clamped to
+// environmentMapMaxLumin, default vec3(1e5) for .txt scenes.
+#define MINI_ENV_MAX_RADIANCE 1e5f
+
 struct MiniMaterial {
     mini_float3 rgb;
     int   type;         // MINI_MAT_*
     float emittance;
-    float ior;
-    float roughness;
+    float ior;          // dielectric eta when etaSpd == SPD_NONE
+    float roughness;    // conductor GGX alpha (CUDA uses it unsquared)
     unsigned int texIdx;  // base-color texture-heap index, or MINI_TEX_NONE
-    unsigned int pad0, pad1, pad2;
+    // Dense-spectrum offsets into the spd table buffer, or SPD_NONE:
+    // dielectric etaSpd -> dispersive eta (terminates secondary wavelengths);
+    // conductor etaSpd/kSpd -> measured complex IOR, else PBRT reflectance
+    // mode derives k from rgb (eta = 1).
+    unsigned int etaSpd;
+    unsigned int kSpd;
+    unsigned int pad0;
 };
 
 // Unit primitives (cube [-0.5,0.5]^3, sphere r=0.5) with baked transforms,
@@ -53,6 +63,11 @@ struct MiniParams {
     mini_float3 camView;
     mini_float3 camUp;
     mini_float3 camRight;
+    // Film output matrix rows (sRGB RGBFromXYZ, host-derived like
+    // RGBColorSpace): outputRGB = (dot(filmR0,xyz), dot(filmR1,xyz), ...).
+    mini_float3 filmR0;
+    mini_float3 filmR1;
+    mini_float3 filmR2;
     float pixelLenX;
     float pixelLenY;
     unsigned int width;
@@ -84,9 +99,13 @@ struct MiniParams {
 #define WF_ARG_GLASS     3
 #define WF_NUM_ARG_SLOTS 4
 
-// WfPath is MSL-only (the host never reads paths); the host allocates queues
-// with this stride and MSL static_asserts the real sizeof matches.
-#define WF_PATHSTATE_SIZE 80
+// WfPath is device-only (the host never reads paths); the host allocates
+// queues with this stride and the device static_asserts the real sizeof
+// matches. Spectral state per path: throughput is one float4 spectrum, and
+// wavelengths are recomputed each stage from lambdaU (+ the dispersion flag)
+// instead of being carried — 8 bytes of queue traffic instead of 32.
+#define WF_PATHSTATE_SIZE 96
+#define WF_FLAG_SECONDARY_TERMINATED 1u
 
 // Per-dispatch control block for the wavefront kernels.
 struct WfCtl {
@@ -98,6 +117,9 @@ struct WfCtl {
     unsigned int maxDepth;
     unsigned int bvhNumNodes;
     unsigned int envMapIdx;
+    mini_float3 filmR0;        // film matrix rows, as in MiniParams
+    mini_float3 filmR1;
+    mini_float3 filmR2;
 };
 
 #endif // MINI_SHARED_H

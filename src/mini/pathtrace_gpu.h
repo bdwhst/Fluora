@@ -16,6 +16,7 @@
 #include "../rhi/gpu_portable.h"
 #include "../rhi/primitives_gpu.h"
 #include "../rhi/raytrace_gpu.h"
+#include "../core/spectrum_shared.h"
 #include "../core/bsdf_shared.h"
 #include "../core/envmap_shared.h"
 #include "../core/tonemap_shared.h"
@@ -135,17 +136,42 @@ GPU_FN inline void generateCameraRay(GPU_PARAMS_REF(MiniParams) P, gpu_uint2 gid
     ro = gpu_load3(P.camPos);
 }
 
-// Draws this material's uniforms and scatters via the core BSDFs
-// (core/bsdf_shared.h). Shared by the megakernel switch and the specialized
-// shade kernel, so both modes consume identical RNG streams and math.
-// `type` is mat.type in the megakernel (dynamic branch) and a function
-// constant in wf_shade (branch folds at pipeline creation).
-// Returns false when the sample is absorbed.
+// Environment radiance for an escaped ray: equirect texel RGB, clamped like
+// scene.cpp's max-luminance guard, spectralized as an RGB illuminant (the
+// ImageInfiniteLight::L port).
+GPU_FN inline GpuSpectrum miniEnvRadiance(GPU_DEVICE const RhiTex* texHeap, uint envMapIdx,
+                                   gpu_float3 rd, GpuWavelengths swl,
+                                   GPU_DEVICE const float* spd,
+                                   GPU_DEVICE const float* r2s)
+{
+    gpu_float3 sky = gpu_xyz(tex_heap_sample(texHeap, envMapIdx, env_equirect_uv(rd)));
+    sky = min(sky, gpu_float3(MINI_ENV_MAX_RADIANCE));
+    return spd_rgb_illuminant_sample(r2s, spd, sky, swl);
+}
+
+// Spectral radiance -> film RGB: pixel sensor XYZ (spectrum_shared.h), then
+// the host-derived output matrix rows.
+GPU_FN inline gpu_float3 miniFilmRgb(GpuSpectrum L, GpuWavelengths swl,
+                              GPU_DEVICE const float* spd,
+                              gpu_float3 r0, gpu_float3 r1, gpu_float3 r2)
+{
+    gpu_float3 xyz = spd_to_sensor_xyz(L, swl, spd);
+    return gpu_float3(dot(r0, xyz), dot(r1, xyz), dot(r2, xyz));
+}
+
+// Draws this material's uniforms, samples its spectra, and scatters via the
+// core BSDFs (core/bsdf_shared.h) — the get_bxdf port. Shared by the
+// megakernel switch and the specialized shade kernel, so both modes consume
+// identical RNG streams and math. `type` is mat.type in the megakernel
+// (dynamic branch) and a function constant in wf_shade (branch folds at
+// pipeline creation). Returns false when the sample is absorbed.
 GPU_FN inline bool miniScatter(uint type, GPU_DEVICE const MiniMaterial& mat,
                         gpu_float3 p, gpu_float3 n,
                         gpu_float2 uv, GPU_DEVICE const RhiTex* texHeap,
+                        GPU_DEVICE const float* spd, GPU_DEVICE const float* r2s,
                         GPU_THREAD gpu_float3& ro, GPU_THREAD gpu_float3& rd,
-                        GPU_THREAD gpu_float3& throughput, GPU_THREAD GpuRng& rng)
+                        GPU_THREAD GpuSpectrum& throughput,
+                        GPU_THREAD GpuWavelengths& swl, GPU_THREAD GpuRng& rng)
 {
     gpu_float3 nF = dot(n, rd) < 0.0f ? n : -n;
     bool alive;
@@ -153,17 +179,39 @@ GPU_FN inline bool miniScatter(uint type, GPU_DEVICE const MiniMaterial& mat,
         gpu_float3 albedo = gpu_load3(mat.rgb);
         if (mat.texIdx != MINI_TEX_NONE)
             albedo *= gpu_xyz(tex_heap_sample(texHeap, mat.texIdx, uv));
+        GpuSpectrum reflectance = spd_rgb_albedo_sample(r2s, albedo, swl);
         float u1 = gpu_rand(rng);
         float u2 = gpu_rand(rng);
-        alive = bsdf_sample_lambert(albedo, nF, u1, u2, rd, throughput);
+        alive = bsdf_sample_lambert(reflectance, nF, u1, u2, rd, throughput);
     } else if (type == MINI_MAT_CONDUCTOR) {
+        GpuSpectrum eta, k;
+        if (mat.etaSpd != SPD_NONE && mat.kSpd != SPD_NONE) {
+            eta = spd_dense_sample(spd, mat.etaSpd, swl);
+            k = spd_dense_sample(spd, mat.kSpd, swl);
+        } else {
+            // PBRT reflectance mode for RGB "microfacet" materials (the CUDA
+            // renderer rejects these scenes): eta = 1, k = 2 sqrt(r)/sqrt(1-r).
+            GpuSpectrum r = spd_rgb_albedo_sample(r2s, gpu_load3(mat.rgb), swl);
+            eta = GpuSpectrum(1.0f);
+            for (int i = 0; i < SPD_N_SAMPLES; i++)
+                k[i] = 2.0f * sqrt(r[i]) / sqrt(max(1.0f - r[i], 1e-4f));
+        }
         float u1 = gpu_rand(rng);
         float u2 = gpu_rand(rng);
-        alive = bsdf_sample_conductor(gpu_load3(mat.rgb), mat.roughness, nF, u1, u2,
+        alive = bsdf_sample_conductor(eta, k, mat.roughness, nF, u1, u2,
                                       rd, throughput);
     } else {  // MINI_MAT_GLASS
+        float etaVal = mat.ior;
+        if (mat.etaSpd != SPD_NONE) {
+            // Dispersive eta: evaluate at the hero wavelength and collapse the
+            // secondary wavelengths (DielectricMaterial::get_bxdf).
+            int o = (int)(swl.lambda.x + 0.5f) - (int)SPD_LAMBDA_MIN;
+            o = spd_clampi(o, 0, (int)SPD_TABLE_SIZE - 1);
+            etaVal = spd[mat.etaSpd + (uint)o];
+            spd_terminate_secondary(swl);
+        }
         float u = gpu_rand(rng);
-        alive = bsdf_sample_dielectric(gpu_load3(mat.rgb), mat.ior, n, u, rd, throughput);
+        alive = bsdf_sample_dielectric(etaVal, n, u, rd, throughput);
     }
     if (!alive)
         return false;
@@ -185,6 +233,8 @@ GPU_KERNEL(pathtraceKernel)(GPU_KERNEL_PARAMS(MiniParams, P)
     GPU_BUFFER(const RhiTex, texHeap, 7)
     GPU_BUFFER(const gpu_storage3, normals, 8)
     GPU_BUFFER(const gpu_float2, uvs, 9)
+    GPU_BUFFER(const float, spd, 10)
+    GPU_BUFFER(const float, r2s, 11)
     GPU_TID_2D)
 {
     gpu_uint2 gid = GPU_GLOBAL_ID_XY;
@@ -199,9 +249,10 @@ GPU_KERNEL(pathtraceKernel)(GPU_KERNEL_PARAMS(MiniParams, P)
 
     gpu_float3 ro, rd;
     generateCameraRay(P, gid, rng, ro, rd);
+    GpuWavelengths swl = spd_sample_visible(gpu_rand(rng));
 
-    gpu_float3 L = gpu_float3(0.0f);
-    gpu_float3 throughput = gpu_float3(1.0f);
+    GpuSpectrum L = GpuSpectrum(0.0f);
+    GpuSpectrum throughput = GpuSpectrum(1.0f);
 
     for (uint depth = 0; depth < P.maxDepth; depth++) {
         MiniHit hit;
@@ -209,22 +260,26 @@ GPU_KERNEL(pathtraceKernel)(GPU_KERNEL_PARAMS(MiniParams, P)
                             tris, positions, normals, uvs, hit)) {
             // Escaped: environment radiance if the scene has a SKYBOX, else black.
             if (P.envMapIdx != MINI_ENV_NONE)
-                L += throughput
-                   * gpu_xyz(tex_heap_sample(texHeap, P.envMapIdx, env_equirect_uv(rd)));
+                L += throughput * miniEnvRadiance(texHeap, P.envMapIdx, rd, swl,
+                                                  spd, r2s);
             break;
         }
         GPU_DEVICE const MiniMaterial& mat = materials[hit.matId];
         if (mat.type == MINI_MAT_EMITTING) {
-            L += throughput * gpu_load3(mat.rgb) * mat.emittance;
+            // EmissiveMaterial::Le — rgb*emittance as an RGB illuminant.
+            L += throughput * spd_rgb_illuminant_sample(
+                                  r2s, spd, gpu_load3(mat.rgb) * mat.emittance, swl);
             break;
         }
         if (!miniScatter(mat.type, mat, ro + rd * hit.t, hit.n, hit.uv, texHeap,
-                         ro, rd, throughput, rng))
+                         spd, r2s, ro, rd, throughput, swl, rng))
             break;
     }
 
-    if (gpu_all_finite(L))
-        accum[idx] += gpu_float4(L, 1.0f);
+    gpu_float3 rgb = miniFilmRgb(L, swl, spd, gpu_load3(P.filmR0),
+                                 gpu_load3(P.filmR1), gpu_load3(P.filmR2));
+    if (gpu_all_finite(rgb))
+        accum[idx] += gpu_float4(rgb, 1.0f);
 }
 
 // ==========================================================================
@@ -234,11 +289,23 @@ GPU_KERNEL(pathtraceKernel)(GPU_KERNEL_PARAMS(MiniParams, P)
 struct WfPath {
     gpu_packed3 origin;     float t;
     gpu_packed3 dir;        uint pixel;
-    gpu_packed3 throughput; uint rng;
+    GpuSpectrum throughput;                    // one float4 spectrum
     gpu_packed3 normal;     uint depth;
-    uint matId; float u; float v; uint pad0;   // uv of the pending hit
+    uint matId; float u; float v; uint rng;    // uv of the pending hit
+    float lambdaU;          uint wlFlags;      // wavelengths recomputed per stage
+    uint pad0, pad1;
 };
 static_assert(sizeof(WfPath) == WF_PATHSTATE_SIZE, "host allocates queues with this stride");
+
+// Rebuild this path's wavelengths from its raygen draw + dispersion flag —
+// deterministic, so carrying 8 bytes beats carrying the 32-byte struct.
+GPU_FN inline GpuWavelengths wfWavelengths(WfPath path)
+{
+    GpuWavelengths swl = spd_sample_visible(path.lambdaU);
+    if ((path.wlFlags & WF_FLAG_SECONDARY_TERMINATED) != 0u)
+        spd_terminate_secondary(swl);
+    return swl;
+}
 
 GPU_KERNEL(wf_raygen)(GPU_KERNEL_PARAMS(MiniParams, P)
     GPU_BUFFER(WfPath, rays, 1)
@@ -257,11 +324,12 @@ GPU_KERNEL(wf_raygen)(GPU_KERNEL_PARAMS(MiniParams, P)
 
     gpu_float3 ro, rd;
     generateCameraRay(P, gid, rng, ro, rd);
+    float lambdaU = gpu_rand(rng);
 
     WfPath path;
     path.origin = ro;
     path.dir = rd;
-    path.throughput = gpu_float3(1.0f);
+    path.throughput = GpuSpectrum(1.0f);
     path.normal = gpu_float3(0.0f);
     path.t = 0.0f;
     path.pixel = idx;
@@ -270,7 +338,10 @@ GPU_KERNEL(wf_raygen)(GPU_KERNEL_PARAMS(MiniParams, P)
     path.matId = 0;
     path.u = 0.0f;
     path.v = 0.0f;
+    path.lambdaU = lambdaU;
+    path.wlFlags = 0;
     path.pad0 = 0;
+    path.pad1 = 0;
     rays[idx] = path;
 
     if (idx == 0) {
@@ -329,6 +400,8 @@ GPU_KERNEL(wf_intersect)(GPU_KERNEL_PARAMS(WfCtl, C)
     GPU_BUFFER(const RhiTex, texHeap, 12)
     GPU_BUFFER(const gpu_storage3, normals, 13)
     GPU_BUFFER(const gpu_float2, uvs, 14)
+    GPU_BUFFER(const float, spd, 15)
+    GPU_BUFFER(const float, r2s, 16)
     GPU_TID_1D)
 {
     uint tid = GPU_GLOBAL_ID_X;
@@ -341,11 +414,14 @@ GPU_KERNEL(wf_intersect)(GPU_KERNEL_PARAMS(WfCtl, C)
         // Escaped: environment radiance (resolved inline like emissive hits),
         // then simply not re-enqueued.
         if (C.envMapIdx != MINI_ENV_NONE) {
-            gpu_float3 L = gpu_float3(path.throughput)
-                         * gpu_xyz(tex_heap_sample(texHeap, C.envMapIdx,
-                                                   env_equirect_uv(gpu_float3(path.dir))));
-            if (gpu_all_finite(L))
-                accum[path.pixel] += gpu_float4(L, 1.0f);
+            GpuWavelengths swl = wfWavelengths(path);
+            GpuSpectrum Ls = path.throughput
+                           * miniEnvRadiance(texHeap, C.envMapIdx,
+                                             gpu_float3(path.dir), swl, spd, r2s);
+            gpu_float3 rgb = miniFilmRgb(Ls, swl, spd, gpu_load3(C.filmR0),
+                                         gpu_load3(C.filmR1), gpu_load3(C.filmR2));
+            if (gpu_all_finite(rgb))
+                accum[path.pixel] += gpu_float4(rgb, 1.0f);
         }
         return;
     }
@@ -353,9 +429,15 @@ GPU_KERNEL(wf_intersect)(GPU_KERNEL_PARAMS(WfCtl, C)
     GPU_DEVICE const MiniMaterial& mat = materials[hit.matId];
     if (mat.type == MINI_MAT_EMITTING) {
         // One path per pixel per sample, so this write does not race.
-        gpu_float3 L = gpu_float3(path.throughput) * gpu_load3(mat.rgb) * mat.emittance;
-        if (gpu_all_finite(L))
-            accum[path.pixel] += gpu_float4(L, 1.0f);
+        GpuWavelengths swl = wfWavelengths(path);
+        GpuSpectrum Ls = path.throughput
+                       * spd_rgb_illuminant_sample(r2s, spd,
+                                                   gpu_load3(mat.rgb) * mat.emittance,
+                                                   swl);
+        gpu_float3 rgb = miniFilmRgb(Ls, swl, spd, gpu_load3(C.filmR0),
+                                     gpu_load3(C.filmR1), gpu_load3(C.filmR2));
+        if (gpu_all_finite(rgb))
+            accum[path.pixel] += gpu_float4(rgb, 1.0f);
         return;
     }
 
@@ -387,6 +469,8 @@ GPU_KERNEL(wf_shade)(GPU_KERNEL_PARAMS(WfCtl, C)
     GPU_BUFFER(WfPath, raysOut, 3)
     GPU_BUFFER(const MiniMaterial, materials, 4)
     GPU_BUFFER(const RhiTex, texHeap, 5)
+    GPU_BUFFER(const float, spd, 6)
+    GPU_BUFFER(const float, r2s, 7)
     GPU_TID_1D)
 {
     uint tid = GPU_GLOBAL_ID_X;
@@ -399,15 +483,18 @@ GPU_KERNEL(wf_shade)(GPU_KERNEL_PARAMS(WfCtl, C)
     rng.state = path.rng;
     gpu_float3 ro = gpu_float3(path.origin);
     gpu_float3 rd = gpu_float3(path.dir);
-    gpu_float3 throughput = gpu_float3(path.throughput);
+    GpuSpectrum throughput = path.throughput;
+    GpuWavelengths swl = wfWavelengths(path);
     if (!miniScatter(kShadeMatType, materials[path.matId], ro + rd * path.t,
                      gpu_float3(path.normal), gpu_float2(path.u, path.v), texHeap,
-                     ro, rd, throughput, rng))
+                     spd, r2s, ro, rd, throughput, swl, rng))
         return;
     path.origin = ro;
     path.dir = rd;
     path.throughput = throughput;
     path.rng = rng.state;
+    if (spd_secondary_terminated(swl))
+        path.wlFlags |= WF_FLAG_SECONDARY_TERMINATED;
     path.depth++;
     raysOut[prim_queue_alloc(&counts[C.dstCounter])] = path;
 }

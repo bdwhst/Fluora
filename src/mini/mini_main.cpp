@@ -20,6 +20,8 @@
 #include "../core/host_math.h"
 #include "../core/image_loader.h"
 #include "../core/scene_loader.h"
+#include "../core/spectra.h"
+#include "../core/spectrum_shared.h"
 #include "../core/tonemap_shared.h"
 #include "../rhi/rhi.h"
 #include "../rhi/primitives_shared.h"
@@ -80,9 +82,20 @@ int main(int argc, char** argv)
               << " materials, " << width << "x" << height << ", " << spp << " spp, "
               << mode << " mode\n";
 
-    // CoreScene -> device PODs. This mapping (and the RTIOW-grade material
-    // downgrade it encodes) is the mini scaffolding now; it dissolves as real
-    // materials port to src/core.
+    // CoreScene -> device PODs, resolving named spectra to dense-table
+    // offsets (the CoreMaterial carries the names; SpectralTables densifies
+    // on demand). This mapping is the mini scaffolding now; it dissolves as
+    // real materials port to src/core.
+    SpectralTables spectra;
+    auto resolveSpd = [&](const std::string& name) {
+        if (name.empty())
+            return (uint32_t)SPD_NONE;
+        uint32_t off = spectra.namedOffset(name);
+        if (off == SPD_NONE)
+            std::cout << "mini: unknown named spectrum '" << name
+                      << "', falling back to RGB parameters\n";
+        return off;
+    };
     std::vector<MiniMaterial> materials;
     materials.reserve(scene.materials.size());
     for (const auto& m : scene.materials) {
@@ -98,6 +111,12 @@ int main(int argc, char** argv)
         mm.ior = m.ior;
         mm.roughness = m.roughness;
         mm.texIdx = m.texIdx == kCoreTexNone ? MINI_TEX_NONE : m.texIdx;
+        mm.etaSpd = resolveSpd(m.etaNamed);
+        mm.kSpd = resolveSpd(m.kNamed);
+        // Conductor Fresnel needs eta AND k; with only one, use reflectance
+        // mode (both SPD_NONE).
+        if (mm.type == MINI_MAT_CONDUCTOR && (mm.etaSpd == SPD_NONE || mm.kSpd == SPD_NONE))
+            mm.etaSpd = mm.kSpd = SPD_NONE;
         materials.push_back(mm);
     }
     std::vector<MiniObject> objects;
@@ -118,6 +137,7 @@ int main(int argc, char** argv)
         // (see DeviceDesc::shaderSource in rhi.h).
         rhi::DeviceDesc deviceDesc;
         deviceDesc.shaderSource = readTextFile(std::string(RHI_SHADER_DIR) + "/gpu_portable.h")
+                                + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/spectrum_shared.h")
                                 + "\n" + readTextFile(std::string(MINI_SHADER_DIR) + "/mini_shared.h")
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/accel_shared.h")
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/bsdf_shared.h")
@@ -217,6 +237,23 @@ int main(int argc, char** argv)
         }
         rhi::Buffer* texHeap = &device->textureHeap();
 
+        // Spectral tables (invariant I-1: kernels get offsets, not pointers):
+        // the dense-spectra buffer (CIE curves, D65, named eta/k) and the sRGB
+        // rgb2spec coefficient table (zNodes then coeffs).
+        auto spdBuf = device->createBuffer(
+            { spectra.buffer().size() * sizeof(float), rhi::MemoryLocation::Shared, "spd" });
+        std::memcpy(spdBuf->hostPtr(), spectra.buffer().data(),
+                    spectra.buffer().size() * sizeof(float));
+        Rgb2SpecView r2sView = rgb2specSrgb();
+        auto r2sBuf = device->createBuffer(
+            { (r2sView.zNodeCount + r2sView.coeffCount) * sizeof(float),
+              rhi::MemoryLocation::Shared, "rgb2spec" });
+        std::memcpy(r2sBuf->hostPtr(), r2sView.zNodes, r2sView.zNodeCount * sizeof(float));
+        std::memcpy((float*)r2sBuf->hostPtr() + r2sView.zNodeCount, r2sView.coeffs,
+                    r2sView.coeffCount * sizeof(float));
+
+        glm::mat3 filmM = srgbRgbFromXyz();
+
         // Camera setup replicating scene.cpp exactly, quirks included: pixelLength
         // uses tan(fovy in degrees->radians) un-halved, and the UP vector is used
         // as given rather than re-orthogonalized.
@@ -226,6 +263,11 @@ int main(int argc, char** argv)
         params.camView = hostStore3(camView);
         params.camUp = hostStore3(scene.camera.up);
         params.camRight = hostStore3(glm::normalize(glm::cross(camView, scene.camera.up)));
+        // Row i of the film matrix = (M[0][i], M[1][i], M[2][i]) (glm is
+        // column-major); kernels apply rgb = (dot(r0,xyz), ...).
+        params.filmR0 = hostStore3(glm::vec3(filmM[0][0], filmM[1][0], filmM[2][0]));
+        params.filmR1 = hostStore3(glm::vec3(filmM[0][1], filmM[1][1], filmM[2][1]));
+        params.filmR2 = hostStore3(glm::vec3(filmM[0][2], filmM[1][2], filmM[2][2]));
         float yscaled = std::tan(scene.camera.fovyDeg * 3.14159265358979323846f / 180.0f);
         float xscaled = yscaled * width / (float)height;
         params.pixelLenX = 2.0f * xscaled / (float)width;
@@ -289,7 +331,8 @@ int main(int argc, char** argv)
                 stream->dispatch(*pipeline, grid, block, &params, sizeof(params),
                                  { accum.get(), matBuf.get(), objBuf.get(),
                                    rt[0], rt[1], rt[2], texHeap,
-                                   normalBuf.get(), uvBuf.get() });
+                                   normalBuf.get(), uvBuf.get(),
+                                   spdBuf.get(), r2sBuf.get() });
             } else {
                 stream->dispatch(*raygenPipe, grid, block, &params, sizeof(params),
                                  { raysA.get(), counts.get() });
@@ -304,6 +347,9 @@ int main(int argc, char** argv)
                     c.maxDepth = params.maxDepth;
                     c.bvhNumNodes = params.bvhNumNodes;
                     c.envMapIdx = envMapIdx;
+                    c.filmR0 = params.filmR0;
+                    c.filmR1 = params.filmR1;
+                    c.filmR2 = params.filmR2;
                     c.srcCounter = cur;
                     c.zeroCounter = next;
 
@@ -314,7 +360,8 @@ int main(int argc, char** argv)
                                              { counts.get(), raysCur, objBuf.get(),
                                                rt[0], rt[1], rt[2], matBuf.get(), accum.get(),
                                                qDiffuse.get(), qConductor.get(), qGlass.get(),
-                                               texHeap, normalBuf.get(), uvBuf.get() });
+                                               texHeap, normalBuf.get(), uvBuf.get(),
+                                               spdBuf.get(), r2sBuf.get() });
                     stream->dispatch(*prepShadePipe, one, one, &c, sizeof(c),
                                      { counts.get(), indirectArgs.get() });
 
@@ -330,7 +377,8 @@ int main(int argc, char** argv)
                         stream->dispatchIndirect(*pass.pipe, tile, *indirectArgs,
                                                  pass.argSlot * 16, &c, sizeof(c),
                                                  { counts.get(), pass.queue, raysNext,
-                                                   matBuf.get(), texHeap });
+                                                   matBuf.get(), texHeap,
+                                                   spdBuf.get(), r2sBuf.get() });
                     }
                     cur = next;
                 }

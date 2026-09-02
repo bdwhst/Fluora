@@ -1,7 +1,7 @@
 # Metal RHI: design and migration plan
 
-Status: M0–M2 landed; M3 in progress (remaining: BSDF ports + spectral pipeline)
-· Owner: bdwhst · Last updated: 2026-09-01
+Status: M0–M3 landed (FluoraMini renders full scenes spectrally on Metal);
+next is M4, the CUDA catch-up · Owner: bdwhst · Last updated: 2026-09-01
 
 ## 1. Context and goal
 
@@ -148,7 +148,7 @@ Unverified on CUDA until M4.
   real BSDFs/BVH make stages expensive and divergent; re-measure in M3/M4
   before drawing conclusions.
 
-**M3 — shared device code + full scenes on Metal** *(Mac, in progress)*:
+**M3 — shared device code + full scenes on Metal** *(landed)*:
 - *Landed:* mesh scenes render — OBJ loading (`src/core/mesh_loader`), CPU-built
   six-direction threaded BVH (`src/core/bvh_builder`; SAH split landed later, below), and
   stackless traversal behind the `rt_closest_hit` seam (`src/rhi/raytrace.metal`) with
@@ -234,8 +234,28 @@ Unverified on CUDA until M4.
   transforms/normals, which refraction amplifies (glass dragon: 6.5% of px,
   unbiased ±0, visually identical; others ≤0.1%). Mega and wavefront remain
   bitwise identical to each other on every scene.
-- *Remaining:* port the remaining real BSDFs (rough dielectric, metallic
-  workflow) and the spectral pipeline. This is the long pole.
+- *Landed:* the spectral pipeline — FluoraMini is now a spectral renderer
+  like the CUDA path (visually matches img/dragon_spec_0.png). Device side
+  in `src/core/spectrum_shared.h` (see that header): float4 spectra,
+  visible-wavelength sampling, dense spectra + the sRGB rgb2spec table as
+  flat buffers, complex Fresnel, CIE pixel sensor; film matrix derived
+  host-side in `src/core/spectra.cpp` from SpectrumConsts data
+  (`spectrum_tables.inl`, split out of spectrum_data.cu). The live BxDFs
+  ported spectrally into `bsdf_shared.h`: DiffuseBxDF (per-hit RGB->sigmoid
+  albedo, textures included), smooth DielectricBxDF with real Fresnel and
+  dispersion (named eta terminates secondary wavelengths, glass-Fake
+  renders prismatic sparkle), ConductorBxDF on Trowbridge-Reitz with
+  measured eta/k (metal-* spectra) — plus PBRT reflectance mode for RGB
+  "microfacet" materials the CUDA loader rejects. Emitters and env-map
+  texels spectralize as RGB illuminants (D65). Wavefront paths carry
+  lambdaU + a dispersion flag (8 B) and recompute wavelengths per stage;
+  WfPath grew 80->96 B. Both modes bitwise identical on every scene;
+  spectral costs ~16% on the dragon. The "remaining BSDFs" of the earlier
+  plan (rough dielectric, metallic workflow) turned out to be dead code in
+  the CUDA renderer, like glTF — nothing real remains unported.
+- *M3 is complete.* Renderer capability that was never in M3 — NEE/MIS
+  integration, volumes/NanoVDB, DOF, denoise — arrives with the CUDA-side
+  migration (M4) and Metal-native work (M5).
 
 **Code layout rule:** portable host code (loaders, builders, eventually the renderer
 core) lives in `src/core/`; backend seams, device-code files, and primitives in

@@ -33,30 +33,30 @@
         OUT[1] = gpu_float4(r4, r5, r6, r7);                                   \
         gpu_float3 nF = gpu_float3(0.0f, 0.0f, 1.0f);                          \
         gpu_float3 rdIn = normalize(gpu_float3(0.5f, 0.3f, -1.0f));            \
-        gpu_float3 rd, thr;                                                    \
-        rd = rdIn; thr = gpu_float3(1.0f);                                     \
-        bsdf_sample_lambert(gpu_float3(0.8f, 0.6f, 0.4f), nF, 0.3f, 0.7f, rd,  \
-                            thr);                                              \
+        gpu_float3 rd;                                                         \
+        GpuSpectrum thr;                                                       \
+        GpuSpectrum cEta = gpu_float4(1.1f, 1.0f, 0.9f, 1.2f);                 \
+        GpuSpectrum cK = gpu_float4(2.0f, 3.0f, 2.5f, 1.8f);                   \
+        rd = rdIn; thr = GpuSpectrum(1.0f);                                    \
+        bsdf_sample_lambert(gpu_float4(0.8f, 0.6f, 0.4f, 0.5f), nF, 0.3f,      \
+                            0.7f, rd, thr);                                    \
         OUT[2] = gpu_float4(rd, 0.0f);                                         \
-        OUT[3] = gpu_float4(thr, 0.0f);                                        \
-        rd = rdIn; thr = gpu_float3(1.0f);                                     \
-        bool aliveRough = bsdf_sample_conductor(gpu_float3(0.9f, 0.8f, 0.7f),  \
-                                                0.5f, nF, 0.4f, 0.6f, rd, thr);\
+        OUT[3] = thr;                                                          \
+        rd = rdIn; thr = GpuSpectrum(1.0f);                                    \
+        bool aliveRough = bsdf_sample_conductor(cEta, cK, 0.5f, nF, 0.4f,      \
+                                                0.6f, rd, thr);                \
         OUT[4] = gpu_float4(rd, aliveRough ? 1.0f : 0.0f);                     \
-        OUT[5] = gpu_float4(thr, 0.0f);                                        \
-        rd = rdIn; thr = gpu_float3(1.0f);                                     \
-        bsdf_sample_conductor(gpu_float3(0.9f, 0.8f, 0.7f), 0.0f, nF, 0.4f,    \
-                              0.6f, rd, thr);                                  \
+        OUT[5] = thr;                                                          \
+        rd = rdIn; thr = GpuSpectrum(1.0f);                                    \
+        bsdf_sample_conductor(cEta, cK, 0.0f, nF, 0.4f, 0.6f, rd, thr);        \
         OUT[6] = gpu_float4(rd, 0.0f);                                         \
-        OUT[7] = gpu_float4(thr, 0.0f);                                        \
-        rd = rdIn; thr = gpu_float3(1.0f);                                     \
-        bsdf_sample_dielectric(gpu_float3(0.95f, 0.95f, 0.95f), 1.5f, nF, 0.9f,\
-                               rd, thr);                                       \
+        OUT[7] = thr;                                                          \
+        rd = rdIn; thr = GpuSpectrum(1.0f);                                    \
+        bsdf_sample_dielectric(1.5f, nF, 0.9f, rd, thr);                       \
         OUT[8] = gpu_float4(rd, 0.0f);                                         \
-        OUT[9] = gpu_float4(thr, 0.0f);                                        \
-        rd = rdIn; thr = gpu_float3(1.0f);                                     \
-        bsdf_sample_dielectric(gpu_float3(0.95f, 0.95f, 0.95f), 1.5f, nF,      \
-                               0.01f, rd, thr);                                \
+        OUT[9] = thr;                                                          \
+        rd = rdIn; thr = GpuSpectrum(1.0f);                                    \
+        bsdf_sample_dielectric(1.5f, nF, 0.01f, rd, thr);                      \
         OUT[10] = gpu_float4(rd, 0.0f);                                        \
         gpu_float2 uv = env_equirect_uv(normalize(gpu_float3(0.3f, 0.5f,       \
                                                              -0.8f)));         \

@@ -141,10 +141,10 @@ at every definition, matching the CUDA renderer's own `__device__ inline`
 idiom and defines.h's qualifier-only `GPU_FUNC`. Shared code then reads:
 
 ```cpp
-GPU_FN inline bool bsdf_sample_lambert(gpu_float3 rgb, gpu_float3 nF,
+GPU_FN inline bool bsdf_sample_lambert(GpuSpectrum reflectance, gpu_float3 nF,
                                        float u1, float u2,
                                        GPU_THREAD gpu_float3& rd,
-                                       GPU_THREAD gpu_float3& throughput);
+                                       GPU_THREAD GpuSpectrum& throughput);
 ```
 
 Design rules (enforceable by eyeball / the host test):
