@@ -55,6 +55,14 @@ typedef atomic_uint gpu_atomic_uint;
 GPU_FN inline gpu_float3 gpu_load3(gpu_storage3 v) { return v; }
 GPU_FN inline gpu_float3 gpu_xyz(gpu_float4 v) { return v.xyz; }
 GPU_FN inline bool gpu_all_finite(gpu_float3 v) { return all(isfinite(v)); }
+GPU_FN inline bool gpu_isinf(float x) { return isinf(x); }
+
+// Scalar f-suffix intrinsics MSL spells without the suffix; shared code uses
+// the suffixed names so host/CUDA get the float-precision versions.
+GPU_FN inline float atanhf(float x) { return atanh(x); }
+GPU_FN inline float coshf(float x) { return cosh(x); }
+GPU_FN inline float copysignf(float x, float y) { return copysign(x, y); }
+GPU_FN inline float fmaf(float a, float b, float c) { return fma(a, b, c); }
 
 typedef uchar4 gpu_uchar4;
 GPU_FN inline gpu_uchar4 gpu_make_uchar4(uchar r, uchar g, uchar b, uchar a)
@@ -246,6 +254,14 @@ GPU_FN inline float min(float a, float b) { return a < b ? a : b; }
 // glm gaps shared by CUDA + host.
 GPU_FN inline float length_squared(gpu_float3 v) { return glm::dot(v, v); }
 GPU_FN inline gpu_float3 gpu_xyz(gpu_float4 v) { return gpu_float3(v.x, v.y, v.z); }
+GPU_FN inline bool gpu_isinf(float x)
+{
+#if defined(__CUDACC__)
+    return isinf(x);
+#else
+    return std::isinf(x);
+#endif
+}
 GPU_FN inline bool gpu_all_finite(gpu_float3 v)
 {
 #if defined(__CUDACC__)

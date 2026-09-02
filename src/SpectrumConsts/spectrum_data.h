@@ -1,5 +1,6 @@
 #pragma once
-#include <cuda.h>
+// Declarations for the pure data tables in spectrum_tables.cpp (portable —
+// no CUDA dependency; the CUDA-side init lives in spectrum_data.cu).
 namespace spec
 {
     constexpr int nCIESamples = 471;

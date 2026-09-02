@@ -38,6 +38,8 @@ if(APPLE)
         src/core/mesh_loader.cpp
         src/core/bvh_builder.cpp
         src/core/image_loader.cpp
+        src/core/spectra.cpp
+        src/SpectrumConsts/rgbspectrum_srgb.cpp
         src/rhi/rhi_metal.mm
         src/stb.cpp
     )
@@ -67,6 +69,8 @@ if(APPLE)
     # asserting numeric agreement (docs/portable-device-code.md).
     add_executable(SharedHostTest
         src/rhi/shared_host_test.cpp
+        src/core/spectra.cpp
+        src/SpectrumConsts/rgbspectrum_srgb.cpp
         src/rhi/rhi_metal.mm
     )
     target_include_directories(SharedHostTest PRIVATE external/include)
