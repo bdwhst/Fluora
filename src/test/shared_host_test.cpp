@@ -12,7 +12,7 @@
 #include <sstream>
 #include <string>
 
-#include "gpu_portable.h"
+#include "../rhi/gpu_portable.h"
 #include "../core/spectrum_shared.h"
 #include "../core/bsdf_shared.h"
 #include "../core/envmap_shared.h"
@@ -20,7 +20,7 @@
 #include "shared_probe.h"
 
 #include "../core/spectra.h"
-#include "rhi.h"
+#include "../rhi/rhi.h"
 
 namespace {
 
@@ -74,7 +74,7 @@ int main()
                           + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/bsdf_shared.h")
                           + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/envmap_shared.h")
                           + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/tonemap_shared.h")
-                          + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/shared_probe.h")
+                          + "\n" + readTextFile(std::string(TEST_SHADER_DIR) + "/shared_probe.h")
                           + "\n" + kProbeKernel;
         auto device = rhi::createDevice(rhi::BackendKind::Metal, desc);
         auto stream = device->createStream();

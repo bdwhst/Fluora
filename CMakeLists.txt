@@ -56,7 +56,7 @@ if(APPLE)
 
     # RHI primitive unit tests (reduce/scan/compact/sort/work queue)
     add_executable(RhiTest
-        src/rhi/rhi_test.cpp
+        src/test/rhi_test.cpp
         src/rhi/rhi_algorithms.cpp
         src/rhi/rhi_metal.mm
     )
@@ -68,7 +68,7 @@ if(APPLE)
     # shared headers compiled as host C++ (the CUDA-side spelling) and as MSL,
     # asserting numeric agreement (docs/portable-device-code.md).
     add_executable(SharedHostTest
-        src/rhi/shared_host_test.cpp
+        src/test/shared_host_test.cpp
         src/core/spectra.cpp
         src/SpectrumConsts/rgbspectrum_srgb.cpp
         src/rhi/rhi_metal.mm
@@ -76,7 +76,8 @@ if(APPLE)
     target_include_directories(SharedHostTest PRIVATE external/include)
     target_compile_definitions(SharedHostTest PRIVATE
         CORE_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/core"
-        RHI_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/rhi")
+        RHI_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/rhi"
+        TEST_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/test")
     target_link_libraries(SharedHostTest "-framework Metal" "-framework Foundation"
         "-framework AppKit" "-framework QuartzCore")
     return()

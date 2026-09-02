@@ -10,9 +10,9 @@
 #include <sstream>
 #include <vector>
 
-#include "rhi.h"
-#include "rhi_algorithms.h"
-#include "primitives_shared.h"
+#include "../rhi/rhi.h"
+#include "../rhi/rhi_algorithms.h"
+#include "../rhi/primitives_shared.h"
 
 namespace {
 

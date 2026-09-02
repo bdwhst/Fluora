@@ -1,5 +1,5 @@
-#ifndef RHI_SHARED_PROBE_H
-#define RHI_SHARED_PROBE_H
+#ifndef TEST_SHARED_PROBE_H
+#define TEST_SHARED_PROBE_H
 // Probe body for SharedHostTest: evaluates the shared BSDF/RNG/env/tonemap/
 // spectral functions on fixed inputs, writing float4 slots. Spelled once as a
 // macro so the exact same text runs in the host personality (#include) and the
