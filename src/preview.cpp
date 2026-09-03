@@ -2,9 +2,9 @@
 #include <ctime>
 #include "main.h"
 #include "preview.h"
-#include "ImGui/imgui.h"
-#include "ImGui/imgui_impl_glfw.h"
-#include "ImGui/imgui_impl_opengl3.h"
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_opengl3.h"
 GLuint positionLocation = 0;
 GLuint texcoordsLocation = 1;
 GLuint pbo;

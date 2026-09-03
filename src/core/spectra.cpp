@@ -4,7 +4,7 @@
 #include <stdexcept>
 
 #include "spectrum_shared.h"
-#include "../SpectrumConsts/spectrum_tables.inl"
+#include "../../external/SpectrumConsts/spectrum_tables.inl"
 
 namespace {
 

@@ -13,7 +13,7 @@ Fluora is a CUDA/C++20 spectral path tracer (originally forked from UPenn's CIS-
 **Windows (full CUDA renderer)** — requires an NVIDIA GPU + CUDA Toolkit and MSVC (`memoryUtils.h` uses `_aligned_malloc`; prebuilt `.lib` files live in `external/lib`). The full renderer cannot compile on macOS: CUDA-only changes can only be verified on a Windows CUDA machine.
 
 ```powershell
-git submodule update --init                 # src/openvdb -> NanoVDB (feature/nanovdb branch)
+git submodule update --init                 # external/openvdb -> NanoVDB (feature/nanovdb branch)
 cmake -S . -B build
 cmake --build build --config Release        # or --config Debug
 ```
@@ -105,9 +105,9 @@ The README's "BVH building and traversal" section has the algorithmic details an
 ### Materials, spectra, and media
 
 - `src/materials.{h,cu}` defines material types dispatched through the tagged-pointer / tagged-index machinery above — `diffuse`, `dielectric`, `conductor`, `microfacet`, `emitting`, etc.
-- `src/spectrum.{h,cu}` + `src/SpectrumConsts/` implement PBRT-v4-style sampled spectra and RGB↔spectrum tables (sRGB, ACES, DCI-P3, Rec2020). The renderer can run spectrally rather than RGB.
+- `src/spectrum.{h,cu}` + `external/SpectrumConsts/` implement PBRT-v4-style sampled spectra and RGB↔spectrum tables (sRGB, ACES, DCI-P3, Rec2020). The renderer can run spectrally rather than RGB.
 - `src/microfacet.{h,cu}` implements GGX VNDF sampling and the asymmetric microfacet model from the SIGGRAPH 2023 "Microfacet theory for non-uniform heightfields" paper (conductor + dielectric variants — see the README showcase).
-- `src/media.{h,cu}` + `src/openvdb/nanovdb` implement homogeneous and heterogeneous (NanoVDB) volumes. `.nvdb` files may be gzip-compressed (hence the zlib requirement).
+- `src/media.{h,cu}` + `external/openvdb/nanovdb` implement homogeneous and heterogeneous (NanoVDB) volumes. `.nvdb` files may be gzip-compressed (hence the zlib requirement).
 
 ### Lights
 
@@ -115,9 +115,9 @@ The README's "BVH building and traversal" section has the algorithmic details an
 
 ### Other notable subsystems
 
-- `src/openvdb/nanovdb` — vendored NanoVDB headers for volumetric data (git submodule).
-- `src/mikktspace/` — MikkTSpace tangent generation for normal mapping (used when glTF meshes don't ship with tangents).
-- `src/ImGui/` — vendored ImGui (OpenGL3 + GLFW backends on Windows, Metal backend on macOS).
+- `external/openvdb/nanovdb` — vendored NanoVDB headers for volumetric data (git submodule).
+- `external/mikktspace/` — MikkTSpace tangent generation for normal mapping (used when glTF meshes don't ship with tangents).
+- `external/ImGui/` — vendored ImGui (OpenGL3 + GLFW backends on Windows, Metal backend on macOS).
 - `src/soa.h`, `src/workqueue.h`, `src/containers.h` — SoA helpers and queue scaffolding intended for wavefront-style rewrites; not all integrators are fully wavefront yet.
 
 ### Compile-time feature toggles

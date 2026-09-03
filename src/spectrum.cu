@@ -3,7 +3,7 @@
 #include <map>
 #include <string>
 #include "utilities.h"
-#include "SpectrumConsts/spectrum_data.h"
+#include "../external/SpectrumConsts/spectrum_data.h"
 
 __device__ __host__  float SpectrumPtr::operator()(float lambda) const
 {

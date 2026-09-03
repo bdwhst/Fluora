@@ -35,11 +35,11 @@ if(APPLE)
     # The portable widget/controller code lives in src/core/gui and is shared
     # with the (future) Windows preview; only the backend wiring is here.
     set(FLUORA_IMGUI_SOURCES
-        src/ImGui/imgui.cpp
-        src/ImGui/imgui_draw.cpp
-        src/ImGui/imgui_tables.cpp
-        src/ImGui/imgui_widgets.cpp
-        src/ImGui/imgui_impl_metal.mm)
+        external/ImGui/imgui.cpp
+        external/ImGui/imgui_draw.cpp
+        external/ImGui/imgui_tables.cpp
+        external/ImGui/imgui_widgets.cpp
+        external/ImGui/imgui_impl_metal.mm)
     add_executable(FluoraMini
         src/mini/mini_main.cpp
         src/core/scene_loader.cpp
@@ -48,12 +48,12 @@ if(APPLE)
         src/core/image_loader.cpp
         src/core/spectra.cpp
         src/core/gui/gui.cpp
-        src/SpectrumConsts/rgbspectrum_srgb.cpp
+        external/SpectrumConsts/rgbspectrum_srgb.cpp
         src/rhi/rhi_metal.mm
         src/stb.cpp
         ${FLUORA_IMGUI_SOURCES}
     )
-    target_include_directories(FluoraMini PRIVATE external/include src/ImGui)
+    target_include_directories(FluoraMini PRIVATE external/include external/ImGui)
     # MSL sources are loaded from the source tree at runtime (dev convenience;
     # packaging deferred to M5)
     target_compile_definitions(FluoraMini PRIVATE
@@ -63,7 +63,7 @@ if(APPLE)
         FLUORA_SCENES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scenes"
         RHI_ENABLE_IMGUI)
     # rhi_metal.mm and the ImGui Metal backend are Objective-C++ under ARC.
-    set_source_files_properties(src/rhi/rhi_metal.mm src/ImGui/imgui_impl_metal.mm
+    set_source_files_properties(src/rhi/rhi_metal.mm external/ImGui/imgui_impl_metal.mm
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(FluoraMini "-framework Metal" "-framework Foundation"
         "-framework AppKit" "-framework QuartzCore")
@@ -84,7 +84,7 @@ if(APPLE)
     add_executable(SharedHostTest
         src/test/shared_host_test.cpp
         src/core/spectra.cpp
-        src/SpectrumConsts/rgbspectrum_srgb.cpp
+        external/SpectrumConsts/rgbspectrum_srgb.cpp
         src/rhi/rhi_metal.mm
     )
     target_include_directories(SharedHostTest PRIVATE external/include)
@@ -199,30 +199,30 @@ set(sources
     src/lightSamplers.cu
     src/naiveIntegrator.cu
     src/misIntegrator.cu
-	src/mikktspace/mikktspace.c
-    src/ImGui/imgui.cpp 
-    src/ImGui/imgui_demo.cpp 
-    src/ImGui/imgui_draw.cpp 
-    src/ImGui/imgui_impl_glfw.cpp 
-    src/ImGui/imgui_impl_opengl3.cpp 
-    src/ImGui/imgui_tables.cpp 
-    src/ImGui/imgui_widgets.cpp 
-    src/SpectrumConsts/rgbspectrum_aces.cpp
-    src/SpectrumConsts/rgbspectrum_dci_p3.cpp
-    src/SpectrumConsts/rgbspectrum_rec2020.cpp
-    src/SpectrumConsts/rgbspectrum_srgb.cpp
-    src/SpectrumConsts/spectrum_data.cu
+	external/mikktspace/mikktspace.c
+    external/ImGui/imgui.cpp 
+    external/ImGui/imgui_demo.cpp 
+    external/ImGui/imgui_draw.cpp 
+    external/ImGui/imgui_impl_glfw.cpp 
+    external/ImGui/imgui_impl_opengl3.cpp 
+    external/ImGui/imgui_tables.cpp 
+    external/ImGui/imgui_widgets.cpp 
+    external/SpectrumConsts/rgbspectrum_aces.cpp
+    external/SpectrumConsts/rgbspectrum_dci_p3.cpp
+    external/SpectrumConsts/rgbspectrum_rec2020.cpp
+    external/SpectrumConsts/rgbspectrum_srgb.cpp
+    external/SpectrumConsts/spectrum_data.cu
     )
 
 
-set (NANOVDB_INCLUDE src/openvdb/nanovdb)
+set (NANOVDB_INCLUDE external/openvdb/nanovdb)
 include_directories(${NANOVDB_INCLUDE})
 
 list(SORT headers)
 list(SORT sources)
 
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/src" PREFIX "Headers" FILES ${headers})
-source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/src" PREFIX "Sources" FILES ${sources})
+source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" PREFIX "Sources" FILES ${sources})
 
 
 link_directories(${PROJECT_SOURCE_DIR}/external/lib)
@@ -233,6 +233,7 @@ find_package(CUDAToolkit REQUIRED)
 # for the .cpp files that pull in CUDA-aware headers (e.g. bsdf.h -> thrust/random.h).
 include_directories(${CUDAToolkit_INCLUDE_DIRS})
 add_executable(${CMAKE_PROJECT_NAME} ${sources} ${headers})
+target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE external/ImGui)
 set_property(TARGET ${CMAKE_PROJECT_NAME} PROPERTY CUDA_ARCHITECTURES native)
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
@@ -264,12 +265,12 @@ endif()
 ########################################
 set(FLUORA_RHI_GL_LIBS ${GLEW_LIBRARY} ${GLFW_LIBRARY} ${OPENGL_LIBRARY})
 set(FLUORA_IMGUI_GL_SOURCES
-    src/ImGui/imgui.cpp
-    src/ImGui/imgui_draw.cpp
-    src/ImGui/imgui_tables.cpp
-    src/ImGui/imgui_widgets.cpp
-    src/ImGui/imgui_impl_glfw.cpp
-    src/ImGui/imgui_impl_opengl3.cpp)
+    external/ImGui/imgui.cpp
+    external/ImGui/imgui_draw.cpp
+    external/ImGui/imgui_tables.cpp
+    external/ImGui/imgui_widgets.cpp
+    external/ImGui/imgui_impl_glfw.cpp
+    external/ImGui/imgui_impl_opengl3.cpp)
 set(FLUORA_RHI_CUDA_SOURCES
     src/rhi/rhi_cuda.cu
     src/rhi/rhi_cuda_present.cpp)
@@ -282,7 +283,7 @@ set(FLUORA_SHADER_DIR_DEFINES
 
 function(fluora_rhi_target name)
     add_executable(${name} ${ARGN})
-    target_include_directories(${name} PRIVATE external/include src/ImGui)
+    target_include_directories(${name} PRIVATE external/include external/ImGui)
     target_compile_definitions(${name} PRIVATE ${FLUORA_SHADER_DIR_DEFINES})
     set_property(TARGET ${name} PROPERTY CUDA_ARCHITECTURES native)
     set_target_properties(${name} PROPERTIES
@@ -300,7 +301,7 @@ fluora_rhi_target(FluoraMini
     src/core/image_loader.cpp
     src/core/spectra.cpp
     src/core/gui/gui.cpp
-    src/SpectrumConsts/rgbspectrum_srgb.cpp
+    external/SpectrumConsts/rgbspectrum_srgb.cpp
     src/stb.cpp
     ${FLUORA_RHI_CUDA_SOURCES}
     ${FLUORA_IMGUI_GL_SOURCES})
@@ -316,5 +317,5 @@ fluora_rhi_target(SharedHostTest
     src/test/shared_host_test.cpp
     src/test/shared_probe_kernels.cu
     src/core/spectra.cpp
-    src/SpectrumConsts/rgbspectrum_srgb.cpp
+    external/SpectrumConsts/rgbspectrum_srgb.cpp
     ${FLUORA_RHI_CUDA_SOURCES})

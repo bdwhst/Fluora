@@ -1,8 +1,8 @@
 #include "spectrum_data.h"
 #include "spectrum_tables.inl"
 #include <map>
-#include "../spectrum.h"
-#include "../utilities.h"
+#include "../../src/spectrum.h"
+#include "../../src/utilities.h"
 namespace spec
 {
     std::map<std::string, SpectrumPtr> namedSpectra;
