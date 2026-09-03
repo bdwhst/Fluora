@@ -32,6 +32,15 @@ endif()
 if(APPLE)
     enable_language(OBJCXX)
     set(CMAKE_OBJCXX_STANDARD 20)
+    # Dear ImGui + its Metal renderer backend power the FluoraMini overlay GUI.
+    # The portable widget/controller code lives in src/core/gui and is shared
+    # with the (future) Windows preview; only the backend wiring is here.
+    set(FLUORA_IMGUI_SOURCES
+        src/ImGui/imgui.cpp
+        src/ImGui/imgui_draw.cpp
+        src/ImGui/imgui_tables.cpp
+        src/ImGui/imgui_widgets.cpp
+        src/ImGui/imgui_impl_metal.mm)
     add_executable(FluoraMini
         src/mini/mini_main.cpp
         src/core/scene_loader.cpp
@@ -39,18 +48,24 @@ if(APPLE)
         src/core/bvh_builder.cpp
         src/core/image_loader.cpp
         src/core/spectra.cpp
+        src/core/gui/gui.cpp
         src/SpectrumConsts/rgbspectrum_srgb.cpp
         src/rhi/rhi_metal.mm
         src/stb.cpp
+        ${FLUORA_IMGUI_SOURCES}
     )
-    target_include_directories(FluoraMini PRIVATE external/include)
+    target_include_directories(FluoraMini PRIVATE external/include src/ImGui)
     # MSL sources are loaded from the source tree at runtime (dev convenience;
     # packaging deferred to M5)
     target_compile_definitions(FluoraMini PRIVATE
         MINI_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/mini"
         CORE_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/core"
-        RHI_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/rhi")
-    set_source_files_properties(src/rhi/rhi_metal.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+        RHI_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/rhi"
+        FLUORA_SCENES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scenes"
+        RHI_ENABLE_IMGUI)
+    # rhi_metal.mm and the ImGui Metal backend are Objective-C++ under ARC.
+    set_source_files_properties(src/rhi/rhi_metal.mm src/ImGui/imgui_impl_metal.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(FluoraMini "-framework Metal" "-framework Foundation"
         "-framework AppKit" "-framework QuartzCore")
 
