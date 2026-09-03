@@ -117,6 +117,42 @@ GPU_FN inline void rt_closest_hit(gpu_float3 ro, gpu_float3 rd,
     }
 }
 
+// Any-hit query for shadow rays: true if any triangle lies within (0, tMax)
+// along the ray. Same traversal as rt_closest_hit, exits on the first hit.
+GPU_FN inline bool rt_occluded(gpu_float3 ro, gpu_float3 rd,
+                               GPU_DEVICE const RtBvhNode* nodes, uint numNodes,
+                               GPU_DEVICE const gpu_uint4* tris,
+                               GPU_DEVICE const gpu_storage3* positions, float tMax)
+{
+    if (numNodes == 0)
+        return false;
+    gpu_float3 a = abs(rd);
+    uint axis = a.x > a.y ? (a.x > a.z ? 0u : 2u) : (a.y > a.z ? 1u : 2u);
+    uint dirIdx = axis * 2u + (rd[axis] < 0.0f ? 1u : 0u);
+    GPU_DEVICE const RtBvhNode* base = nodes + dirIdx * numNodes;
+    gpu_float3 invD = 1.0f / rd;
+    uint curr = 0;
+    while (curr < numNodes) {
+        GPU_DEVICE const RtBvhNode& node = base[curr];
+        if (rt_aabb_hit(ro, invD, gpu_load3(node.bmin), gpu_load3(node.bmax), tMax)) {
+            for (uint i = 0; i < node.triCount; i++) {
+                gpu_uint4 tri = tris[node.triStart + i];
+                float t;
+                gpu_float2 bary;
+                if (rt_intersect_triangle(ro, rd, gpu_load3(positions[tri.x]),
+                                          gpu_load3(positions[tri.y]),
+                                          gpu_load3(positions[tri.z]), t, bary)
+                    && t < tMax)
+                    return true;
+            }
+            curr = node.hitLink;
+        } else {
+            curr = node.missLink;
+        }
+    }
+    return false;
+}
+
 // Vertex-attribute interpolation for a hit; the attribute arrays share the
 // triangle's vertex indices (unified vertices, core/mesh_loader).
 

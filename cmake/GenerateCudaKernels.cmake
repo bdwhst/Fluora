@@ -93,12 +93,8 @@ foreach(_k IN LISTS _kernels)
 endforeach()
 string(APPEND _out "${_specLines}")
 
-# Only rewrite when the content changes so an untouched output does not
-# retrigger nvcc.
-set(_old "")
-if(EXISTS "${OUTPUT}")
-    file(READ "${OUTPUT}" _old)
-endif()
-if(NOT _old STREQUAL _out)
-    file(WRITE "${OUTPUT}" "${_out}")
-endif()
+# Always rewrite: this script only runs when the header (or the script)
+# changed, and the Visual Studio CUDA integration does not track the header
+# the generated TU includes -- a fresh output timestamp is what makes nvcc
+# recompile the registrations against the edited kernels.
+file(WRITE "${OUTPUT}" "${_out}")

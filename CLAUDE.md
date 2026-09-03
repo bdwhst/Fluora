@@ -49,6 +49,8 @@ cmake --build build-mac
 
 Device code is single-source (`docs/portable-device-code.md`): shared `_gpu.h`/`_shared.h` files compile under MSL, CUDA, and host C++ through `src/rhi/gpu_portable.h` (gpu_* types, GPU_KERNEL macros, wave shims). Never fork a shader per backend; raw `kernel void`/`__global__` in renderer device code is a review flag (backend-private and test scaffolding kernels are exempt).
 
+FluoraMini's integrator is the portable NEE + MIS path tracer (`src/mini/pathtrace_gpu.h` over `src/core/light_shared.h`, `bsdf_shared.h`, `spectrum_shared.h`): uniform light selection over emissive objects/triangles plus the env map, power-heuristic MIS, one shared `miniShadeVertex` for both modes, and a shadow-ray queue stage in wavefront mode. Per the M4 part-2 decision in `docs/metal-rhi-design.md`, remaining renderer features are ported into this core rather than the old renderer being migrated.
+
 There are no tests, no linter, and no CI for the renderer itself (`RhiTest`/`SharedHostTest` cover the RHI seam only, on both backends). Verification is otherwise visual: render a scene and compare against `img/` references. For FluoraMini, `--mode mega` and `--mode wavefront` must stay bitwise identical (`cmp` the two `--no-preview` PNGs) on every scene — that is the regression check used throughout M2–M4.
 
 ### Runtime controls

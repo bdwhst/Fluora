@@ -77,7 +77,9 @@ struct MiniParams {
     unsigned int numObjects;
     unsigned int bvhNumNodes; // RayIntersector::numNodes() (0 = no meshes)
     unsigned int envMapIdx;   // texture-heap index of the env map, or MINI_ENV_NONE
-    unsigned int pad0, pad1, pad2;
+    unsigned int numLights;   // RtLight records (0 = no next-event estimation)
+    unsigned int envW;        // env-map / distribution size (light_shared.h ENVDIST_*)
+    unsigned int envH;
 };
 
 // ---- wavefront mode (design doc M2/M3) ----
@@ -90,6 +92,7 @@ struct MiniParams {
 #define WF_COUNT_SHADE_DIFFUSE  2
 #define WF_COUNT_SHADE_CONDUCTOR 3
 #define WF_COUNT_SHADE_GLASS    4
+#define WF_COUNT_SHADOW         5  // shadow rays pushed by the shade kernels
 #define WF_NUM_COUNTERS 8  // padded
 
 // Indirect-args slots (16-byte stride each)
@@ -97,7 +100,8 @@ struct MiniParams {
 #define WF_ARG_DIFFUSE   1
 #define WF_ARG_CONDUCTOR 2
 #define WF_ARG_GLASS     3
-#define WF_NUM_ARG_SLOTS 4
+#define WF_ARG_SHADOW    4
+#define WF_NUM_ARG_SLOTS 5
 
 // WfPath is device-only (the host never reads paths); the host allocates
 // queues with this stride and the device static_asserts the real sizeof
@@ -106,17 +110,25 @@ struct MiniParams {
 // instead of being carried — 8 bytes of queue traffic instead of 32.
 #define WF_PATHSTATE_SIZE 96
 #define WF_FLAG_SECONDARY_TERMINATED 1u
+#define WF_FLAG_PREV_SPECULAR        2u  // last scatter was a delta BSDF (no MIS on hit)
+
+// Shadow rays (next-event estimation) carry the already MIS-weighted film RGB
+// contribution; wf_shadow adds it when the light is visible.
+#define WF_SHADOWRAY_SIZE 48
 
 // Per-dispatch control block for the wavefront kernels.
 struct WfCtl {
     unsigned int srcCounter;   // queue this dispatch consumes
     unsigned int dstCounter;   // queue this dispatch pushes to
     unsigned int zeroCounter;  // wf_prepare: counter to reset
-    unsigned int argSlot;      // wf_prepare: indirect-args slot (16-byte stride)
+    unsigned int numLights;
     unsigned int numObjects;
     unsigned int maxDepth;
     unsigned int bvhNumNodes;
     unsigned int envMapIdx;
+    unsigned int envW;
+    unsigned int envH;
+    unsigned int pad0, pad1;
     mini_float3 filmR0;        // film matrix rows, as in MiniParams
     mini_float3 filmR1;
     mini_float3 filmR2;

@@ -29,19 +29,38 @@ GPU_FN inline void bsdf_onb(gpu_float3 n, GPU_THREAD gpu_float3& b1, GPU_THREAD 
 }
 
 // DiffuseBxDF: cosine-sampled Lambert; f*cos/pdf collapses to the sampled
-// reflectance spectrum.
+// reflectance spectrum. pdf = cos(theta_i)/pi (for MIS against light samples).
 GPU_FN inline bool bsdf_sample_lambert(GpuSpectrum reflectance, gpu_float3 nF,
                                 float u1, float u2,
                                 GPU_THREAD gpu_float3& rd,
-                                GPU_THREAD GpuSpectrum& throughput)
+                                GPU_THREAD GpuSpectrum& throughput,
+                                GPU_THREAD float& pdf)
 {
     gpu_float3 b1, b2;
     bsdf_onb(nF, b1, b2);
     float r = sqrt(u1);
     float phi = 2.0f * GPU_PI * u2;
-    rd = normalize(b1 * (r * cos(phi)) + b2 * (r * sin(phi))
-                   + nF * sqrt(max(0.0f, 1.0f - u1)));
+    float cosT = sqrt(max(0.0f, 1.0f - u1));
+    rd = normalize(b1 * (r * cos(phi)) + b2 * (r * sin(phi)) + nF * cosT);
     throughput *= reflectance;
+    pdf = cosT * (1.0f / GPU_PI);
+    return true;
+}
+
+// DiffuseBxDF::eval / pdf for a given incident direction wi (world space,
+// pointing away from the surface): f is cos-premultiplied like the CUDA
+// renderer's. Zero below the flipped normal (reflection only).
+GPU_FN inline bool bsdf_eval_lambert(GpuSpectrum reflectance, gpu_float3 nF, gpu_float3 wi,
+                                     GPU_THREAD GpuSpectrum& f, GPU_THREAD float& pdf)
+{
+    float cosI = dot(wi, nF);
+    if (cosI <= 0.0f) {
+        f = GpuSpectrum(0.0f);
+        pdf = 0.0f;
+        return false;
+    }
+    f = reflectance * (cosI * (1.0f / GPU_PI));
+    pdf = cosI * (1.0f / GPU_PI);
     return true;
 }
 
@@ -101,7 +120,8 @@ GPU_FN inline gpu_float3 bsdf_tr_sample_wm(gpu_float3 w, float alpha, float u1, 
 GPU_FN inline bool bsdf_sample_conductor(GpuSpectrum eta, GpuSpectrum k, float alpha,
                                   gpu_float3 nF, float u1, float u2,
                                   GPU_THREAD gpu_float3& rd,
-                                  GPU_THREAD GpuSpectrum& throughput)
+                                  GPU_THREAD GpuSpectrum& throughput,
+                                  GPU_THREAD float& pdf)
 {
     gpu_float3 b1, b2;
     bsdf_onb(nF, b1, b2);
@@ -110,6 +130,7 @@ GPU_FN inline bool bsdf_sample_conductor(GpuSpectrum eta, GpuSpectrum k, float a
         // Specular: sample_f returns F at pdf 1 (delta f*cos cancels).
         throughput *= spd_fr_complex(fabs(wo.z), eta, k);
         rd = reflect(rd, nF);
+        pdf = 1.0f;
         return true;
     }
     gpu_float3 wm = bsdf_tr_sample_wm(wo, alpha, u1, u2);
@@ -126,7 +147,7 @@ GPU_FN inline bool bsdf_sample_conductor(GpuSpectrum eta, GpuSpectrum k, float a
     float G1o = 1.0f / (1.0f + lo);
     float absDotOM = fabs(dot(wo, wm));
     // pdf = D_visible/(4|wo.wm|) with D_visible = G1(wo)/|cos wo| D |wo.wm|.
-    float pdf = (G1o / cosO * D * absDotOM) / (4.0f * absDotOM);
+    pdf = (G1o / cosO * D * absDotOM) / (4.0f * absDotOM);
     if (pdf <= 0.0f)
         return false;
     GpuSpectrum F = spd_clamp_zero(spd_fr_complex(absDotOM, eta, k));
@@ -134,6 +155,42 @@ GPU_FN inline bool bsdf_sample_conductor(GpuSpectrum eta, GpuSpectrum k, float a
     throughput *= F * (D * G / (4.0f * cosO) / pdf);
     rd = normalize(b1 * wi.x + b2 * wi.y + nF * wi.z);
     return true;
+}
+
+// ConductorBxDF::eval / pdf for incident wi (world, away from surface), given
+// the incoming ray direction rd (pointing at the surface). Smooth conductors
+// are delta distributions: zero. f is cos-premultiplied.
+GPU_FN inline bool bsdf_eval_conductor(GpuSpectrum eta, GpuSpectrum k, float alpha,
+                                       gpu_float3 nF, gpu_float3 rd, gpu_float3 wi,
+                                       GPU_THREAD GpuSpectrum& f, GPU_THREAD float& pdf)
+{
+    f = GpuSpectrum(0.0f);
+    pdf = 0.0f;
+    if (alpha < 1e-3f)
+        return false;
+    gpu_float3 b1, b2;
+    bsdf_onb(nF, b1, b2);
+    gpu_float3 wo = gpu_float3(-dot(rd, b1), -dot(rd, b2), -dot(rd, nF));
+    gpu_float3 wil = gpu_float3(dot(wi, b1), dot(wi, b2), dot(wi, nF));
+    gpu_float3 wm = wo + wil;
+    if (dot(wm, wm) < 1e-9f)
+        return false;
+    wm = normalize(wm);
+    if (!(wil.z > 0.0f && dot(wm, wil) > 0.0f))
+        return false;
+    float cosO = fabs(wo.z);
+    if (cosO == 0.0f)
+        return false;
+    float absDotOM = fabs(dot(wo, wm));
+    float D = bsdf_tr_D(wm, alpha);
+    float lo = bsdf_tr_lambda(wo, alpha);
+    float li = bsdf_tr_lambda(wil, alpha);
+    float G = 1.0f / (1.0f + lo + li);
+    float G1o = 1.0f / (1.0f + lo);
+    GpuSpectrum F = spd_clamp_zero(spd_fr_complex(absDotOM, eta, k));
+    f = F * (D * G / (4.0f * cosO));
+    pdf = (G1o / cosO * D * absDotOM) / (4.0f * absDotOM);
+    return pdf > 0.0f;
 }
 
 // math::frensel_dielectric (etaI = 1).
@@ -156,7 +213,8 @@ GPU_FN inline float bsdf_fresnel_dielectric(float cosThetaI, float etaT)
 // internal reflection after winning the lottery is absorbed (CUDA pdf = 0).
 GPU_FN inline bool bsdf_sample_dielectric(float etaVal, gpu_float3 n, float u,
                                    GPU_THREAD gpu_float3& rd,
-                                   GPU_THREAD GpuSpectrum& throughput)
+                                   GPU_THREAD GpuSpectrum& throughput,
+                                   GPU_THREAD float& pdf)
 {
     bool entering = dot(n, rd) < 0.0f;
     gpu_float3 nF = entering ? n : -n;
@@ -165,8 +223,10 @@ GPU_FN inline bool bsdf_sample_dielectric(float etaVal, gpu_float3 n, float u,
     float fresnel = bsdf_fresnel_dielectric(cosI, eta);
     if (u < fresnel) {
         rd = reflect(rd, nF);   // throughput *= F/F = 1
+        pdf = fresnel;
         return true;
     }
+    pdf = 1.0f - fresnel;
     // geomerty_refract(wo, nF, 1/eta): wo = -rd, cosThetaI = cosI >= 0.
     float invEta = 1.0f / eta;
     float sin2ThetaI = max(0.0f, 1.0f - cosI * cosI);

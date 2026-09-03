@@ -23,6 +23,7 @@
 #include "../core/gui/gui.h"
 #include "../core/host_math.h"
 #include "../core/image_loader.h"
+#include "../core/lights.h"
 #include "../core/scene_loader.h"
 #include "../core/spectra.h"
 #include "../core/spectrum_shared.h"
@@ -51,6 +52,7 @@ std::string readTextFile(const std::string& path)
 // the old one's buffers free when this is reassigned (after a waitIdle()).
 struct SceneGpu {
     std::unique_ptr<rhi::Buffer> matBuf, objBuf, normalBuf, uvBuf, spdBuf, r2sBuf;
+    std::unique_ptr<rhi::Buffer> lightBuf, envDistBuf;
     std::unique_ptr<rhi::RayIntersector> intersector;
     std::array<rhi::Buffer*, 3> rt{ nullptr, nullptr, nullptr };
     std::vector<std::unique_ptr<rhi::Texture>> matTextures;
@@ -60,6 +62,8 @@ struct SceneGpu {
     // Derived params fields.
     unsigned numObjects = 0;
     unsigned bvhNumNodes = 0;
+    unsigned numLights = 0;
+    unsigned envW = 0, envH = 0;
     int maxDepth = 8;
     float fovyDeg = 45.0f;
     size_t numTris = 0;
@@ -191,6 +195,7 @@ SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
 
     // Environment map: an RGBA32F texture in the bindless heap; kernels get the
     // heap index through params (invariant I-1: index, not handle).
+    std::vector<float> envDist;
     if (!scene.envMapPath.empty()) {
         HdrImage envImg;
         if (loadHdrImage(scene.envMapPath, envImg)) {
@@ -199,6 +204,10 @@ SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
                   "envmap" });
             sg.envTex->upload(envImg.rgba.data(), envImg.rgba.size() * sizeof(float));
             sg.envMapIdx = (uint32_t)sg.envTex->shaderHandle();
+            sg.envW = (unsigned)envImg.width;
+            sg.envH = (unsigned)envImg.height;
+            // Luminance distribution for env-map importance sampling (NEE).
+            envDist = buildEnvDistribution(envImg, glm::vec3(MINI_ENV_MAX_RADIANCE));
             std::cout << "mini: environment map " << scene.envMapPath << " (" << envImg.width
                       << "x" << envImg.height << ")\n";
         } else {
@@ -206,6 +215,13 @@ SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
                       << ", using black\n";
         }
     }
+    sg.envDistBuf = makeUpload(envDist.data(), envDist.size() * sizeof(float), "envdist");
+
+    // Light list for next-event estimation: emissive objects/triangles + env.
+    std::vector<RtLight> lights = buildLightList(scene, sg.envMapIdx != MINI_ENV_NONE);
+    sg.numLights = (unsigned)lights.size();
+    sg.lightBuf = makeUpload(lights.data(), lights.size() * sizeof(RtLight), "lights");
+    std::cout << "mini: " << lights.size() << " lights\n";
 
     // Spectral tables (invariant I-1: kernels get offsets, not pointers): the
     // dense-spectra buffer (CIE curves, D65, named eta/k) and the sRGB rgb2spec
@@ -353,6 +369,7 @@ int main(int argc, char** argv)
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/bsdf_shared.h")
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/tonemap_shared.h")
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/envmap_shared.h")
+                                + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/light_shared.h")
                                 + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives_shared.h")
                                 + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives_gpu.h")
                                 + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/raytrace_gpu.h")
@@ -380,10 +397,11 @@ int main(int argc, char** argv)
         // material type, queue counters, indirect-args slots (all session-fixed,
         // width*height sized). Shade pipelines specialize one kernel per material
         // type via rhi::SpecConstant.
-        std::unique_ptr<rhi::Buffer> raysA, raysB, counts, indirectArgs;
+        std::unique_ptr<rhi::Buffer> raysA, raysB, counts, indirectArgs, shadowQueue;
         std::unique_ptr<rhi::Buffer> qDiffuse, qConductor, qGlass;
         std::unique_ptr<rhi::ComputePipeline> raygenPipe, prepIntersectPipe, prepShadePipe,
-            intersectPipe, shadeDiffusePipe, shadeConductorPipe, shadeGlassPipe;
+            prepShadowPipe, intersectPipe, shadeDiffusePipe, shadeConductorPipe, shadeGlassPipe,
+            shadowPipe;
         if (mode == "wavefront") {
             const size_t queueBytes = (size_t)width * height * WF_PATHSTATE_SIZE;
             raysA = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.raysA" });
@@ -391,15 +409,19 @@ int main(int argc, char** argv)
             qDiffuse = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.qDiffuse" });
             qConductor = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.qConductor" });
             qGlass = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.qGlass" });
+            shadowQueue = device->createBuffer({ (size_t)width * height * WF_SHADOWRAY_SIZE,
+                                                 rhi::MemoryLocation::DeviceLocal, "wf.shadow" });
             counts = device->createBuffer({ WF_NUM_COUNTERS * 4, rhi::MemoryLocation::DeviceLocal, "wf.counts" });
             indirectArgs = device->createBuffer({ WF_NUM_ARG_SLOTS * 16, rhi::MemoryLocation::DeviceLocal, "wf.args" });
             raygenPipe = device->createPipeline({ "wf_raygen" });
             prepIntersectPipe = device->createPipeline({ "wf_prep_intersect" });
             prepShadePipe = device->createPipeline({ "wf_prep_shade" });
+            prepShadowPipe = device->createPipeline({ "wf_prep_shadow" });
             intersectPipe = device->createPipeline({ "wf_intersect" });
             shadeDiffusePipe = device->createPipeline({ "wf_shade", { { 0, MINI_MAT_DIFFUSE } } });
             shadeConductorPipe = device->createPipeline({ "wf_shade", { { 0, MINI_MAT_CONDUCTOR } } });
             shadeGlassPipe = device->createPipeline({ "wf_shade", { { 0, MINI_MAT_GLASS } } });
+            shadowPipe = device->createPipeline({ "wf_shadow" });
         }
         const rhi::Dim3 one{ 1, 1, 1 };
         const rhi::Dim3 tile{ PRIM_TILE, 1, 1 };
@@ -413,7 +435,8 @@ int main(int argc, char** argv)
                                  { accum.get(), sg.matBuf.get(), sg.objBuf.get(),
                                    sg.rt[0], sg.rt[1], sg.rt[2], texHeap,
                                    sg.normalBuf.get(), sg.uvBuf.get(),
-                                   sg.spdBuf.get(), sg.r2sBuf.get() });
+                                   sg.spdBuf.get(), sg.r2sBuf.get(),
+                                   sg.lightBuf.get(), sg.envDistBuf.get() });
                 return;
             }
             stream->dispatch(*raygenPipe, grid, block, &p, sizeof(p),
@@ -429,6 +452,9 @@ int main(int argc, char** argv)
                 c.maxDepth = p.maxDepth;
                 c.bvhNumNodes = p.bvhNumNodes;
                 c.envMapIdx = p.envMapIdx;
+                c.numLights = p.numLights;
+                c.envW = p.envW;
+                c.envH = p.envH;
                 c.filmR0 = p.filmR0;
                 c.filmR1 = p.filmR1;
                 c.filmR2 = p.filmR2;
@@ -443,7 +469,7 @@ int main(int argc, char** argv)
                                            sg.rt[0], sg.rt[1], sg.rt[2], sg.matBuf.get(), accum.get(),
                                            qDiffuse.get(), qConductor.get(), qGlass.get(),
                                            texHeap, sg.normalBuf.get(), sg.uvBuf.get(),
-                                           sg.spdBuf.get(), sg.r2sBuf.get() });
+                                           sg.spdBuf.get(), sg.r2sBuf.get(), sg.envDistBuf.get() });
                 stream->dispatch(*prepShadePipe, one, one, &c, sizeof(c),
                                  { counts.get(), indirectArgs.get() });
 
@@ -460,8 +486,20 @@ int main(int argc, char** argv)
                                              pass.argSlot * 16, &c, sizeof(c),
                                              { counts.get(), pass.queue, raysNext,
                                                sg.matBuf.get(), texHeap,
-                                               sg.spdBuf.get(), sg.r2sBuf.get() });
+                                               sg.spdBuf.get(), sg.r2sBuf.get(),
+                                               sg.lightBuf.get(), sg.objBuf.get(),
+                                               sg.rt[1], sg.rt[2], sg.envDistBuf.get(),
+                                               shadowQueue.get() });
                 }
+                // Next-event estimation shadow rays for this bounce, before the
+                // next intersect so per-pixel contributions land in the same
+                // order as the megakernel's.
+                stream->dispatch(*prepShadowPipe, one, one, &c, sizeof(c),
+                                 { counts.get(), indirectArgs.get() });
+                stream->dispatchIndirect(*shadowPipe, tile, *indirectArgs,
+                                         WF_ARG_SHADOW * 16, &c, sizeof(c),
+                                         { counts.get(), shadowQueue.get(), sg.objBuf.get(),
+                                           sg.rt[0], sg.rt[1], sg.rt[2], accum.get() });
                 cur = next;
             }
         };
@@ -478,6 +516,9 @@ int main(int argc, char** argv)
             params.numObjects = sg.numObjects;
             params.bvhNumNodes = sg.bvhNumNodes;
             params.envMapIdx = sg.envMapIdx;
+            params.numLights = sg.numLights;
+            params.envW = sg.envW;
+            params.envH = sg.envH;
         };
         applySceneParams();
 

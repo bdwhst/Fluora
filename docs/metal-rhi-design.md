@@ -370,12 +370,48 @@ two. Adding capability inside `src/mini` is a review flag.
     evidence; the cross-backend golden diff (§9) stays open, with the known
     caveats of MSL fast-math vs nvcc `--fmad` and the shim's tolerance-based
     SharedHostTest.
-- *Remaining (part 2):* migrate `pathtrace.cu` onto the RHI — convert
-  lights/media/spectra to handle pools, replace Thrust and `GPUParallelFor`
-  with the registered kernels and M2 primitives, route the NEE/MIS integrator
-  and volumes through `rhi::` — and retire `bvh.cpp` in favor of
-  `core/bvh_builder` (which the CUDA backend's `RayIntersector` already
-  consumes). Golden-image parity against pre-migration renders lands with it.
+- *Part 2 — decision (2026-09-03): converge on the portable renderer, do
+  not migrate `pathtrace.cu` in place.* The old renderer is ~6k lines built on
+  what the RHI forbids (30 `thrust::default_random_engine` sites,
+  `TaggedPointer` graphs for lights/media/spectra/phase functions,
+  `Distribution2D*` and `cudaTextureObject_t` inside light objects,
+  `alloc.new_object` pointer graphs, Thrust scan/scatter/sort in the bounce
+  loop); converting all of that would end where FluoraMini already is
+  (spectral, single-source, handle-based, wavefront, two backends). What
+  FluoraMini lacks is features, so those are ported into the core and the old
+  renderer becomes the parity reference until it is retired. Order:
+  1. Mac sanity pass on what M4 part 1 touched without a Metal build
+     (`texture_gpu.h`, single-source test kernels, `GPU_SPEC_INSTANCES`).
+  2. **NEE + MIS** *(landed 2026-09-03)*: `rt_occluded` on the ray seam, area
+     lights from emissive triangles and analytic objects (the CUDA renderer's
+     cube/sphere/triangle sampling schemes), env-map importance sampling with
+     the 2D CDF as flat buffers (`core/light_shared.h` device side,
+     `core/lights.cpp` host side), a uniform light sampler, BSDF eval/pdf in
+     `bsdf_shared.h` (probe slots 21–22 in SharedHostTest), and a shadow-ray
+     queue stage in the wavefront loop (`wf_prep_shadow` + `wf_shadow`, 48 B
+     per ray, run before the next bounce's intersect). Both modes evaluate one
+     shared `miniShadeVertex` (NEE draws, then BSDF draws) and add every
+     contribution to the film on its own in the same per-bounce order, so mega
+     ≡ wavefront stays **bitwise** on cornell, bunny-skybox, dragon-skybox and
+     lost-empire; NEE renders match the naive ones in brightness at a fraction
+     of the noise. Cost on CUDA: cornell 200 spp 0.17 → 0.34 s (mega), bunny
+     100 spp 0.38 → 0.43 s. Parity with the CUDA MIS renderer is statistical,
+     with one deliberate deviation: the env-map sampling pdf uses the equirect
+     Jacobian `p(uv) / (2π² cos(latitude))` (PBRT), not the old renderer's
+     `p(uv)/4π`. Lights are one-sided for sampling (back-side emission arrives
+     via BSDF sampling with full weight), as in the CUDA renderer.
+  3. `.json` scenes and PLY into `core/scene_loader` (DOF camera parameters
+     come with them).
+  4. Volumes: homogeneous first, then a NanoVDB-under-MSL spike before
+     committing to grid media on Metal.
+  5. DOF (camera ray generation) and denoise (OIDN behind the present seam on
+     CUDA; Metal stays M5).
+  6. Retire `pathtrace.cu`, the integrators, `bvh.cpp`, `main.cpp`/
+     `preview.cpp` once every scene in `scenes/` renders through FluoraMini;
+     `Fluora.exe` becomes FluoraMini.
+  Still from the original list: cross-backend golden diffs (needs both
+  machines plus fast-math/fma flag matching). Queues vs compaction is settled
+  by the A/B above (queues stay).
 
 **M5 — Metal-native features**: hardware RT path; preview upgrades (window resize
 — the basic window landed in M3, the ImGui overlay in M3.x); OIDN-on-Metal denoise.

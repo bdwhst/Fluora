@@ -47,6 +47,7 @@ if(APPLE)
         src/core/bvh_builder.cpp
         src/core/image_loader.cpp
         src/core/spectra.cpp
+        src/core/lights.cpp
         src/core/gui/gui.cpp
         external/SpectrumConsts/rgbspectrum_srgb.cpp
         src/rhi/rhi_metal.mm
@@ -327,6 +328,7 @@ fluora_rhi_target(FluoraMini
     src/core/bvh_builder.cpp
     src/core/image_loader.cpp
     src/core/spectra.cpp
+    src/core/lights.cpp
     src/core/gui/gui.cpp
     external/SpectrumConsts/rgbspectrum_srgb.cpp
     src/stb.cpp
