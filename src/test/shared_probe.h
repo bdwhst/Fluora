@@ -101,11 +101,10 @@
 // header, #included by the generated CUDA registration TU). The parameter
 // block is unused; PrimParams keeps the dispatch convention uniform.
 #if defined(__METAL_VERSION__) || defined(__CUDACC__)
-GPU_KERNEL(shared_probe)(GPU_KERNEL_PARAMS(PrimParams, P)
-    GPU_BUFFER(gpu_float4, outv, 1)
-    GPU_BUFFER(const float, r2s, 2)
-    GPU_BUFFER(const float, spd, 3)
-    GPU_TID_1D)
+GPU_KERNEL(shared_probe, GPU_TID_1D)(GPU_KERNEL_PARAMS(PrimParams, P),
+    GPU_BUFFER(gpu_float4, outv),
+    GPU_BUFFER(const float, r2s),
+    GPU_BUFFER(const float, spd))
 {
     if (GPU_GLOBAL_ID_X != 0)
         return;

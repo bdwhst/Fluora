@@ -112,20 +112,80 @@ GPU_FN inline uint gpu_wave_sum(gpu_wave_t, uint v) { return simd_sum(v); }
 GPU_FN inline bool gpu_wave_is_first(gpu_wave_t) { return simd_is_first(); }
 GPU_FN inline uint gpu_wave_broadcast_first(gpu_wave_t, uint v) { return simd_broadcast_first(v); }
 
-// Kernel declaration macros. Slot numbers match the RHI binding convention
-// (params at buffer(0), resource i at buffer(i+1)) and are explicit at the
-// declaration so host dispatch lists can be checked against them by eye.
-#define GPU_KERNEL(name) kernel void name
-#define GPU_KERNEL_PARAMS(T, name) constant T& name [[buffer(0)]]
-#define GPU_BUFFER(T, name, slot) , device T* name [[buffer(slot)]]
-#define GPU_TID_1D , uint gpu_tid_ [[thread_position_in_grid]]
-#define GPU_TID_2D , uint2 gpu_tid2_ [[thread_position_in_grid]]
-#define GPU_TID_FULL                                                        \
-    , uint gpu_tid_ [[thread_position_in_grid]]                             \
-    , uint gpu_lid_ [[thread_index_in_threadgroup]]                         \
-    , uint gpu_sg_ [[simdgroup_index_in_threadgroup]]                       \
-    , uint gpu_nsg_ [[simdgroups_per_threadgroup]]                          \
-    , uint gpu_group_ [[threadgroup_position_in_grid]]
+// Kernel declaration macros. GPU_KERNEL names the kernel and the thread ids it
+// reads (GPU_TID_1D / GPU_TID_2D / GPU_TID_FULL / GPU_TID_NONE); the parameter
+// list that follows is an ordinary one — the parameter block, then one
+// GPU_BUFFER per resource, commas written by the author, buffer slots implied
+// by position:
+//   GPU_KERNEL(k, GPU_TID_1D)(GPU_KERNEL_PARAMS(P, p),
+//       GPU_BUFFER(const T, in),     // buffer(1)
+//       GPU_BUFFER(T, out))          // buffer(2)
+// GPU_KERNEL expands to `kernel void k GPU_SIG_GPU_TID_1D`, a function-like
+// macro name that the preprocessor's rescan applies to the parenthesized list
+// in the source (standard C/C++ rescanning, the BOOST_PP idiom). Under MSL
+// that wrapper prepends the [[attribute]] id parameters and numbers the
+// buffers; under CUDA it is the identity (ids come from blockIdx/threadIdx,
+// buffers bind positionally), so both backends see the same parameter list.
+// Positional buffer slots. GPU_SIG_* receives the whole parameter list; the
+// GPU_PP_MAP machinery below numbers it: argument 0 (the parameter block)
+// becomes buffer(0), argument i becomes buffer(i) -- the same order the host
+// binds resources in (rhi.h: resource i at buffer(i+1)), so slot numbers
+// cannot drift from the dispatch list. Standard count-and-map preprocessor
+// idiom; at most GPU_PP_MAX_ARGS parameters per kernel (a longer list fails
+// to compile instead of misbinding).
+#define GPU_PP_MAX_ARGS 32
+#define GPU_PP_CAT(a, b) GPU_PP_CAT_(a, b)
+#define GPU_PP_CAT_(a, b) a##b
+#define GPU_PP_NARGS(...) GPU_PP_NARGS_(__VA_ARGS__, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0)
+#define GPU_PP_NARGS_(_1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, _15, _16, _17, _18, _19, _20, _21, _22, _23, _24, _25, _26, _27, _28, _29, _30, _31, _32, N, ...) N
+#define GPU_SLOT0(x) constant x [[buffer(0)]]
+#define GPU_SLOTN(i, x) device x [[buffer(i)]]
+#define GPU_PP_MAP(...) GPU_PP_CAT(GPU_PP_MAP_, GPU_PP_NARGS(__VA_ARGS__))(__VA_ARGS__)
+#define GPU_PP_MAP_1(a0) GPU_SLOT0(a0)
+#define GPU_PP_MAP_2(a0, a1) GPU_SLOT0(a0), GPU_SLOTN(1, a1)
+#define GPU_PP_MAP_3(a0, a1, a2) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2)
+#define GPU_PP_MAP_4(a0, a1, a2, a3) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3)
+#define GPU_PP_MAP_5(a0, a1, a2, a3, a4) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4)
+#define GPU_PP_MAP_6(a0, a1, a2, a3, a4, a5) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5)
+#define GPU_PP_MAP_7(a0, a1, a2, a3, a4, a5, a6) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6)
+#define GPU_PP_MAP_8(a0, a1, a2, a3, a4, a5, a6, a7) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7)
+#define GPU_PP_MAP_9(a0, a1, a2, a3, a4, a5, a6, a7, a8) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8)
+#define GPU_PP_MAP_10(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9)
+#define GPU_PP_MAP_11(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9), GPU_SLOTN(10, a10)
+#define GPU_PP_MAP_12(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9), GPU_SLOTN(10, a10), GPU_SLOTN(11, a11)
+#define GPU_PP_MAP_13(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9), GPU_SLOTN(10, a10), GPU_SLOTN(11, a11), GPU_SLOTN(12, a12)
+#define GPU_PP_MAP_14(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9), GPU_SLOTN(10, a10), GPU_SLOTN(11, a11), GPU_SLOTN(12, a12), GPU_SLOTN(13, a13)
+#define GPU_PP_MAP_15(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9), GPU_SLOTN(10, a10), GPU_SLOTN(11, a11), GPU_SLOTN(12, a12), GPU_SLOTN(13, a13), GPU_SLOTN(14, a14)
+#define GPU_PP_MAP_16(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9), GPU_SLOTN(10, a10), GPU_SLOTN(11, a11), GPU_SLOTN(12, a12), GPU_SLOTN(13, a13), GPU_SLOTN(14, a14), GPU_SLOTN(15, a15)
+#define GPU_PP_MAP_17(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9), GPU_SLOTN(10, a10), GPU_SLOTN(11, a11), GPU_SLOTN(12, a12), GPU_SLOTN(13, a13), GPU_SLOTN(14, a14), GPU_SLOTN(15, a15), GPU_SLOTN(16, a16)
+#define GPU_PP_MAP_18(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9), GPU_SLOTN(10, a10), GPU_SLOTN(11, a11), GPU_SLOTN(12, a12), GPU_SLOTN(13, a13), GPU_SLOTN(14, a14), GPU_SLOTN(15, a15), GPU_SLOTN(16, a16), GPU_SLOTN(17, a17)
+#define GPU_PP_MAP_19(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9), GPU_SLOTN(10, a10), GPU_SLOTN(11, a11), GPU_SLOTN(12, a12), GPU_SLOTN(13, a13), GPU_SLOTN(14, a14), GPU_SLOTN(15, a15), GPU_SLOTN(16, a16), GPU_SLOTN(17, a17), GPU_SLOTN(18, a18)
+#define GPU_PP_MAP_20(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9), GPU_SLOTN(10, a10), GPU_SLOTN(11, a11), GPU_SLOTN(12, a12), GPU_SLOTN(13, a13), GPU_SLOTN(14, a14), GPU_SLOTN(15, a15), GPU_SLOTN(16, a16), GPU_SLOTN(17, a17), GPU_SLOTN(18, a18), GPU_SLOTN(19, a19)
+#define GPU_PP_MAP_21(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9), GPU_SLOTN(10, a10), GPU_SLOTN(11, a11), GPU_SLOTN(12, a12), GPU_SLOTN(13, a13), GPU_SLOTN(14, a14), GPU_SLOTN(15, a15), GPU_SLOTN(16, a16), GPU_SLOTN(17, a17), GPU_SLOTN(18, a18), GPU_SLOTN(19, a19), GPU_SLOTN(20, a20)
+#define GPU_PP_MAP_22(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9), GPU_SLOTN(10, a10), GPU_SLOTN(11, a11), GPU_SLOTN(12, a12), GPU_SLOTN(13, a13), GPU_SLOTN(14, a14), GPU_SLOTN(15, a15), GPU_SLOTN(16, a16), GPU_SLOTN(17, a17), GPU_SLOTN(18, a18), GPU_SLOTN(19, a19), GPU_SLOTN(20, a20), GPU_SLOTN(21, a21)
+#define GPU_PP_MAP_23(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9), GPU_SLOTN(10, a10), GPU_SLOTN(11, a11), GPU_SLOTN(12, a12), GPU_SLOTN(13, a13), GPU_SLOTN(14, a14), GPU_SLOTN(15, a15), GPU_SLOTN(16, a16), GPU_SLOTN(17, a17), GPU_SLOTN(18, a18), GPU_SLOTN(19, a19), GPU_SLOTN(20, a20), GPU_SLOTN(21, a21), GPU_SLOTN(22, a22)
+#define GPU_PP_MAP_24(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9), GPU_SLOTN(10, a10), GPU_SLOTN(11, a11), GPU_SLOTN(12, a12), GPU_SLOTN(13, a13), GPU_SLOTN(14, a14), GPU_SLOTN(15, a15), GPU_SLOTN(16, a16), GPU_SLOTN(17, a17), GPU_SLOTN(18, a18), GPU_SLOTN(19, a19), GPU_SLOTN(20, a20), GPU_SLOTN(21, a21), GPU_SLOTN(22, a22), GPU_SLOTN(23, a23)
+#define GPU_PP_MAP_25(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9), GPU_SLOTN(10, a10), GPU_SLOTN(11, a11), GPU_SLOTN(12, a12), GPU_SLOTN(13, a13), GPU_SLOTN(14, a14), GPU_SLOTN(15, a15), GPU_SLOTN(16, a16), GPU_SLOTN(17, a17), GPU_SLOTN(18, a18), GPU_SLOTN(19, a19), GPU_SLOTN(20, a20), GPU_SLOTN(21, a21), GPU_SLOTN(22, a22), GPU_SLOTN(23, a23), GPU_SLOTN(24, a24)
+#define GPU_PP_MAP_26(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9), GPU_SLOTN(10, a10), GPU_SLOTN(11, a11), GPU_SLOTN(12, a12), GPU_SLOTN(13, a13), GPU_SLOTN(14, a14), GPU_SLOTN(15, a15), GPU_SLOTN(16, a16), GPU_SLOTN(17, a17), GPU_SLOTN(18, a18), GPU_SLOTN(19, a19), GPU_SLOTN(20, a20), GPU_SLOTN(21, a21), GPU_SLOTN(22, a22), GPU_SLOTN(23, a23), GPU_SLOTN(24, a24), GPU_SLOTN(25, a25)
+#define GPU_PP_MAP_27(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9), GPU_SLOTN(10, a10), GPU_SLOTN(11, a11), GPU_SLOTN(12, a12), GPU_SLOTN(13, a13), GPU_SLOTN(14, a14), GPU_SLOTN(15, a15), GPU_SLOTN(16, a16), GPU_SLOTN(17, a17), GPU_SLOTN(18, a18), GPU_SLOTN(19, a19), GPU_SLOTN(20, a20), GPU_SLOTN(21, a21), GPU_SLOTN(22, a22), GPU_SLOTN(23, a23), GPU_SLOTN(24, a24), GPU_SLOTN(25, a25), GPU_SLOTN(26, a26)
+#define GPU_PP_MAP_28(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9), GPU_SLOTN(10, a10), GPU_SLOTN(11, a11), GPU_SLOTN(12, a12), GPU_SLOTN(13, a13), GPU_SLOTN(14, a14), GPU_SLOTN(15, a15), GPU_SLOTN(16, a16), GPU_SLOTN(17, a17), GPU_SLOTN(18, a18), GPU_SLOTN(19, a19), GPU_SLOTN(20, a20), GPU_SLOTN(21, a21), GPU_SLOTN(22, a22), GPU_SLOTN(23, a23), GPU_SLOTN(24, a24), GPU_SLOTN(25, a25), GPU_SLOTN(26, a26), GPU_SLOTN(27, a27)
+#define GPU_PP_MAP_29(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9), GPU_SLOTN(10, a10), GPU_SLOTN(11, a11), GPU_SLOTN(12, a12), GPU_SLOTN(13, a13), GPU_SLOTN(14, a14), GPU_SLOTN(15, a15), GPU_SLOTN(16, a16), GPU_SLOTN(17, a17), GPU_SLOTN(18, a18), GPU_SLOTN(19, a19), GPU_SLOTN(20, a20), GPU_SLOTN(21, a21), GPU_SLOTN(22, a22), GPU_SLOTN(23, a23), GPU_SLOTN(24, a24), GPU_SLOTN(25, a25), GPU_SLOTN(26, a26), GPU_SLOTN(27, a27), GPU_SLOTN(28, a28)
+#define GPU_PP_MAP_30(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9), GPU_SLOTN(10, a10), GPU_SLOTN(11, a11), GPU_SLOTN(12, a12), GPU_SLOTN(13, a13), GPU_SLOTN(14, a14), GPU_SLOTN(15, a15), GPU_SLOTN(16, a16), GPU_SLOTN(17, a17), GPU_SLOTN(18, a18), GPU_SLOTN(19, a19), GPU_SLOTN(20, a20), GPU_SLOTN(21, a21), GPU_SLOTN(22, a22), GPU_SLOTN(23, a23), GPU_SLOTN(24, a24), GPU_SLOTN(25, a25), GPU_SLOTN(26, a26), GPU_SLOTN(27, a27), GPU_SLOTN(28, a28), GPU_SLOTN(29, a29)
+#define GPU_PP_MAP_31(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9), GPU_SLOTN(10, a10), GPU_SLOTN(11, a11), GPU_SLOTN(12, a12), GPU_SLOTN(13, a13), GPU_SLOTN(14, a14), GPU_SLOTN(15, a15), GPU_SLOTN(16, a16), GPU_SLOTN(17, a17), GPU_SLOTN(18, a18), GPU_SLOTN(19, a19), GPU_SLOTN(20, a20), GPU_SLOTN(21, a21), GPU_SLOTN(22, a22), GPU_SLOTN(23, a23), GPU_SLOTN(24, a24), GPU_SLOTN(25, a25), GPU_SLOTN(26, a26), GPU_SLOTN(27, a27), GPU_SLOTN(28, a28), GPU_SLOTN(29, a29), GPU_SLOTN(30, a30)
+#define GPU_PP_MAP_32(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31) GPU_SLOT0(a0), GPU_SLOTN(1, a1), GPU_SLOTN(2, a2), GPU_SLOTN(3, a3), GPU_SLOTN(4, a4), GPU_SLOTN(5, a5), GPU_SLOTN(6, a6), GPU_SLOTN(7, a7), GPU_SLOTN(8, a8), GPU_SLOTN(9, a9), GPU_SLOTN(10, a10), GPU_SLOTN(11, a11), GPU_SLOTN(12, a12), GPU_SLOTN(13, a13), GPU_SLOTN(14, a14), GPU_SLOTN(15, a15), GPU_SLOTN(16, a16), GPU_SLOTN(17, a17), GPU_SLOTN(18, a18), GPU_SLOTN(19, a19), GPU_SLOTN(20, a20), GPU_SLOTN(21, a21), GPU_SLOTN(22, a22), GPU_SLOTN(23, a23), GPU_SLOTN(24, a24), GPU_SLOTN(25, a25), GPU_SLOTN(26, a26), GPU_SLOTN(27, a27), GPU_SLOTN(28, a28), GPU_SLOTN(29, a29), GPU_SLOTN(30, a30), GPU_SLOTN(31, a31)
+#define GPU_KERNEL(name, tid) kernel void name GPU_SIG_##tid
+#define GPU_SIG_GPU_TID_NONE(...) (GPU_PP_MAP(__VA_ARGS__))
+#define GPU_SIG_GPU_TID_1D(...) (uint gpu_tid_ [[thread_position_in_grid]], GPU_PP_MAP(__VA_ARGS__))
+#define GPU_SIG_GPU_TID_2D(...) (uint2 gpu_tid2_ [[thread_position_in_grid]], GPU_PP_MAP(__VA_ARGS__))
+#define GPU_SIG_GPU_TID_FULL(...)                                           \
+    (uint gpu_tid_ [[thread_position_in_grid]],                             \
+     uint gpu_lid_ [[thread_index_in_threadgroup]],                         \
+     uint gpu_sg_ [[simdgroup_index_in_threadgroup]],                       \
+     uint gpu_nsg_ [[simdgroups_per_threadgroup]],                          \
+     uint gpu_group_ [[threadgroup_position_in_grid]], GPU_PP_MAP(__VA_ARGS__))
+// Bare declarators; GPU_PP_MAP adds the address space and [[buffer(i)]].
+#define GPU_KERNEL_PARAMS(T, name) T& name
+#define GPU_BUFFER(T, name) T* name
 #define GPU_GLOBAL_ID_X gpu_tid_
 #define GPU_GLOBAL_ID_XY gpu_tid2_
 #define GPU_LOCAL_ID gpu_lid_
@@ -225,12 +285,15 @@ GPU_FN inline uint gpu_wave_broadcast_first(gpu_wave_t w, uint v) { return w.g.s
 // them with RHI_CUDA_REGISTER_* (rhi_cuda.h). primitives_gpu.h, whose helpers
 // renderer kernels also need, guards its kernels with
 // GPU_PRIMITIVES_HELPERS_ONLY for that reason.
-#define GPU_KERNEL(name) __global__ void name
+// Thread ids come from blockIdx/threadIdx (GPU_GLOBAL_ID_X etc.), so every
+// GPU_SIG_* wrapper is the identity: the parameter list is used as written.
+#define GPU_KERNEL(name, tid) __global__ void name GPU_SIG_##tid
+#define GPU_SIG_GPU_TID_NONE(...) (__VA_ARGS__)
+#define GPU_SIG_GPU_TID_1D(...) (__VA_ARGS__)
+#define GPU_SIG_GPU_TID_2D(...) (__VA_ARGS__)
+#define GPU_SIG_GPU_TID_FULL(...) (__VA_ARGS__)
 #define GPU_KERNEL_PARAMS(T, name) const T name
-#define GPU_BUFFER(T, name, slot) , T* name
-#define GPU_TID_1D
-#define GPU_TID_2D
-#define GPU_TID_FULL
+#define GPU_BUFFER(T, name) T* name
 #define GPU_GLOBAL_ID_X (blockIdx.x * blockDim.x + threadIdx.x)
 #define GPU_GLOBAL_ID_XY \
     gpu_uint2(blockIdx.x * blockDim.x + threadIdx.x, blockIdx.y * blockDim.y + threadIdx.y)

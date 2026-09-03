@@ -452,21 +452,20 @@ GPU_FN inline bool miniShadeVertex(uint type, GPU_DEVICE const MiniMaterial& mat
 // Megakernel mode (M1)
 // ==========================================================================
 
-GPU_KERNEL(pathtraceKernel)(GPU_KERNEL_PARAMS(MiniParams, P)
-    GPU_BUFFER(gpu_float4, accum, 1)
-    GPU_BUFFER(const MiniMaterial, materials, 2)
-    GPU_BUFFER(const MiniObject, objects, 3)
-    GPU_BUFFER(const RtBvhNode, bvhNodes, 4)
-    GPU_BUFFER(const gpu_uint4, tris, 5)
-    GPU_BUFFER(const gpu_storage3, positions, 6)
-    GPU_BUFFER(const RhiTex, texHeap, 7)
-    GPU_BUFFER(const gpu_storage3, normals, 8)
-    GPU_BUFFER(const gpu_float2, uvs, 9)
-    GPU_BUFFER(const float, spd, 10)
-    GPU_BUFFER(const float, r2s, 11)
-    GPU_BUFFER(const RtLight, lights, 12)
-    GPU_BUFFER(const float, envDist, 13)
-    GPU_TID_2D)
+GPU_KERNEL(pathtraceKernel, GPU_TID_2D)(GPU_KERNEL_PARAMS(MiniParams, P),
+    GPU_BUFFER(gpu_float4, accum),
+    GPU_BUFFER(const MiniMaterial, materials),
+    GPU_BUFFER(const MiniObject, objects),
+    GPU_BUFFER(const RtBvhNode, bvhNodes),
+    GPU_BUFFER(const gpu_uint4, tris),
+    GPU_BUFFER(const gpu_storage3, positions),
+    GPU_BUFFER(const RhiTex, texHeap),
+    GPU_BUFFER(const gpu_storage3, normals),
+    GPU_BUFFER(const gpu_float2, uvs),
+    GPU_BUFFER(const float, spd),
+    GPU_BUFFER(const float, r2s),
+    GPU_BUFFER(const RtLight, lights),
+    GPU_BUFFER(const float, envDist))
 {
     gpu_uint2 gid = GPU_GLOBAL_ID_XY;
     if (gid.x >= P.width || gid.y >= P.height)
@@ -608,10 +607,9 @@ GPU_FN inline MiniShadeCtx wfCtx(GPU_PARAMS_REF(WfCtl) C,
     return c;
 }
 
-GPU_KERNEL(wf_raygen)(GPU_KERNEL_PARAMS(MiniParams, P)
-    GPU_BUFFER(WfPath, rays, 1)
-    GPU_BUFFER(gpu_atomic_uint, counts, 2)
-    GPU_TID_2D)
+GPU_KERNEL(wf_raygen, GPU_TID_2D)(GPU_KERNEL_PARAMS(MiniParams, P),
+    GPU_BUFFER(WfPath, rays),
+    GPU_BUFFER(gpu_atomic_uint, counts))
 {
     gpu_uint2 gid = GPU_GLOBAL_ID_XY;
     if (gid.x >= P.width || gid.y >= P.height)
@@ -654,9 +652,9 @@ GPU_KERNEL(wf_raygen)(GPU_KERNEL_PARAMS(MiniParams, P)
 
 // Single-thread dispatches turning GPU-written queue counts into indirect
 // threadgroup args, keeping the bounce loop free of CPU readbacks.
-GPU_KERNEL(wf_prep_intersect)(GPU_KERNEL_PARAMS(WfCtl, C)
-    GPU_BUFFER(gpu_atomic_uint, counts, 1)
-    GPU_BUFFER(uint, args, 2))
+GPU_KERNEL(wf_prep_intersect, GPU_TID_NONE)(GPU_KERNEL_PARAMS(WfCtl, C),
+    GPU_BUFFER(gpu_atomic_uint, counts),
+    GPU_BUFFER(uint, args))
 {
     uint c = gpu_atomic_load(&counts[C.srcCounter]);
     args[WF_ARG_INTERSECT * 4 + 0] = (c + PRIM_TILE - 1u) / PRIM_TILE;
@@ -668,9 +666,9 @@ GPU_KERNEL(wf_prep_intersect)(GPU_KERNEL_PARAMS(WfCtl, C)
     gpu_atomic_store(&counts[WF_COUNT_SHADOW], 0u);
 }
 
-GPU_KERNEL(wf_prep_shade)(GPU_KERNEL_PARAMS(WfCtl, C)
-    GPU_BUFFER(gpu_atomic_uint, counts, 1)
-    GPU_BUFFER(uint, args, 2))
+GPU_KERNEL(wf_prep_shade, GPU_TID_NONE)(GPU_KERNEL_PARAMS(WfCtl, C),
+    GPU_BUFFER(gpu_atomic_uint, counts),
+    GPU_BUFFER(uint, args))
 {
     constexpr uint queues[3] = { WF_COUNT_SHADE_DIFFUSE, WF_COUNT_SHADE_CONDUCTOR,
                                  WF_COUNT_SHADE_GLASS };
@@ -685,9 +683,9 @@ GPU_KERNEL(wf_prep_shade)(GPU_KERNEL_PARAMS(WfCtl, C)
 }
 
 // After the shade kernels: size the shadow-ray dispatch.
-GPU_KERNEL(wf_prep_shadow)(GPU_KERNEL_PARAMS(WfCtl, C)
-    GPU_BUFFER(gpu_atomic_uint, counts, 1)
-    GPU_BUFFER(uint, args, 2))
+GPU_KERNEL(wf_prep_shadow, GPU_TID_NONE)(GPU_KERNEL_PARAMS(WfCtl, C),
+    GPU_BUFFER(gpu_atomic_uint, counts),
+    GPU_BUFFER(uint, args))
 {
     uint c = gpu_atomic_load(&counts[WF_COUNT_SHADOW]);
     args[WF_ARG_SHADOW * 4 + 0] = (c + PRIM_TILE - 1u) / PRIM_TILE;
@@ -699,25 +697,24 @@ GPU_KERNEL(wf_prep_shadow)(GPU_KERNEL_PARAMS(WfCtl, C)
 // (tier-1 material dispatch: the queue decides which BSDF code runs, not a
 // per-thread branch). Emissive and environment hits are resolved here with
 // their MIS weight against the light sampler.
-GPU_KERNEL(wf_intersect)(GPU_KERNEL_PARAMS(WfCtl, C)
-    GPU_BUFFER(gpu_atomic_uint, counts, 1)
-    GPU_BUFFER(const WfPath, raysIn, 2)
-    GPU_BUFFER(const MiniObject, objects, 3)
-    GPU_BUFFER(const RtBvhNode, bvhNodes, 4)
-    GPU_BUFFER(const gpu_uint4, tris, 5)
-    GPU_BUFFER(const gpu_storage3, positions, 6)
-    GPU_BUFFER(const MiniMaterial, materials, 7)
-    GPU_BUFFER(gpu_float4, accum, 8)
-    GPU_BUFFER(WfPath, qDiffuse, 9)
-    GPU_BUFFER(WfPath, qConductor, 10)
-    GPU_BUFFER(WfPath, qGlass, 11)
-    GPU_BUFFER(const RhiTex, texHeap, 12)
-    GPU_BUFFER(const gpu_storage3, normals, 13)
-    GPU_BUFFER(const gpu_float2, uvs, 14)
-    GPU_BUFFER(const float, spd, 15)
-    GPU_BUFFER(const float, r2s, 16)
-    GPU_BUFFER(const float, envDist, 17)
-    GPU_TID_1D)
+GPU_KERNEL(wf_intersect, GPU_TID_1D)(GPU_KERNEL_PARAMS(WfCtl, C),
+    GPU_BUFFER(gpu_atomic_uint, counts),
+    GPU_BUFFER(const WfPath, raysIn),
+    GPU_BUFFER(const MiniObject, objects),
+    GPU_BUFFER(const RtBvhNode, bvhNodes),
+    GPU_BUFFER(const gpu_uint4, tris),
+    GPU_BUFFER(const gpu_storage3, positions),
+    GPU_BUFFER(const MiniMaterial, materials),
+    GPU_BUFFER(gpu_float4, accum),
+    GPU_BUFFER(WfPath, qDiffuse),
+    GPU_BUFFER(WfPath, qConductor),
+    GPU_BUFFER(WfPath, qGlass),
+    GPU_BUFFER(const RhiTex, texHeap),
+    GPU_BUFFER(const gpu_storage3, normals),
+    GPU_BUFFER(const gpu_float2, uvs),
+    GPU_BUFFER(const float, spd),
+    GPU_BUFFER(const float, r2s),
+    GPU_BUFFER(const float, envDist))
 {
     uint tid = GPU_GLOBAL_ID_X;
     if (tid >= gpu_atomic_load(&counts[C.srcCounter]))
@@ -784,21 +781,20 @@ GPU_KERNEL(wf_intersect)(GPU_KERNEL_PARAMS(WfCtl, C)
 #if GPU_HAS_SPEC_CONST
 GPU_SPEC_CONST(uint, kShadeMatType, 0)
 
-GPU_KERNEL(wf_shade)(GPU_KERNEL_PARAMS(WfCtl, C)
-    GPU_BUFFER(gpu_atomic_uint, counts, 1)
-    GPU_BUFFER(const WfPath, queue, 2)
-    GPU_BUFFER(WfPath, raysOut, 3)
-    GPU_BUFFER(const MiniMaterial, materials, 4)
-    GPU_BUFFER(const RhiTex, texHeap, 5)
-    GPU_BUFFER(const float, spd, 6)
-    GPU_BUFFER(const float, r2s, 7)
-    GPU_BUFFER(const RtLight, lights, 8)
-    GPU_BUFFER(const MiniObject, objects, 9)
-    GPU_BUFFER(const gpu_uint4, tris, 10)
-    GPU_BUFFER(const gpu_storage3, positions, 11)
-    GPU_BUFFER(const float, envDist, 12)
-    GPU_BUFFER(WfShadowRay, shadowQueue, 13)
-    GPU_TID_1D)
+GPU_KERNEL(wf_shade, GPU_TID_1D)(GPU_KERNEL_PARAMS(WfCtl, C),
+    GPU_BUFFER(gpu_atomic_uint, counts),
+    GPU_BUFFER(const WfPath, queue),
+    GPU_BUFFER(WfPath, raysOut),
+    GPU_BUFFER(const MiniMaterial, materials),
+    GPU_BUFFER(const RhiTex, texHeap),
+    GPU_BUFFER(const float, spd),
+    GPU_BUFFER(const float, r2s),
+    GPU_BUFFER(const RtLight, lights),
+    GPU_BUFFER(const MiniObject, objects),
+    GPU_BUFFER(const gpu_uint4, tris),
+    GPU_BUFFER(const gpu_storage3, positions),
+    GPU_BUFFER(const float, envDist),
+    GPU_BUFFER(WfShadowRay, shadowQueue))
 {
     uint tid = GPU_GLOBAL_ID_X;
     if (tid >= gpu_atomic_load(&counts[C.srcCounter]))
@@ -847,15 +843,14 @@ GPU_SPEC_INSTANCES(wf_shade, 0, MINI_MAT_DIFFUSE, MINI_MAT_CONDUCTOR, MINI_MAT_G
 #endif  // GPU_HAS_SPEC_CONST
 
 // Shadow rays: visibility test, then the precomputed contribution lands.
-GPU_KERNEL(wf_shadow)(GPU_KERNEL_PARAMS(WfCtl, C)
-    GPU_BUFFER(gpu_atomic_uint, counts, 1)
-    GPU_BUFFER(const WfShadowRay, shadowQueue, 2)
-    GPU_BUFFER(const MiniObject, objects, 3)
-    GPU_BUFFER(const RtBvhNode, bvhNodes, 4)
-    GPU_BUFFER(const gpu_uint4, tris, 5)
-    GPU_BUFFER(const gpu_storage3, positions, 6)
-    GPU_BUFFER(gpu_float4, accum, 7)
-    GPU_TID_1D)
+GPU_KERNEL(wf_shadow, GPU_TID_1D)(GPU_KERNEL_PARAMS(WfCtl, C),
+    GPU_BUFFER(gpu_atomic_uint, counts),
+    GPU_BUFFER(const WfShadowRay, shadowQueue),
+    GPU_BUFFER(const MiniObject, objects),
+    GPU_BUFFER(const RtBvhNode, bvhNodes),
+    GPU_BUFFER(const gpu_uint4, tris),
+    GPU_BUFFER(const gpu_storage3, positions),
+    GPU_BUFFER(gpu_float4, accum))
 {
     uint tid = GPU_GLOBAL_ID_X;
     if (tid >= gpu_atomic_load(&counts[WF_COUNT_SHADOW]))
@@ -874,10 +869,9 @@ GPU_KERNEL(wf_shadow)(GPU_KERNEL_PARAMS(WfCtl, C)
 // P.iter carries the number of completed samples. Mirrors x like saveImage()
 // (the quirk all saved renders share), so the window shows exactly what the
 // PNG will contain.
-GPU_KERNEL(present_tonemap)(GPU_KERNEL_PARAMS(MiniParams, P)
-    GPU_BUFFER(const gpu_float4, accum, 1)
-    GPU_BUFFER(gpu_uchar4, out, 2)
-    GPU_TID_2D)
+GPU_KERNEL(present_tonemap, GPU_TID_2D)(GPU_KERNEL_PARAMS(MiniParams, P),
+    GPU_BUFFER(const gpu_float4, accum),
+    GPU_BUFFER(gpu_uchar4, out))
 {
     gpu_uint2 gid = GPU_GLOBAL_ID_XY;
     if (gid.x >= P.width || gid.y >= P.height)

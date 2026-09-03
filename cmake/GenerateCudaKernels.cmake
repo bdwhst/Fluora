@@ -29,21 +29,21 @@ get_filename_component(INPUT "${INPUT}" ABSOLUTE)
 
 file(READ "${INPUT}" _src)
 
-# Kernels: GPU_KERNEL(name) -- GPU_KERNEL_PARAMS(...) does not match because
-# the macro name is followed by "_PARAMS", not "(".
+# Kernels: GPU_KERNEL(name, GPU_TID_*) -- GPU_KERNEL_PARAMS(...) does not
+# match because the macro name is followed by "_PARAMS", not "(".
 set(_kernels "")
-string(REGEX MATCHALL "GPU_KERNEL\\(([A-Za-z_][A-Za-z_0-9]*)\\)" _kmatches "${_src}")
+string(REGEX MATCHALL "GPU_KERNEL\\([ \t]*([A-Za-z_][A-Za-z_0-9]*)[ \t]*,[ \t]*GPU_TID_[A-Z0-9]+[ \t]*\\)" _kmatches "${_src}")
 foreach(_m IN LISTS _kmatches)
-    string(REGEX REPLACE "GPU_KERNEL\\(([A-Za-z_][A-Za-z_0-9]*)\\)" "\\1" _name "${_m}")
+    string(REGEX REPLACE "GPU_KERNEL\\([ \t]*([A-Za-z_][A-Za-z_0-9]*)[ \t]*,.*" "\\1" _name "${_m}")
     list(APPEND _kernels "${_name}")
 endforeach()
 list(REMOVE_DUPLICATES _kernels)
 
-# Templated kernels: GPU_SPEC_CONST(...) immediately followed by GPU_KERNEL(name).
+# Templated kernels: GPU_SPEC_CONST(...) immediately followed by GPU_KERNEL(name, ...).
 set(_templated "")
-string(REGEX MATCHALL "GPU_SPEC_CONST\\([^)]*\\)[ \t\r\n]*GPU_KERNEL\\(([A-Za-z_][A-Za-z_0-9]*)\\)" _tmatches "${_src}")
+string(REGEX MATCHALL "GPU_SPEC_CONST\\([^)]*\\)[ \t\r\n]*GPU_KERNEL\\([ \t]*([A-Za-z_][A-Za-z_0-9]*)[ \t]*," _tmatches "${_src}")
 foreach(_m IN LISTS _tmatches)
-    string(REGEX REPLACE ".*GPU_KERNEL\\(([A-Za-z_][A-Za-z_0-9]*)\\)" "\\1" _name "${_m}")
+    string(REGEX REPLACE ".*GPU_KERNEL\\([ \t]*([A-Za-z_][A-Za-z_0-9]*)[ \t]*,$" "\\1" _name "${_m}")
     list(APPEND _templated "${_name}")
 endforeach()
 

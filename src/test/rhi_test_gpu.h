@@ -11,11 +11,10 @@
 #endif
 
 // Samples the bindless heap at (q.xy) from texture index q.z.
-GPU_KERNEL(test_tex_sample)(GPU_KERNEL_PARAMS(PrimParams, P)
-    GPU_BUFFER(const RhiTex, heap, 1)
-    GPU_BUFFER(const gpu_float4, q, 2)
-    GPU_BUFFER(gpu_float4, outv, 3)
-    GPU_TID_1D)
+GPU_KERNEL(test_tex_sample, GPU_TID_1D)(GPU_KERNEL_PARAMS(PrimParams, P),
+    GPU_BUFFER(const RhiTex, heap),
+    GPU_BUFFER(const gpu_float4, q),
+    GPU_BUFFER(gpu_float4, outv))
 {
     uint tid = GPU_GLOBAL_ID_X;
     if (tid >= P.n)

@@ -52,22 +52,34 @@ resource i at buffer(i+1)), so the entry syntax is mechanically derivable from
 a declaration macro:
 
 ```cpp
-GPU_KERNEL(wf_shade)(GPU_KERNEL_PARAMS(WfCtl)
-    GPU_BUFFER(gpu_atomic_uint,    counts,    1)
-    GPU_BUFFER(const WfPath,       queue,     2)
-    GPU_BUFFER(WfPath,             raysOut,   3)
-    GPU_BUFFER(const MiniMaterial, materials, 4)
-    GPU_TID_1D)
+GPU_KERNEL(wf_shade, GPU_TID_1D)(GPU_KERNEL_PARAMS(WfCtl, C),
+    GPU_BUFFER(gpu_atomic_uint,    counts),      // buffer(1)
+    GPU_BUFFER(const WfPath,       queue),       // buffer(2)
+    GPU_BUFFER(WfPath,             raysOut),     // buffer(3)
+    GPU_BUFFER(const MiniMaterial, materials))   // buffer(4)
 {
     uint tid = GPU_GLOBAL_ID_X;  // MSL: bound param; CUDA: blockIdx*blockDim+threadIdx
     ...
 }
 ```
 
-MSL expansion: `kernel void wf_shade(constant WfCtl& … [[buffer(0)]], device …
-[[buffer(N)]], uint [[thread_position_in_grid]])`. CUDA expansion:
-`__global__ void wf_shade(const WfCtl, …*)` (thread id computed in
-`GPU_GLOBAL_ID_X`). Explicit slot numbers double as binding documentation.
+`GPU_KERNEL(name, tid)` names the kernel and the thread ids it reads
+(`GPU_TID_1D`, `GPU_TID_2D`, `GPU_TID_FULL`, `GPU_TID_NONE`); the parameter
+list is an ordinary one, commas written by the author, and buffer slots are
+positional (parameter block = buffer(0), i-th `GPU_BUFFER` = buffer(i)) —
+exactly the order the host's dispatch list binds, so the two cannot drift.
+The macro expands to `kernel void name GPU_SIG_GPU_TID_1D`, a function-like
+macro name that the preprocessor's rescan applies to the parenthesized list in
+the source; under MSL that wrapper prepends the id parameters and runs the
+count-and-map `GPU_PP_MAP` over the list to add `constant`/`device` and
+`[[buffer(i)]]` (up to `GPU_PP_MAX_ARGS` = 32 parameters; more is a compile
+error, never a misbind). MSL expansion: `kernel void wf_shade(uint
+[[thread_position_in_grid]], constant WfCtl& C [[buffer(0)]], device
+gpu_atomic_uint* counts [[buffer(1)]], …)`. CUDA expansion: `__global__ void
+wf_shade(const WfCtl C, gpu_atomic_uint* counts, …)` — the wrapper is the
+identity, buffers bind positionally, and the thread id is computed in
+`GPU_GLOBAL_ID_X` from blockIdx/threadIdx, so both backends see the same
+parameter list and no placeholder parameter is needed.
 Specialization: `GPU_SPEC_CONST(uint, kShadeMatType, 0)` lowers to
 `[[function_constant(0)]]` on MSL and a template parameter on CUDA — exactly
 the `rhi::SpecConstant` lowering `rhi.h` already promises.

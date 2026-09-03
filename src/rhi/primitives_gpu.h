@@ -44,10 +44,9 @@ GPU_FN inline uint tg_exclusive_scan(uint v, uint lid, uint sgId, uint numSg,
 // Reduce
 // --------------------------------------------------------------------------
 
-GPU_KERNEL(prim_reduce_sum)(GPU_KERNEL_PARAMS(PrimParams, P)
-    GPU_BUFFER(const uint, in, 1)
-    GPU_BUFFER(gpu_atomic_uint, out, 2)
-    GPU_TID_FULL)
+GPU_KERNEL(prim_reduce_sum, GPU_TID_FULL)(GPU_KERNEL_PARAMS(PrimParams, P),
+    GPU_BUFFER(const uint, in),
+    GPU_BUFFER(gpu_atomic_uint, out))
 {
     uint gid = GPU_GLOBAL_ID_X;
     uint lid = GPU_LOCAL_ID;
@@ -74,11 +73,10 @@ GPU_KERNEL(prim_reduce_sum)(GPU_KERNEL_PARAMS(PrimParams, P)
 // decoupled-lookback needs forward-progress guarantees Apple GPUs don't make.)
 // --------------------------------------------------------------------------
 
-GPU_KERNEL(prim_scan_block)(GPU_KERNEL_PARAMS(PrimParams, P)
-    GPU_BUFFER(const uint, in, 1)
-    GPU_BUFFER(uint, out, 2)
-    GPU_BUFFER(uint, blockSums, 3)
-    GPU_TID_FULL)
+GPU_KERNEL(prim_scan_block, GPU_TID_FULL)(GPU_KERNEL_PARAMS(PrimParams, P),
+    GPU_BUFFER(const uint, in),
+    GPU_BUFFER(uint, out),
+    GPU_BUFFER(uint, blockSums))
 {
     uint gid = GPU_GLOBAL_ID_X;
     uint lid = GPU_LOCAL_ID;
@@ -91,10 +89,9 @@ GPU_KERNEL(prim_scan_block)(GPU_KERNEL_PARAMS(PrimParams, P)
         blockSums[GPU_GROUP_ID] = p + v;
 }
 
-GPU_KERNEL(prim_scan_add_offsets)(GPU_KERNEL_PARAMS(PrimParams, P)
-    GPU_BUFFER(uint, out, 1)
-    GPU_BUFFER(const uint, scannedBlockSums, 2)
-    GPU_TID_FULL)
+GPU_KERNEL(prim_scan_add_offsets, GPU_TID_FULL)(GPU_KERNEL_PARAMS(PrimParams, P),
+    GPU_BUFFER(uint, out),
+    GPU_BUFFER(const uint, scannedBlockSums))
 {
     uint gid = GPU_GLOBAL_ID_X;
     if (gid < P.n)
@@ -106,12 +103,11 @@ GPU_KERNEL(prim_scan_add_offsets)(GPU_KERNEL_PARAMS(PrimParams, P)
 // the flags first; count = scannedFlags[n-1] + flags[n-1].
 // --------------------------------------------------------------------------
 
-GPU_KERNEL(prim_compact_scatter)(GPU_KERNEL_PARAMS(PrimParams, P)
-    GPU_BUFFER(const uint, in, 1)
-    GPU_BUFFER(const uint, flags, 2)
-    GPU_BUFFER(const uint, scannedFlags, 3)
-    GPU_BUFFER(uint, out, 4)
-    GPU_TID_1D)
+GPU_KERNEL(prim_compact_scatter, GPU_TID_1D)(GPU_KERNEL_PARAMS(PrimParams, P),
+    GPU_BUFFER(const uint, in),
+    GPU_BUFFER(const uint, flags),
+    GPU_BUFFER(const uint, scannedFlags),
+    GPU_BUFFER(uint, out))
 {
     uint gid = GPU_GLOBAL_ID_X;
     if (gid < P.n && flags[gid] != 0u)
@@ -124,10 +120,9 @@ GPU_KERNEL(prim_compact_scatter)(GPU_KERNEL_PARAMS(PrimParams, P)
 // histogram yields stable global scatter bases.
 // --------------------------------------------------------------------------
 
-GPU_KERNEL(prim_radix_histogram)(GPU_KERNEL_PARAMS(PrimParams, P)
-    GPU_BUFFER(const uint, keys, 1)
-    GPU_BUFFER(uint, hist, 2)
-    GPU_TID_FULL)
+GPU_KERNEL(prim_radix_histogram, GPU_TID_FULL)(GPU_KERNEL_PARAMS(PrimParams, P),
+    GPU_BUFFER(const uint, keys),
+    GPU_BUFFER(uint, hist))
 {
     uint gid = GPU_GLOBAL_ID_X;
     uint lid = GPU_LOCAL_ID;
@@ -144,11 +139,10 @@ GPU_KERNEL(prim_radix_histogram)(GPU_KERNEL_PARAMS(PrimParams, P)
         hist[lid * P.numBlocks + GPU_GROUP_ID] = gpu_atomic_load(&local[lid]);
 }
 
-GPU_KERNEL(prim_radix_scatter)(GPU_KERNEL_PARAMS(PrimParams, P)
-    GPU_BUFFER(const uint, keysIn, 1)
-    GPU_BUFFER(uint, keysOut, 2)
-    GPU_BUFFER(const uint, histScanned, 3)
-    GPU_TID_FULL)
+GPU_KERNEL(prim_radix_scatter, GPU_TID_FULL)(GPU_KERNEL_PARAMS(PrimParams, P),
+    GPU_BUFFER(const uint, keysIn),
+    GPU_BUFFER(uint, keysOut),
+    GPU_BUFFER(const uint, histScanned))
 {
     uint gid = GPU_GLOBAL_ID_X;
     uint lid = GPU_LOCAL_ID;
@@ -196,11 +190,10 @@ GPU_FN inline uint prim_queue_alloc(GPU_DEVICE gpu_atomic_uint* counter)
 // GPU_PRIMITIVES_HELPERS_ONLY before including this header.
 #ifndef GPU_PRIMITIVES_HELPERS_ONLY
 // Test kernel: threads whose value is odd enqueue it.
-GPU_KERNEL(prim_queue_push_test)(GPU_KERNEL_PARAMS(PrimParams, P)
-    GPU_BUFFER(const uint, in, 1)
-    GPU_BUFFER(gpu_atomic_uint, count, 2)
-    GPU_BUFFER(uint, outItems, 3)
-    GPU_TID_1D)
+GPU_KERNEL(prim_queue_push_test, GPU_TID_1D)(GPU_KERNEL_PARAMS(PrimParams, P),
+    GPU_BUFFER(const uint, in),
+    GPU_BUFFER(gpu_atomic_uint, count),
+    GPU_BUFFER(uint, outItems))
 {
     uint gid = GPU_GLOBAL_ID_X;
     if (gid >= P.n)
