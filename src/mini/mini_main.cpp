@@ -1,22 +1,25 @@
 // FluoraMini: Cornell-box vertical slice on the Metal RHI backend (M1 in
 // docs/metal-rhi-design.md). Loads a Fluora .txt scene subset, path-traces it
-// via rhi:: with a live preview window (one frame per iteration, frozen at the
-// last frame until closed), and writes a PNG.
+// via rhi:: with a live preview window, and writes a PNG. The preview is
+// interactive: an ImGui overlay (src/core/gui) shows render stats, a fly
+// camera (WASD / drag / wheel) re-renders on move, and a dropdown hot-swaps
+// scenes from the same directory. Headless mode (--no-preview) keeps the plain
+// accumulate-N-samples loop and stays bitwise-identical to the reference PNGs.
 #include <algorithm>
-#include <chrono>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include <stb_image_write.h>
 
 #include <glm/glm.hpp>
 
+#include "../core/gui/gui.h"
 #include "../core/host_math.h"
 #include "../core/image_loader.h"
 #include "../core/scene_loader.h"
@@ -39,21 +42,268 @@ std::string readTextFile(const std::string& path)
     return ss.str();
 }
 
+// All GPU resources that depend on the loaded scene: materials, analytic
+// objects, the BVH/mesh buffers behind the ray-tracing seam, per-material
+// textures, the environment map, and the spectral tables. Session-invariant
+// resources (accumulation buffer, wavefront queues, present target, pipelines)
+// live in main() and survive a scene swap. Rebuilt wholesale on scene switch;
+// the old one's buffers free when this is reassigned (after a waitIdle()).
+struct SceneGpu {
+    std::unique_ptr<rhi::Buffer> matBuf, objBuf, normalBuf, uvBuf, spdBuf, r2sBuf;
+    std::unique_ptr<rhi::RayIntersector> intersector;
+    std::array<rhi::Buffer*, 3> rt{ nullptr, nullptr, nullptr };
+    std::vector<std::unique_ptr<rhi::Texture>> matTextures;
+    std::unique_ptr<rhi::Texture> envTex;
+    uint32_t envMapIdx = MINI_ENV_NONE;
+
+    // Derived params fields.
+    unsigned numObjects = 0;
+    unsigned bvhNumNodes = 0;
+    int maxDepth = 8;
+    float fovyDeg = 45.0f;
+    size_t numTris = 0;
+
+    // Camera defaults straight from the scene file.
+    glm::vec3 eye{ 0, 0, 0 }, lookAt{ 0, 0, -1 }, up{ 0, 1, 0 };
+    std::string outputName = "mini";
+};
+
+// CoreScene -> device PODs + GPU uploads. Spectra are rebuilt per scene because
+// materials reference named eta/k spectra by offset into this table.
+SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
+{
+    SceneGpu sg;
+    sg.numObjects = (unsigned)scene.objects.size();
+    sg.maxDepth = scene.camera.maxDepth;
+    sg.fovyDeg = scene.camera.fovyDeg;
+    sg.numTris = scene.tris.size();
+    sg.eye = scene.camera.eye;
+    sg.lookAt = scene.camera.lookAt;
+    sg.up = scene.camera.up;
+    sg.outputName = scene.camera.outputName;
+
+    SpectralTables spectra;
+    auto resolveSpd = [&](const std::string& name) {
+        if (name.empty())
+            return (uint32_t)SPD_NONE;
+        uint32_t off = spectra.namedOffset(name);
+        if (off == SPD_NONE)
+            std::cout << "mini: unknown named spectrum '" << name
+                      << "', falling back to RGB parameters\n";
+        return off;
+    };
+
+    // Base-color textures first, so material texIdx can be remapped to real heap
+    // indices (the heap grows across scene loads; per-scene 0-based indices no
+    // longer equal heap slots after the first load). A 1x1 white fallback keeps
+    // the mapping dense when a file fails to load.
+    std::vector<uint32_t> texHeap;  // per scene.texturePaths entry -> heap index
+    texHeap.reserve(scene.texturePaths.size());
+    for (const auto& texPath : scene.texturePaths) {
+        LdrImage img;
+        if (!loadLdrImage(texPath, img)) {
+            std::cout << "mini: failed to load texture " << texPath << ", using white\n";
+            img.width = img.height = 1;
+            img.rgba = { 255, 255, 255, 255 };
+        }
+        auto tex = device.createTexture(
+            { img.width, img.height, rhi::TextureFormat::RGBA8Unorm, true, /*srgb=*/true,
+              "basecolor" });
+        tex->upload(img.rgba.data(), img.rgba.size());
+        texHeap.push_back((uint32_t)tex->shaderHandle());
+        sg.matTextures.push_back(std::move(tex));
+    }
+    if (!scene.texturePaths.empty())
+        std::cout << "mini: " << scene.texturePaths.size() << " material textures\n";
+
+    std::vector<MiniMaterial> materials;
+    materials.reserve(scene.materials.size());
+    for (const auto& m : scene.materials) {
+        MiniMaterial mm = {};
+        switch (m.type) {
+        case CoreMaterialType::Diffuse: mm.type = MINI_MAT_DIFFUSE; break;
+        case CoreMaterialType::Emissive: mm.type = MINI_MAT_EMITTING; break;
+        case CoreMaterialType::Dielectric: mm.type = MINI_MAT_GLASS; break;
+        case CoreMaterialType::Conductor: mm.type = MINI_MAT_CONDUCTOR; break;
+        }
+        mm.rgb = hostStore3(m.rgb);
+        mm.emittance = m.emittance;
+        mm.ior = m.ior;
+        mm.roughness = m.roughness;
+        mm.texIdx = m.texIdx == kCoreTexNone ? MINI_TEX_NONE : texHeap[m.texIdx];
+        mm.etaSpd = resolveSpd(m.etaNamed);
+        mm.kSpd = resolveSpd(m.kNamed);
+        // Conductor Fresnel needs eta AND k; with only one, use reflectance
+        // mode (both SPD_NONE).
+        if (mm.type == MINI_MAT_CONDUCTOR && (mm.etaSpd == SPD_NONE || mm.kSpd == SPD_NONE))
+            mm.etaSpd = mm.kSpd = SPD_NONE;
+        materials.push_back(mm);
+    }
+    std::vector<MiniObject> objects;
+    objects.reserve(scene.objects.size());
+    for (const auto& o : scene.objects) {
+        MiniObject mo = {};
+        mo.geomType = o.geomType == CORE_GEOM_SPHERE ? MINI_GEOM_SPHERE : MINI_GEOM_CUBE;
+        mo.materialId = o.materialId;
+        mo.transform = o.transform;
+        mo.invTransform = o.invTransform;
+        mo.invTranspose = o.invTranspose;
+        objects.push_back(mo);
+    }
+
+    sg.matBuf = device.createBuffer(
+        { std::max<size_t>(materials.size(), 1) * sizeof(MiniMaterial),
+          rhi::MemoryLocation::Shared, "materials" });
+    std::memcpy(sg.matBuf->hostPtr(), materials.data(), materials.size() * sizeof(MiniMaterial));
+    sg.objBuf = device.createBuffer(
+        { std::max<size_t>(objects.size(), 1) * sizeof(MiniObject),
+          rhi::MemoryLocation::Shared, "objects" });
+    std::memcpy(sg.objBuf->hostPtr(), objects.data(), objects.size() * sizeof(MiniObject));
+
+    // Mesh geometry behind the ray-tracing seam: the CPU-built BVH is handed to
+    // the RayIntersector, whose buffers we slot-bind for rt_closest_hit.
+    sg.intersector = device.createIntersector();
+    rhi::AccelBuildInput accel;
+    accel.nodes = scene.bvh.nodes.data();
+    accel.nodeBytes = scene.bvh.nodes.size() * sizeof(RtBvhNode);
+    accel.numNodesPerDir = scene.bvh.numNodesPerDir;
+    accel.triangles = scene.tris.data();
+    accel.triangleBytes = scene.tris.size() * sizeof(gpu_uint4);
+    accel.positions = scene.positions.data();
+    accel.positionBytes = scene.positions.size() * sizeof(gpu_storage3);
+    sg.intersector->build(accel);
+    sg.rt = sg.intersector->bindings();  // {nodes, tris, positions}
+    sg.bvhNumNodes = sg.intersector->numNodes();
+
+    // Mesh vertex attributes (unified indices with positions); dummy-sized when
+    // the scene has no meshes (Metal rejects zero-length buffers).
+    auto makeUpload = [&](const void* data, size_t bytes, const char* name) {
+        auto buf = device.createBuffer(
+            { std::max<size_t>(bytes, 16), rhi::MemoryLocation::Shared, name });
+        if (data && bytes)
+            std::memcpy(buf->hostPtr(), data, bytes);
+        return buf;
+    };
+    sg.normalBuf = makeUpload(scene.normals.data(),
+                              scene.normals.size() * sizeof(gpu_storage3), "normals");
+    sg.uvBuf = makeUpload(scene.uvs.data(), scene.uvs.size() * sizeof(gpu_float2), "uvs");
+
+    // Environment map: an RGBA32F texture in the bindless heap; kernels get the
+    // heap index through params (invariant I-1: index, not handle).
+    if (!scene.envMapPath.empty()) {
+        HdrImage envImg;
+        if (loadHdrImage(scene.envMapPath, envImg)) {
+            sg.envTex = device.createTexture(
+                { envImg.width, envImg.height, rhi::TextureFormat::RGBA32Float, true, false,
+                  "envmap" });
+            sg.envTex->upload(envImg.rgba.data(), envImg.rgba.size() * sizeof(float));
+            sg.envMapIdx = (uint32_t)sg.envTex->shaderHandle();
+            std::cout << "mini: environment map " << scene.envMapPath << " (" << envImg.width
+                      << "x" << envImg.height << ")\n";
+        } else {
+            std::cout << "mini: failed to load environment map " << scene.envMapPath
+                      << ", using black\n";
+        }
+    }
+
+    // Spectral tables (invariant I-1: kernels get offsets, not pointers): the
+    // dense-spectra buffer (CIE curves, D65, named eta/k) and the sRGB rgb2spec
+    // coefficient table (zNodes then coeffs).
+    sg.spdBuf = device.createBuffer(
+        { spectra.buffer().size() * sizeof(float), rhi::MemoryLocation::Shared, "spd" });
+    std::memcpy(sg.spdBuf->hostPtr(), spectra.buffer().data(),
+                spectra.buffer().size() * sizeof(float));
+    Rgb2SpecView r2sView = rgb2specSrgb();
+    sg.r2sBuf = device.createBuffer(
+        { (r2sView.zNodeCount + r2sView.coeffCount) * sizeof(float), rhi::MemoryLocation::Shared,
+          "rgb2spec" });
+    std::memcpy(sg.r2sBuf->hostPtr(), r2sView.zNodes, r2sView.zNodeCount * sizeof(float));
+    std::memcpy((float*)sg.r2sBuf->hostPtr() + r2sView.zNodeCount, r2sView.coeffs,
+                r2sView.coeffCount * sizeof(float));
+    return sg;
+}
+
+// Camera basis exactly as scene.cpp builds it (quirks included: camRight =
+// cross(view, up), camUp used raw). Headless renders use this so their PNGs
+// stay bitwise-identical to the references.
+void setCameraExact(MiniParams& p, const glm::vec3& eye, const glm::vec3& lookAt,
+                    const glm::vec3& up)
+{
+    glm::vec3 view = glm::normalize(lookAt - eye);
+    p.camPos = hostStore3(eye);
+    p.camView = hostStore3(view);
+    p.camUp = hostStore3(up);
+    p.camRight = hostStore3(glm::normalize(glm::cross(view, up)));
+}
+
+// Camera basis from the interactive fly camera: a proper orthonormal frame.
+// Matches setCameraExact for the horizontal-view default scenes (pitch 0 ->
+// up == world up), so entering the preview does not jump the framing.
+void setCameraFly(MiniParams& p, const gui::FlyCamera& cam)
+{
+    p.camPos = hostStore3(cam.eye);
+    p.camView = hostStore3(cam.forward());
+    p.camRight = hostStore3(cam.right());
+    p.camUp = hostStore3(cam.up());
+}
+
+// pixelLength quirk replicated from scene.cpp: tan(fovy in degrees->radians)
+// un-halved, so FOVY behaves as a half-angle.
+void setFilmParams(MiniParams& p, const glm::mat3& filmM, int width, int height, float fovyDeg)
+{
+    // Row i of the film matrix = (M[0][i], M[1][i], M[2][i]) (glm is
+    // column-major); kernels apply rgb = (dot(r0,xyz), ...).
+    p.filmR0 = hostStore3(glm::vec3(filmM[0][0], filmM[1][0], filmM[2][0]));
+    p.filmR1 = hostStore3(glm::vec3(filmM[0][1], filmM[1][1], filmM[2][1]));
+    p.filmR2 = hostStore3(glm::vec3(filmM[0][2], filmM[1][2], filmM[2][2]));
+    float yscaled = std::tan(fovyDeg * 3.14159265358979323846f / 180.0f);
+    float xscaled = yscaled * width / (float)height;
+    p.pixelLenX = 2.0f * xscaled / (float)width;
+    p.pixelLenY = 2.0f * yscaled / (float)height;
+    p.width = width;
+    p.height = height;
+}
+
+// ACES-tonemap the accumulator (divided by the sample count) into an sRGB PNG,
+// mirrored to match saveImage() in main.cpp so images compare with img/ refs.
+bool savePng(const std::string& name, const float* acc, int width, int height, int samples)
+{
+    std::vector<unsigned char> pixels((size_t)width * height * 3);
+    // Divide (don't multiply by a reciprocal): 1/N isn't exact and the ULP
+    // drift flips quantization-boundary bytes vs the img/ reference convention.
+    float div = samples > 0 ? (float)samples : 1.0f;  // 0-sample accum is all zeros
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            size_t src = (size_t)y * width + x;
+            size_t dst = (size_t)y * width + (width - 1 - x);
+            gpu_float3 v = tonemap_aces(
+                gpu_float3(acc[src * 4 + 0], acc[src * 4 + 1], acc[src * 4 + 2]) / div);
+            for (int ch = 0; ch < 3; ch++)
+                pixels[dst * 3 + ch] = (unsigned char)(v[ch] * 255.0f + 0.5f);
+        }
+    }
+    return stbi_write_png(name.c_str(), width, height, 3, pixels.data(), width * 3) != 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
 {
-    if (argc < 2) {
-        std::cout << "usage: FluoraMini <scene.txt> [--spp N] [--out name.png]"
-                     " [--mode wavefront|mega] [--no-preview]\n";
-        return 1;
-    }
-    std::string scenePath = argv[1];
+    // With no scene argument, open the Cornell box from the source tree so the
+    // app launches standalone (the compile-time path works from any cwd).
+#ifdef FLUORA_SCENES_DIR
+    std::string defaultScene = std::string(FLUORA_SCENES_DIR) + "/cornell-sphere.txt";
+#else
+    std::string defaultScene = "scenes/cornell-sphere.txt";
+#endif
+    // A lone flag (e.g. "--no-preview") is not a scene path.
+    bool haveScene = argc >= 2 && argv[1][0] != '-';
+    std::string scenePath = haveScene ? argv[1] : defaultScene;
     int sppOverride = -1;
     std::string outOverride;
     std::string mode = "wavefront";
     bool preview = true;
-    for (int i = 2; i < argc; i++) {
+    for (int i = haveScene ? 2 : 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "--spp" && i + 1 < argc)
             sppOverride = std::atoi(argv[++i]);
@@ -75,66 +325,23 @@ int main(int argc, char** argv)
         std::cerr << "scene load failed: " << err << "\n";
         return 1;
     }
+    // Window/accumulation size is fixed for the session (present-target resize
+    // is unsupported); swapped-in scenes render at this resolution.
     const int width = scene.camera.width;
     const int height = scene.camera.height;
     const int spp = sppOverride > 0 ? sppOverride : scene.camera.iterations;
     std::cout << "mini: " << scene.objects.size() << " objects, " << scene.materials.size()
-              << " materials, " << width << "x" << height << ", " << spp << " spp, "
-              << mode << " mode\n";
+              << " materials, " << width << "x" << height << ", " << spp << " spp, " << mode
+              << " mode\n";
 
-    // CoreScene -> device PODs, resolving named spectra to dense-table
-    // offsets (the CoreMaterial carries the names; SpectralTables densifies
-    // on demand). This mapping is the mini scaffolding now; it dissolves as
-    // real materials port to src/core.
-    SpectralTables spectra;
-    auto resolveSpd = [&](const std::string& name) {
-        if (name.empty())
-            return (uint32_t)SPD_NONE;
-        uint32_t off = spectra.namedOffset(name);
-        if (off == SPD_NONE)
-            std::cout << "mini: unknown named spectrum '" << name
-                      << "', falling back to RGB parameters\n";
-        return off;
-    };
-    std::vector<MiniMaterial> materials;
-    materials.reserve(scene.materials.size());
-    for (const auto& m : scene.materials) {
-        MiniMaterial mm = {};
-        switch (m.type) {
-        case CoreMaterialType::Diffuse: mm.type = MINI_MAT_DIFFUSE; break;
-        case CoreMaterialType::Emissive: mm.type = MINI_MAT_EMITTING; break;
-        case CoreMaterialType::Dielectric: mm.type = MINI_MAT_GLASS; break;
-        case CoreMaterialType::Conductor: mm.type = MINI_MAT_CONDUCTOR; break;
-        }
-        mm.rgb = hostStore3(m.rgb);
-        mm.emittance = m.emittance;
-        mm.ior = m.ior;
-        mm.roughness = m.roughness;
-        mm.texIdx = m.texIdx == kCoreTexNone ? MINI_TEX_NONE : m.texIdx;
-        mm.etaSpd = resolveSpd(m.etaNamed);
-        mm.kSpd = resolveSpd(m.kNamed);
-        // Conductor Fresnel needs eta AND k; with only one, use reflectance
-        // mode (both SPD_NONE).
-        if (mm.type == MINI_MAT_CONDUCTOR && (mm.etaSpd == SPD_NONE || mm.kSpd == SPD_NONE))
-            mm.etaSpd = mm.kSpd = SPD_NONE;
-        materials.push_back(mm);
-    }
-    std::vector<MiniObject> objects;
-    objects.reserve(scene.objects.size());
-    for (const auto& o : scene.objects) {
-        MiniObject mo = {};
-        mo.geomType = o.geomType == CORE_GEOM_SPHERE ? MINI_GEOM_SPHERE : MINI_GEOM_CUBE;
-        mo.materialId = o.materialId;
-        mo.transform = o.transform;
-        mo.invTransform = o.invTransform;
-        mo.invTranspose = o.invTranspose;
-        objects.push_back(mo);
-    }
+    // Sibling .txt scenes populate the preview's dropdown (sorted by name).
+    std::vector<std::string> scenePaths, sceneNames;
+    int selectedScene = 0;
+    gui::scanSceneDirectory(scenePath, sceneNames, scenePaths, selectedScene);
 
     try {
-        // Runtime MSL compile: shared structs + RHI primitives (the wavefront
-        // kernels use prim_queue_alloc) + renderer kernels, concatenated
-        // (see DeviceDesc::shaderSource in rhi.h).
+        // Runtime MSL compile: shared structs + RHI primitives + renderer kernels,
+        // concatenated (see DeviceDesc::shaderSource in rhi.h).
         rhi::DeviceDesc deviceDesc;
         deviceDesc.shaderSource = readTextFile(std::string(RHI_SHADER_DIR) + "/gpu_portable.h")
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/spectrum_shared.h")
@@ -150,142 +357,25 @@ int main(int argc, char** argv)
                                 + "\n" + readTextFile(std::string(MINI_SHADER_DIR) + "/pathtrace_gpu.h");
         auto device = rhi::createDevice(rhi::BackendKind::Metal, deviceDesc);
         auto stream = device->createStream();
-        auto pipeline = device->createPipeline({ "pathtraceKernel" });
+        auto megaPipe = device->createPipeline({ "pathtraceKernel" });
 
+        // Session-invariant accumulation buffer (survives scene swaps).
         const size_t accumBytes = (size_t)width * height * 4 * sizeof(float);
         auto accum = device->createBuffer({ accumBytes, rhi::MemoryLocation::Shared, "accum" });
-        std::memset(accum->hostPtr(), 0, accumBytes);
+        auto zeroAccum = [&] { std::memset(accum->hostPtr(), 0, accumBytes); };
+        zeroAccum();
 
-        auto matBuf = device->createBuffer(
-            { std::max<size_t>(materials.size(), 1) * sizeof(MiniMaterial),
-              rhi::MemoryLocation::Shared, "materials" });
-        std::memcpy(matBuf->hostPtr(), materials.data(),
-                    materials.size() * sizeof(MiniMaterial));
-        auto objBuf = device->createBuffer(
-            { std::max<size_t>(objects.size(), 1) * sizeof(MiniObject),
-              rhi::MemoryLocation::Shared, "objects" });
-        std::memcpy(objBuf->hostPtr(), objects.data(),
-                    objects.size() * sizeof(MiniObject));
-
-        // Mesh geometry lives behind the ray-tracing seam: the CPU-built BVH
-        // (core/bvh_builder) is handed to the RayIntersector, whose buffers we
-        // slot-bind for rt_closest_hit.
-        auto intersector = device->createIntersector();
-        rhi::AccelBuildInput accel;
-        accel.nodes = scene.bvh.nodes.data();
-        accel.nodeBytes = scene.bvh.nodes.size() * sizeof(RtBvhNode);
-        accel.numNodesPerDir = scene.bvh.numNodesPerDir;
-        accel.triangles = scene.tris.data();
-        accel.triangleBytes = scene.tris.size() * sizeof(gpu_uint4);
-        accel.positions = scene.positions.data();
-        accel.positionBytes = scene.positions.size() * sizeof(gpu_storage3);
-        intersector->build(accel);
-        auto rt = intersector->bindings();  // {nodes, tris, positions}
-
-        // Mesh vertex attributes (unified indices with positions); dummy-sized
-        // when the scene has no meshes (Metal rejects zero-length buffers).
-        auto makeUpload = [&](const void* data, size_t bytes, const char* name) {
-            auto buf = device->createBuffer(
-                { std::max<size_t>(bytes, 16), rhi::MemoryLocation::Shared, name });
-            if (data && bytes)
-                std::memcpy(buf->hostPtr(), data, bytes);
-            return buf;
-        };
-        auto normalBuf = makeUpload(scene.normals.data(),
-                                    scene.normals.size() * sizeof(gpu_storage3), "normals");
-        auto uvBuf = makeUpload(scene.uvs.data(),
-                                scene.uvs.size() * sizeof(gpu_float2), "uvs");
-
-        // Base-color textures first, in texturePaths order, so heap indices
-        // match MiniMaterial.texIdx (invariant I-1: index, not handle). A 1x1
-        // white fallback keeps indices aligned when a file fails to load.
-        std::vector<std::unique_ptr<rhi::Texture>> matTextures;
-        for (const auto& texPath : scene.texturePaths) {
-            LdrImage img;
-            if (!loadLdrImage(texPath, img)) {
-                std::cout << "mini: failed to load texture " << texPath << ", using white\n";
-                img.width = img.height = 1;
-                img.rgba = { 255, 255, 255, 255 };
-            }
-            auto tex = device->createTexture(
-                { img.width, img.height, rhi::TextureFormat::RGBA8Unorm,
-                  true, /*srgb=*/true, "basecolor" });
-            tex->upload(img.rgba.data(), img.rgba.size());
-            matTextures.push_back(std::move(tex));
-        }
-        if (!scene.texturePaths.empty())
-            std::cout << "mini: " << scene.texturePaths.size() << " material textures\n";
-
-        // Environment map: an RGBA32F texture in the bindless heap; kernels
-        // get the heap index through params (invariant I-1: index, not handle).
-        uint32_t envMapIdx = MINI_ENV_NONE;
-        std::unique_ptr<rhi::Texture> envTex;
-        if (!scene.envMapPath.empty()) {
-            HdrImage envImg;
-            if (loadHdrImage(scene.envMapPath, envImg)) {
-                envTex = device->createTexture(
-                    { envImg.width, envImg.height, rhi::TextureFormat::RGBA32Float,
-                      true, false, "envmap" });
-                envTex->upload(envImg.rgba.data(), envImg.rgba.size() * sizeof(float));
-                envMapIdx = (uint32_t)envTex->shaderHandle();
-                std::cout << "mini: environment map " << scene.envMapPath << " ("
-                          << envImg.width << "x" << envImg.height << ")\n";
-            } else {
-                std::cout << "mini: failed to load environment map "
-                          << scene.envMapPath << ", using black\n";
-            }
-        }
+        // First scene upload.
+        SceneGpu sg = buildSceneGpu(*device, scene);
         rhi::Buffer* texHeap = &device->textureHeap();
-
-        // Spectral tables (invariant I-1: kernels get offsets, not pointers):
-        // the dense-spectra buffer (CIE curves, D65, named eta/k) and the sRGB
-        // rgb2spec coefficient table (zNodes then coeffs).
-        auto spdBuf = device->createBuffer(
-            { spectra.buffer().size() * sizeof(float), rhi::MemoryLocation::Shared, "spd" });
-        std::memcpy(spdBuf->hostPtr(), spectra.buffer().data(),
-                    spectra.buffer().size() * sizeof(float));
-        Rgb2SpecView r2sView = rgb2specSrgb();
-        auto r2sBuf = device->createBuffer(
-            { (r2sView.zNodeCount + r2sView.coeffCount) * sizeof(float),
-              rhi::MemoryLocation::Shared, "rgb2spec" });
-        std::memcpy(r2sBuf->hostPtr(), r2sView.zNodes, r2sView.zNodeCount * sizeof(float));
-        std::memcpy((float*)r2sBuf->hostPtr() + r2sView.zNodeCount, r2sView.coeffs,
-                    r2sView.coeffCount * sizeof(float));
-
-        glm::mat3 filmM = srgbRgbFromXyz();
-
-        // Camera setup replicating scene.cpp exactly, quirks included: pixelLength
-        // uses tan(fovy in degrees->radians) un-halved, and the UP vector is used
-        // as given rather than re-orthogonalized.
-        MiniParams params = {};
-        glm::vec3 camView = glm::normalize(scene.camera.lookAt - scene.camera.eye);
-        params.camPos = hostStore3(scene.camera.eye);
-        params.camView = hostStore3(camView);
-        params.camUp = hostStore3(scene.camera.up);
-        params.camRight = hostStore3(glm::normalize(glm::cross(camView, scene.camera.up)));
-        // Row i of the film matrix = (M[0][i], M[1][i], M[2][i]) (glm is
-        // column-major); kernels apply rgb = (dot(r0,xyz), ...).
-        params.filmR0 = hostStore3(glm::vec3(filmM[0][0], filmM[1][0], filmM[2][0]));
-        params.filmR1 = hostStore3(glm::vec3(filmM[0][1], filmM[1][1], filmM[2][1]));
-        params.filmR2 = hostStore3(glm::vec3(filmM[0][2], filmM[1][2], filmM[2][2]));
-        float yscaled = std::tan(scene.camera.fovyDeg * 3.14159265358979323846f / 180.0f);
-        float xscaled = yscaled * width / (float)height;
-        params.pixelLenX = 2.0f * xscaled / (float)width;
-        params.pixelLenY = 2.0f * yscaled / (float)height;
-        params.width = width;
-        params.height = height;
-        params.maxDepth = scene.camera.maxDepth;
-        params.numObjects = (unsigned)objects.size();
-        params.bvhNumNodes = intersector->numNodes();
-        params.envMapIdx = envMapIdx;
 
         const rhi::Dim3 grid{ (unsigned)(width + 15) / 16, (unsigned)(height + 15) / 16, 1 };
         const rhi::Dim3 block{ 16, 16, 1 };
 
         // Wavefront-mode resources: ping-pong ray queues + one shade queue per
-        // material type (GPU only, host never reads paths), queue counters,
-        // indirect-args slots. Shade pipelines are one kernel specialized per
-        // material type via rhi::SpecConstant.
+        // material type, queue counters, indirect-args slots (all session-fixed,
+        // width*height sized). Shade pipelines specialize one kernel per material
+        // type via rhi::SpecConstant.
         std::unique_ptr<rhi::Buffer> raysA, raysB, counts, indirectArgs;
         std::unique_ptr<rhi::Buffer> qDiffuse, qConductor, qGlass;
         std::unique_ptr<rhi::ComputePipeline> raygenPipe, prepIntersectPipe, prepShadePipe,
@@ -310,142 +400,208 @@ int main(int argc, char** argv)
         const rhi::Dim3 one{ 1, 1, 1 };
         const rhi::Dim3 tile{ PRIM_TILE, 1, 1 };
 
-        // Preview: a tonemap dispatch writes the running average into the RHI
-        // present target, then present() blits it to the window. Rate-limited
-        // to ~60 Hz so fast scenes are not throttled by the drawable pool;
-        // slow scenes present every iteration.
-        rhi::Buffer* presentBuf = nullptr;
-        std::unique_ptr<rhi::ComputePipeline> tonemapPipe;
-        if (preview) {
-            presentBuf = &device->presentTarget(width, height);
-            tonemapPipe = device->createPipeline({ "present_tonemap" });
-        }
-        using clock = std::chrono::steady_clock;
-        auto lastPresent = clock::now() - std::chrono::seconds(1);
-        bool closed = false;
-        int completed = 0;
-
-        for (int i = 0; i < spp; i++) {
-            params.iter = (unsigned)i;
+        // Renders one accumulation sample with the given params (mega single
+        // kernel, or the wavefront raygen->intersect->shade bounce loop). Reads
+        // the current SceneGpu by reference, so a scene swap is transparent.
+        auto dispatchSample = [&](const MiniParams& p) {
             if (mode == "mega") {
-                stream->dispatch(*pipeline, grid, block, &params, sizeof(params),
-                                 { accum.get(), matBuf.get(), objBuf.get(),
-                                   rt[0], rt[1], rt[2], texHeap,
-                                   normalBuf.get(), uvBuf.get(),
-                                   spdBuf.get(), r2sBuf.get() });
-            } else {
-                stream->dispatch(*raygenPipe, grid, block, &params, sizeof(params),
-                                 { raysA.get(), counts.get() });
-                unsigned cur = WF_COUNT_RAY_A;
-                for (unsigned d = 0; d < params.maxDepth; d++) {
-                    unsigned next = (cur == WF_COUNT_RAY_A) ? WF_COUNT_RAY_B : WF_COUNT_RAY_A;
-                    rhi::Buffer* raysCur = (cur == WF_COUNT_RAY_A) ? raysA.get() : raysB.get();
-                    rhi::Buffer* raysNext = (cur == WF_COUNT_RAY_A) ? raysB.get() : raysA.get();
-
-                    WfCtl c = {};
-                    c.numObjects = params.numObjects;
-                    c.maxDepth = params.maxDepth;
-                    c.bvhNumNodes = params.bvhNumNodes;
-                    c.envMapIdx = envMapIdx;
-                    c.filmR0 = params.filmR0;
-                    c.filmR1 = params.filmR1;
-                    c.filmR2 = params.filmR2;
-                    c.srcCounter = cur;
-                    c.zeroCounter = next;
-
-                    stream->dispatch(*prepIntersectPipe, one, one, &c, sizeof(c),
-                                     { counts.get(), indirectArgs.get() });
-                    stream->dispatchIndirect(*intersectPipe, tile, *indirectArgs,
-                                             WF_ARG_INTERSECT * 16, &c, sizeof(c),
-                                             { counts.get(), raysCur, objBuf.get(),
-                                               rt[0], rt[1], rt[2], matBuf.get(), accum.get(),
-                                               qDiffuse.get(), qConductor.get(), qGlass.get(),
-                                               texHeap, normalBuf.get(), uvBuf.get(),
-                                               spdBuf.get(), r2sBuf.get() });
-                    stream->dispatch(*prepShadePipe, one, one, &c, sizeof(c),
-                                     { counts.get(), indirectArgs.get() });
-
-                    c.dstCounter = next;
-                    struct { rhi::ComputePipeline* pipe; rhi::Buffer* queue; unsigned counter; unsigned argSlot; }
-                    shadePasses[] = {
-                        { shadeDiffusePipe.get(), qDiffuse.get(), WF_COUNT_SHADE_DIFFUSE, WF_ARG_DIFFUSE },
-                        { shadeConductorPipe.get(), qConductor.get(), WF_COUNT_SHADE_CONDUCTOR, WF_ARG_CONDUCTOR },
-                        { shadeGlassPipe.get(), qGlass.get(), WF_COUNT_SHADE_GLASS, WF_ARG_GLASS },
-                    };
-                    for (const auto& pass : shadePasses) {
-                        c.srcCounter = pass.counter;
-                        stream->dispatchIndirect(*pass.pipe, tile, *indirectArgs,
-                                                 pass.argSlot * 16, &c, sizeof(c),
-                                                 { counts.get(), pass.queue, raysNext,
-                                                   matBuf.get(), texHeap,
-                                                   spdBuf.get(), r2sBuf.get() });
-                    }
-                    cur = next;
-                }
+                stream->dispatch(*megaPipe, grid, block, &p, sizeof(p),
+                                 { accum.get(), sg.matBuf.get(), sg.objBuf.get(),
+                                   sg.rt[0], sg.rt[1], sg.rt[2], texHeap,
+                                   sg.normalBuf.get(), sg.uvBuf.get(),
+                                   sg.spdBuf.get(), sg.r2sBuf.get() });
+                return;
             }
-            completed = i + 1;
-            if (preview) {
-                // Per-sample submit: the stream's bounded in-flight ring paces
-                // the CPU to GPU progress, so the wall clock below measures
-                // actual render progress rather than encode speed.
-                stream->submit();
-                auto now = clock::now();
-                if (completed == spp
-                    || now - lastPresent >= std::chrono::milliseconds(16)) {
-                    MiniParams tp = params;
-                    tp.iter = (unsigned)completed;
-                    stream->dispatch(*tonemapPipe, grid, block, &tp, sizeof(tp),
-                                     { accum.get(), presentBuf });
+            stream->dispatch(*raygenPipe, grid, block, &p, sizeof(p),
+                             { raysA.get(), counts.get() });
+            unsigned cur = WF_COUNT_RAY_A;
+            for (unsigned d = 0; d < p.maxDepth; d++) {
+                unsigned next = (cur == WF_COUNT_RAY_A) ? WF_COUNT_RAY_B : WF_COUNT_RAY_A;
+                rhi::Buffer* raysCur = (cur == WF_COUNT_RAY_A) ? raysA.get() : raysB.get();
+                rhi::Buffer* raysNext = (cur == WF_COUNT_RAY_A) ? raysB.get() : raysA.get();
+
+                WfCtl c = {};
+                c.numObjects = p.numObjects;
+                c.maxDepth = p.maxDepth;
+                c.bvhNumNodes = p.bvhNumNodes;
+                c.envMapIdx = p.envMapIdx;
+                c.filmR0 = p.filmR0;
+                c.filmR1 = p.filmR1;
+                c.filmR2 = p.filmR2;
+                c.srcCounter = cur;
+                c.zeroCounter = next;
+
+                stream->dispatch(*prepIntersectPipe, one, one, &c, sizeof(c),
+                                 { counts.get(), indirectArgs.get() });
+                stream->dispatchIndirect(*intersectPipe, tile, *indirectArgs,
+                                         WF_ARG_INTERSECT * 16, &c, sizeof(c),
+                                         { counts.get(), raysCur, sg.objBuf.get(),
+                                           sg.rt[0], sg.rt[1], sg.rt[2], sg.matBuf.get(), accum.get(),
+                                           qDiffuse.get(), qConductor.get(), qGlass.get(),
+                                           texHeap, sg.normalBuf.get(), sg.uvBuf.get(),
+                                           sg.spdBuf.get(), sg.r2sBuf.get() });
+                stream->dispatch(*prepShadePipe, one, one, &c, sizeof(c),
+                                 { counts.get(), indirectArgs.get() });
+
+                c.dstCounter = next;
+                struct { rhi::ComputePipeline* pipe; rhi::Buffer* queue; unsigned counter; unsigned argSlot; }
+                shadePasses[] = {
+                    { shadeDiffusePipe.get(), qDiffuse.get(), WF_COUNT_SHADE_DIFFUSE, WF_ARG_DIFFUSE },
+                    { shadeConductorPipe.get(), qConductor.get(), WF_COUNT_SHADE_CONDUCTOR, WF_ARG_CONDUCTOR },
+                    { shadeGlassPipe.get(), qGlass.get(), WF_COUNT_SHADE_GLASS, WF_ARG_GLASS },
+                };
+                for (const auto& pass : shadePasses) {
+                    c.srcCounter = pass.counter;
+                    stream->dispatchIndirect(*pass.pipe, tile, *indirectArgs,
+                                             pass.argSlot * 16, &c, sizeof(c),
+                                             { counts.get(), pass.queue, raysNext,
+                                               sg.matBuf.get(), texHeap,
+                                               sg.spdBuf.get(), sg.r2sBuf.get() });
+                }
+                cur = next;
+            }
+        };
+
+        const glm::mat3 filmM = srgbRgbFromXyz();
+
+        // Base params: film + scene fields. Camera is filled per branch below.
+        // One writer for every SceneGpu-derived param so the initial setup and
+        // scene hot-swap can't drift apart field-by-field.
+        MiniParams params = {};
+        auto applySceneParams = [&] {
+            setFilmParams(params, filmM, width, height, sg.fovyDeg);
+            params.maxDepth = sg.maxDepth;
+            params.numObjects = sg.numObjects;
+            params.bvhNumNodes = sg.bvhNumNodes;
+            params.envMapIdx = sg.envMapIdx;
+        };
+        applySceneParams();
+
+        // ------------------------------------------------------------------
+        // Headless: the original accumulate-N-samples loop, camera built with
+        // the exact scene.cpp basis so PNGs stay bitwise-identical.
+        // ------------------------------------------------------------------
+        if (!preview) {
+            setCameraExact(params, sg.eye, sg.lookAt, sg.up);
+            for (int i = 0; i < spp; i++) {
+                params.iter = (unsigned)i;
+                dispatchSample(params);
+                if ((i + 1) % 4 == 0)
                     stream->submit();
-                    lastPresent = now;
-                    if (!device->present()) {
-                        closed = true;
-                        break;
-                    }
-                }
-            } else if ((i + 1) % 4 == 0) {
-                stream->submit();
+                if (spp >= 10 && (i + 1) % (spp / 10) == 0)
+                    std::cout << "  " << (i + 1) << "/" << spp << " spp\r" << std::flush;
             }
-            if (spp >= 10 && (i + 1) % (spp / 10) == 0)
-                std::cout << "  " << (i + 1) << "/" << spp << " spp\r" << std::flush;
+            stream->waitIdle();
+            std::cout << "\n";
+            std::string outName = !outOverride.empty() ? outOverride : sg.outputName + "_metal.png";
+            if (!savePng(outName, (const float*)accum->hostPtr(), width, height, spp)) {
+                std::cerr << "failed to write " << outName << "\n";
+                return 1;
+            }
+            std::cout << "wrote " << outName << "\n";
+            return 0;
         }
-        stream->waitIdle();
-        std::cout << "\n";
-        if (closed)
-            std::cout << "preview closed at " << completed << "/" << spp
-                      << " spp, saving partial image\n";
 
-        const float* acc = (const float*)accum->hostPtr();
-        std::vector<unsigned char> pixels((size_t)width * height * 3);
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                // saveImage() in main.cpp writes setPixel(width-1-x, y): saved
-                // renders are mirrored relative to kernel indexing. Match it so
-                // images are comparable with img/ references.
-                size_t src = (size_t)y * width + x;
-                size_t dst = (size_t)y * width + (width - 1 - x);
-                gpu_float3 v = tonemap_aces(gpu_float3(
-                    acc[src * 4 + 0], acc[src * 4 + 1], acc[src * 4 + 2])
-                    / (float)completed);
-                for (int ch = 0; ch < 3; ch++)
-                    pixels[dst * 3 + ch] = (unsigned char)(v[ch] * 255.0f + 0.5f);
+        // ------------------------------------------------------------------
+        // Interactive preview: fly camera + ImGui overlay + scene hot-swap.
+        // ------------------------------------------------------------------
+        gui::FlyCamera cam = gui::FlyCamera::fromLookAt(sg.eye, sg.lookAt);
+        setCameraFly(params, cam);
+
+        gui::State ui;
+        ui.camera = &cam;
+        ui.sceneNames = sceneNames;
+        ui.selectedScene = selectedScene;
+        ui.stats.targetSpp = spp;
+        ui.stats.mode = mode;
+        auto applySceneStats = [&] {
+            ui.stats.numObjects = (int)sg.numObjects;
+            ui.stats.numTris = sg.numTris;
+            ui.stats.maxDepth = sg.maxDepth;
+        };
+        applySceneStats();
+        device->enableGui([&] { gui::draw(ui); });
+
+        rhi::Buffer* presentBuf = &device->presentTarget(width, height);
+        auto tonemapPipe = device->createPipeline({ "present_tonemap" });
+
+        auto outNameFor = [&] {
+            return !outOverride.empty() ? outOverride : sg.outputName + "_metal.png";
+        };
+
+        // Swap in a different scene: drain the GPU (old buffers are about to be
+        // freed), rebuild resources at the session resolution, reset the camera.
+        // Costs a BVH build + reupload (dropdown-speed, not live); the loop zeroes
+        // accumulation afterwards.
+        auto loadScene = [&](int idx) {
+            if (idx < 0 || idx >= (int)scenePaths.size())
+                return;
+            CoreScene next;
+            std::string e;
+            if (!loadTxtScene(scenePaths[idx], next, e)) {
+                std::cout << "mini: failed to load " << scenePaths[idx] << ": " << e << "\n";
+                return;
             }
-        }
-        std::string outName = !outOverride.empty() ? outOverride
-                                                   : scene.camera.outputName + "_metal.png";
-        if (!stbi_write_png(outName.c_str(), width, height, 3, pixels.data(), width * 3)) {
+            stream->waitIdle();
+            // Free the old scene before building the new one so its bindless
+            // texture slots return to the heap freelist and the new upload
+            // reuses them, instead of both scenes' textures being live at once
+            // (which would push the slot high-water toward the 1024 cap on
+            // repeated swaps). Safe after waitIdle(): no dispatch still reads it.
+            sg = {};
+            sg = buildSceneGpu(*device, next);
+            applySceneParams();
+            cam = gui::FlyCamera::fromLookAt(sg.eye, sg.lookAt);
+            setCameraFly(params, cam);
+            ui.selectedScene = idx;
+            applySceneStats();
+            std::cout << "mini: switched to " << sceneNames[idx] << "\n";
+        };
+
+        // Renderer-side hooks for the portable preview loop (gui::runPreview owns
+        // sample accounting, ~60 Hz pacing, and accumulation restart).
+        gui::PreviewHooks hooks;
+        hooks.renderSample = [&](int iter) {
+            params.iter = (unsigned)iter;
+            dispatchSample(params);
+            stream->submit();
+        };
+        hooks.presentFrame = [&](int samples) {
+            MiniParams tp = params;
+            tp.iter = (unsigned)samples;
+            stream->dispatch(*tonemapPipe, grid, block, &tp, sizeof(tp),
+                             { accum.get(), presentBuf });
+            stream->submit();
+            return device->present();
+        };
+        hooks.applyCamera = [&] { setCameraFly(params, cam); };
+        // PreviewHooks contract: anything touching accum host-side drains the
+        // stream first — renderSample leaves up to kMaxInFlight command buffers
+        // still writing accum, so a bare memset/read here would race the GPU.
+        hooks.zeroAccum = [&] {
+            stream->waitIdle();
+            zeroAccum();
+        };
+        hooks.loadScene = loadScene;
+        int previewExit = 0;
+        auto saveNow = [&](int samples) {
+            stream->waitIdle();
+            std::string outName = outNameFor();
+            if (savePng(outName, (const float*)accum->hostPtr(), width, height, samples)) {
+                std::cout << "wrote " << outName << " (" << samples << " spp)\n";
+                return true;
+            }
             std::cerr << "failed to write " << outName << "\n";
-            return 1;
-        }
-        std::cout << "wrote " << outName << "\n";
+            return false;
+        };
+        hooks.save = [&](int samples) { saveNow(samples); };
+        hooks.finish = [&](int samples) {
+            if (!saveNow(samples))
+                previewExit = 1;
+        };
 
-        // Freeze at the last frame: keep the window alive (present() re-blits
-        // the final image and pumps events) until the user closes it.
-        if (preview && !closed) {
-            std::cout << "preview: close the window (or press q / Esc) to exit\n";
-            while (device->present())
-                std::this_thread::sleep_for(std::chrono::milliseconds(16));
-        }
+        gui::runPreview(ui, spp, hooks);
+        return previewExit;
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;

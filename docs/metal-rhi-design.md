@@ -180,7 +180,29 @@ Unverified on CUDA until M4.
   freezes at the last frame until the window closes, and saves a partial image on
   early close.
   Preview is on by default; `--no-preview` keeps the headless path, which stays
-  bitwise identical to preview-mode output. ImGui and resize stay in M5.
+  bitwise identical to the pre-GUI renderer. (Since the ImGui overlay landed the
+  preview builds its camera basis from the fly camera — orthonormal, unlike the
+  scene.cpp quirk headless replicates — so preview matches headless framing only
+  for the default horizontal-view scenes.) Window resize stays in M5.
+- *Landed (pulled forward from M5):* interactive ImGui overlay GUI. `present()`
+  draws a Dear ImGui pass over the blit (render pass, `loadAction=Load`) when
+  `Device::enableGui(draw)` is set. Everything portable lives in `src/core/gui`
+  (shared with the future Windows preview): the overlay widgets, the fly camera
+  (WASD / drag-look / wheel-dolly, read from ImGui IO), the scene-directory scan,
+  and `runPreview` — the interactive-loop *policy* (sample accounting, ~60 Hz
+  present pacing, accumulation restart on camera-move / reset / scene-switch,
+  command dispatch), which drives renderer-specific work through a `PreviewHooks`
+  callback set so it never names a GPU type. Only the Metal renderer backend + a
+  small Cocoa→ImGui-IO event shim are in `rhi_metal.mm`, guarded by
+  `RHI_ENABLE_IMGUI` so the RHI test targets compile without ImGui; `src/mini`
+  keeps just the backend glue (buildSceneGpu, dispatch, param packing). The scene
+  dropdown hot-swaps any sibling `.txt` scene (drain GPU → rebuild the scene-tied
+  buffers at the fixed session resolution → reset camera + accum); the bindless
+  texture heap recycles slots on teardown so repeated swaps don't leak toward the
+  1024-slot cap. The interactive loop replaces the freeze-at-last-frame behavior
+  in preview mode; headless is untouched (bitwise-identical, verified). We vendor
+  only `imgui_impl_metal` (stable) and write the platform shim ourselves to avoid
+  `imgui_impl_osx` version drift against the pinned ImGui 1.89.
 - *Landed:* bindless textures + environment maps. `Device::textureHeap()` is a
   buffer of 64-bit entries indexed by `Texture::shaderHandle()` — `MTLResourceID`
   on Metal (read directly as `texture2d<float>`, Metal 3 bindless, backend keeps
@@ -269,8 +291,8 @@ onto the RHI (convert lights/media/spectra to handle pools, replace Thrust with 
 M2 queues/primitives); A/B queues vs compaction on CUDA; golden-image parity between
 backends and against pre-migration renders.
 
-**M5 — Metal-native features**: hardware RT path; preview upgrades (ImGui Metal
-backend, window resize — the basic window landed in M3); OIDN-on-Metal denoise.
+**M5 — Metal-native features**: hardware RT path; preview upgrades (window resize
+— the basic window landed in M3, the ImGui overlay in M3.x); OIDN-on-Metal denoise.
 
 ## 7. Build integration
 

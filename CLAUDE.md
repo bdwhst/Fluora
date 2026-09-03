@@ -26,13 +26,14 @@ Run with a scene file as the only argument: `Fluora.exe scenes/cornell-sphere.tx
 cmake -B build-mac -DCMAKE_BUILD_TYPE=Release
 cmake --build build-mac
 ./build-mac/bin/FluoraMini scenes/cornell-sphere.txt --spp 1000 --out out.png
+./build-mac/bin/FluoraMini      # no scene arg -> opens the Cornell box (scenes/cornell-sphere.txt)
 ./build-mac/bin/RhiTest        # RHI parallel-primitive tests — run after touching src/rhi/
 ./build-mac/bin/SharedHostTest # host-C++ vs MSL value parity for shared device code
 ```
 
 Device code is single-source (docs/portable-device-code.md): shared `_gpu.h`/`_shared.h` files compile under MSL, CUDA, and host C++ through `src/rhi/gpu_portable.h` (gpu_* types, GPU_KERNEL macros, wave shims). Never fork a shader per backend; raw `kernel void`/`__global__` in renderer device code is a review flag (backend-private and test scaffolding kernels are exempt).
 
-FluoraMini opens a live preview window by default (updates per iteration, freezes at the final frame until closed; q/Esc also close it). Pass `--no-preview` for headless/scripted renders — preview and headless output are bitwise identical, and the window shows the same orientation as the saved PNG.
+FluoraMini opens a live preview window by default with an interactive ImGui overlay: render stats, a fly camera (WASD move, E/C up-down, left-drag look, wheel dolly — accumulation restarts on move), and a dropdown that hot-swaps any sibling `.txt` scene. q/Esc or the close button save the current image and exit. The portable GUI widget/camera code lives in `src/core/gui` (backend-neutral, shared with the future Windows preview); the Metal backend wiring (ImGui Metal renderer + a Cocoa→ImGui-IO event shim) is in `src/rhi/rhi_metal.mm` behind `RHI_ENABLE_IMGUI`. Pass `--no-preview` for headless/scripted renders — headless output stays bitwise identical to the pre-GUI renderer (verified), and the window shows the same orientation as the saved PNG.
 
 Gotcha when comparing images: `saveImage()` (main.cpp) writes PNGs mirrored (`setPixel(width-1-x, y)`) relative to kernel pixel indexing; all `img/` references use that convention and FluoraMini matches it. Another replicated quirk: the camera's `pixelLength` uses `tan(fovy_degrees→radians)` un-halved (scene.cpp) — FOVY in scene files is effectively a half-angle.
 
