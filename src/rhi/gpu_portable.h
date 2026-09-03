@@ -6,7 +6,9 @@
 // Shaders in this codebase are written ONCE and compiled by three compilers:
 //   MSL      (__METAL_VERSION__)  — runtime-concatenated, this header first;
 //                                   #include lines below are inert under MSL.
-//   CUDA     (__CUDACC__)         — regular #include; execution verified in M4.
+//   CUDA     (__CUDACC__)         — regular #include; kernels registered per
+//                                   rhi_cuda.h (M4: RhiTest/SharedHostTest and
+//                                   every FluoraMini scene verified on CUDA).
 //   host C++ (anything else)      — SharedHostTest value-parity + CPU debugging.
 //
 // Three type roles, chosen by layout needs (invariant I-3):
@@ -160,11 +162,17 @@ typedef unsigned int gpu_atomic_uint;
 #define GPU_PARAMS_REF(T) const T&
 
 #if defined(__CUDACC__)
-// ---- CUDA personality (nvcc; kernels registered by rhi_cuda in M4) ----
+// ---- CUDA personality (nvcc; kernels registered through rhi_cuda.h) ----
 #define GPU_FN __device__
 struct alignas(16) gpu_storage3 { float x, y, z; };  // MSL float3 layout
 typedef glm::mat4 gpu_storage4x4;    // column-major 64B, matches MSL float4x4
-GPU_FN inline gpu_float3 gpu_load3(gpu_storage3 v) { return gpu_float3(v.x, v.y, v.z); }
+// One 16-byte vector load (alignas(16) makes the reinterpret valid) instead
+// of three scalar loads — the BVH inner loop reads bmin/bmax/positions this way.
+GPU_FN inline gpu_float3 gpu_load3(const gpu_storage3& v)
+{
+    float4 v4 = *reinterpret_cast<const float4*>(&v);
+    return gpu_float3(v4.x, v4.y, v4.z);
+}
 
 typedef ::uchar4 gpu_uchar4;
 GPU_FN inline gpu_uchar4 gpu_make_uchar4(uchar r, uchar g, uchar b, uchar a)
@@ -172,6 +180,11 @@ GPU_FN inline gpu_uchar4 gpu_make_uchar4(uchar r, uchar g, uchar b, uchar a)
     return make_uchar4(r, g, b, a);
 }
 
+// Relaxed device-scope atomics. A naturally aligned 32-bit volatile access is
+// a single untorn load/store on NVIDIA GPUs, which is exactly the relaxed
+// atomic load/store the Metal shim provides (no ordering, just atomicity), and
+// unlike atomicAdd(p, 0) it does not serialize the million threads that read a
+// queue count at the top of every wavefront kernel.
 GPU_FN inline uint gpu_atomic_load(gpu_atomic_uint* p) { return *(volatile uint*)p; }
 GPU_FN inline void gpu_atomic_store(gpu_atomic_uint* p, uint v) { *(volatile uint*)p = v; }
 GPU_FN inline uint gpu_atomic_fetch_add(gpu_atomic_uint* p, uint v) { return atomicAdd(p, v); }
@@ -200,6 +213,13 @@ GPU_FN inline uint gpu_wave_broadcast_first(gpu_wave_t w, uint v) { return w.g.s
 
 #define GPU_SHARED __shared__
 #define GPU_SHARED_SPACE
+// Kernels keep external linkage (nvcc fails to register template kernels
+// whose template arguments name internal-linkage functions, which the
+// indirect-dispatch launcher in rhi_cuda.h relies on), so each _gpu.h file's
+// kernels must be compiled in exactly one .cu TU — the one that registers
+// them with RHI_CUDA_REGISTER_* (rhi_cuda.h). primitives_gpu.h, whose helpers
+// renderer kernels also need, guards its kernels with
+// GPU_PRIMITIVES_HELPERS_ONLY for that reason.
 #define GPU_KERNEL(name) __global__ void name
 #define GPU_KERNEL_PARAMS(T, name) const T name
 #define GPU_BUFFER(T, name, slot) , T* name
@@ -213,10 +233,26 @@ GPU_FN inline uint gpu_wave_broadcast_first(gpu_wave_t w, uint v) { return w.g.s
 #define GPU_WAVE_INDEX (threadIdx.x / 32u)
 #define GPU_NUM_WAVES (blockDim.x / 32u)
 #define GPU_GROUP_ID blockIdx.x
-// No specialization lowering yet (GPU_HAS_SPEC_CONST 0 below): rhi_cuda (M4)
-// picks one — template parameters or per-value -D compilation. Until then
-// specialized kernels are compiled out by their #if guard and fail loudly at
-// pipeline creation, so every other kernel in a file still builds.
+// Pipeline specialization lowers to a template parameter: GPU_SPEC_CONST must
+// immediately precede its GPU_KERNEL, which becomes `template <T name>
+// static __global__ void kernel(...)`. One constant per kernel (the Metal
+// analog allows several; extend to a pack when a kernel needs it). Host side,
+// RHI_CUDA_REGISTER_SPEC(kernel, index, value) registers `kernel<value>` under
+// the same {entryPoint, constants} key rhi::ComputePipelineDesc carries.
+#define GPU_HAS_SPEC_CONST 1
+#define GPU_SPEC_CONST(T, name, idx) template <T name>
+
+// NaN-consistent vector min/max: MSL's are componentwise fmin/fmax
+// (NaN-suppressing); glm's are `a < b ? a : b` (NaN-propagating), a parity
+// break in the slab tests when a ray origin lies on a node plane with a zero
+// direction component (0*inf). These non-template overloads beat glm's
+// templates for exact gpu_* argument types.
+GPU_FN inline gpu_float2 min(gpu_float2 a, gpu_float2 b) { return gpu_float2(fminf(a.x, b.x), fminf(a.y, b.y)); }
+GPU_FN inline gpu_float2 max(gpu_float2 a, gpu_float2 b) { return gpu_float2(fmaxf(a.x, b.x), fmaxf(a.y, b.y)); }
+GPU_FN inline gpu_float3 min(gpu_float3 a, gpu_float3 b) { return gpu_float3(fminf(a.x, b.x), fminf(a.y, b.y), fminf(a.z, b.z)); }
+GPU_FN inline gpu_float3 max(gpu_float3 a, gpu_float3 b) { return gpu_float3(fmaxf(a.x, b.x), fmaxf(a.y, b.y), fmaxf(a.z, b.z)); }
+GPU_FN inline gpu_float4 min(gpu_float4 a, gpu_float4 b) { return gpu_float4(fminf(a.x, b.x), fminf(a.y, b.y), fminf(a.z, b.z), fminf(a.w, b.w)); }
+GPU_FN inline gpu_float4 max(gpu_float4 a, gpu_float4 b) { return gpu_float4(fmaxf(a.x, b.x), fmaxf(a.y, b.y), fmaxf(a.z, b.z), fmaxf(a.w, b.w)); }
 
 #else
 // ---- host personality (plain C++: SharedHostTest, CPU debugging) ----
@@ -241,15 +277,23 @@ GPU_FN inline gpu_uchar4 gpu_make_uchar4(uchar r, uchar g, uchar b, uchar a)
     return gpu_uchar4{ r, g, b, a };
 }
 
-// Scalar intrinsics MSL/CUDA provide but plain C++ does not.
+// Scalar intrinsics MSL/CUDA provide but plain C++ does not. min/max are
+// fmin/fmax so NaN handling matches MSL and CUDA's device overloads.
 GPU_FN inline float rsqrt(float x) { return 1.0f / std::sqrt(x); }
-GPU_FN inline float max(float a, float b) { return a > b ? a : b; }
-GPU_FN inline float min(float a, float b) { return a < b ? a : b; }
+GPU_FN inline float max(float a, float b) { return std::fmax(a, b); }
+GPU_FN inline float min(float a, float b) { return std::fmin(a, b); }
+GPU_FN inline gpu_float2 min(gpu_float2 a, gpu_float2 b) { return gpu_float2(std::fmin(a.x, b.x), std::fmin(a.y, b.y)); }
+GPU_FN inline gpu_float2 max(gpu_float2 a, gpu_float2 b) { return gpu_float2(std::fmax(a.x, b.x), std::fmax(a.y, b.y)); }
+GPU_FN inline gpu_float3 min(gpu_float3 a, gpu_float3 b) { return gpu_float3(std::fmin(a.x, b.x), std::fmin(a.y, b.y), std::fmin(a.z, b.z)); }
+GPU_FN inline gpu_float3 max(gpu_float3 a, gpu_float3 b) { return gpu_float3(std::fmax(a.x, b.x), std::fmax(a.y, b.y), std::fmax(a.z, b.z)); }
+GPU_FN inline gpu_float4 min(gpu_float4 a, gpu_float4 b) { return gpu_float4(std::fmin(a.x, b.x), std::fmin(a.y, b.y), std::fmin(a.z, b.z), std::fmin(a.w, b.w)); }
+GPU_FN inline gpu_float4 max(gpu_float4 a, gpu_float4 b) { return gpu_float4(std::fmax(a.x, b.x), std::fmax(a.y, b.y), std::fmax(a.z, b.z), std::fmax(a.w, b.w)); }
+// No kernel/spec-constant lowering on hosts (kernels are not compiled here).
+#define GPU_HAS_SPEC_CONST 0
 #endif  // __CUDACC__ / host
 
 #define GPU_DEVICE
 #define GPU_THREAD
-#define GPU_HAS_SPEC_CONST 0
 
 // glm gaps shared by CUDA + host.
 GPU_FN inline float length_squared(gpu_float3 v) { return glm::dot(v, v); }

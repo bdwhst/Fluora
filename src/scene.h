@@ -93,6 +93,11 @@ public:
     std::vector<Object> objects;
     std::vector<MaterialHandle> materials;
     MaterialPool materialPool;
+    // Device pool view, uploaded ONCE at the end of LoadAllMaterialsToGPU.
+    // pathtraceInit re-runs on every camera change; uploading there
+    // bump-allocated a fresh pool per move that the monotonic allocator never
+    // reclaimed (design doc §8b).
+    MaterialPoolView materialPoolDev = {};
     std::vector<MediumPtr> media;
     std::vector<TriangleMeshData> m_triangleMeshes;
     TriangleMesh* m_dev_triangleMeshes;

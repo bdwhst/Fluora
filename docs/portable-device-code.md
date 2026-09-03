@@ -276,6 +276,19 @@ debugging, one more toolchain on both platforms.
 piece of it (types, wrapper convention, value tests) remains necessary-or-useful
 groundwork even under a later Slang migration.
 
+**CUDA execution: LANDED (M4 part 1, 2026-09-03).** The same headers compile
+under nvcc unchanged; RhiTest (all primitives through the cooperative-groups
+wave shims) and SharedHostTest (host C++ vs CUDA, 21 slots) pass, and every
+FluoraMini scene renders mega ≡ wavefront bitwise on CUDA. Two shim
+additions were needed for that: `GPU_SPEC_CONST` lowers to a template
+parameter (`template <T name>` immediately preceding the kernel), and
+kernels keep external linkage because nvcc does not register template
+kernels whose template argument is a kernel address (which the indirect-
+dispatch launcher in `rhi_cuda.h` relied on) — so `primitives_gpu.h` guards
+its kernels with `GPU_PRIMITIVES_HELPERS_ONLY` for renderer TUs that only need
+`prim_queue_alloc`. `texture.metal` became `texture_gpu.h` with an MSL, a CUDA
+(`tex2D`) and a host-stub body.
+
 ## 5. Review follow-ups (2026-08-31)
 
 Confirmed findings from the post-landing review, deferred (the cheap ones —
@@ -283,16 +296,16 @@ the wave-handle API preventing the CUDA reconvergence bug, the
 GPU_HAS_SPEC_CONST guard, the probe arg-order/PROBE_SLOTS fixes, stale
 comments — were applied directly):
 
-- **min/max NaN semantics diverge per personality**: MSL vector min/max are
-  NaN-suppressing fmin/fmax; glm's are NaN-propagating ternaries. Constructible
-  parity break in the slab tests when a ray origin lies exactly on a node
-  plane with a zero direction component (0·inf = NaN). Fix during M4 parity
-  work (NaN-consistent gpu-level min/max or explicit fmin/fmax shims),
-  alongside the already-noted fast-math/fma flag matching.
-- **CUDA gpu_atomic_load/store are volatile accesses, not atomics** — safe for
-  every current call site (no same-index concurrent load/fetch_add exists),
-  but the portable API promises Metal-equivalent atomicity. M4: cuda::atomic_ref
-  or document the disjoint-index restriction on the API.
+- **min/max NaN semantics diverge per personality** *(resolved in M4)*: the
+  CUDA and host personalities now define non-template `min`/`max` overloads
+  for `gpu_float2/3/4` on `fminf`/`fmaxf` (exact-type overloads beat glm's
+  templates), and the host scalar `min`/`max` are `std::fmin`/`std::fmax`.
+  Fast-math/fma flag matching is still open for the cross-backend golden diff.
+- **CUDA gpu_atomic_load/store are volatile accesses** *(resolved by
+  documentation in M4)*: a naturally aligned 32-bit volatile access is a
+  single untorn load/store on NVIDIA GPUs, i.e. exactly the *relaxed* atomic
+  load/store the shim promises (no ordering); `atomicAdd(p, 0)` would instead
+  serialize every thread that reads a queue count. Comment in gpu_portable.h.
 - **Host personality covers only the leaf math headers**: kernel/wave/atomic
   macros have no host lowering, and on Apple hosts `gpu_storage4x4 * gpu_float4`
   (simd × glm) cannot compile — a matrix-load seam (gpu_load4x4 analog of
@@ -307,11 +320,11 @@ comments — were applied directly):
 - **SharedHostTest pins no golden values** — it proves personalities agree,
   not that semantics didn't change; a small pinned-expected-values table adds
   the regression net §3 promises for M4.
-- **M4 perf notes**: CUDA `gpu_load3` compiles to three scalar loads from the
-  alignas(16) struct — a reinterpret-as-float4 load in the CUDA branch fixes
-  the BVH inner loop; wave-op costs are now one group capture per scope
-  (handle API) but coalesced-group collectives remain slower than full-warp
-  intrinsics in uniform contexts (tg_exclusive_scan) — measure before acting.
+- **M4 perf notes**: CUDA `gpu_load3` is now one float4 load (takes the
+  storage by const reference so the load happens at the global-memory
+  source). Wave-op costs are one group capture per scope (handle API) but
+  coalesced-group collectives remain slower than full-warp intrinsics in
+  uniform contexts (tg_exclusive_scan) — measure before acting.
 - **GPU_FN vs defines.h GPU_FUNC/CPU_GPU_FUNC**: two function-qualifier
   vocabularies will meet in M4 nvcc TUs; unify (define one in terms of the
   other) during the CUDA bring-up. Both are qualifier-only now (`GPU_FN` no

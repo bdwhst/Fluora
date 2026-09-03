@@ -7,6 +7,7 @@
 // accumulate-N-samples loop and stays bitwise-identical to the reference PNGs.
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -332,7 +333,7 @@ int main(int argc, char** argv)
     const int spp = sppOverride > 0 ? sppOverride : scene.camera.iterations;
     std::cout << "mini: " << scene.objects.size() << " objects, " << scene.materials.size()
               << " materials, " << width << "x" << height << ", " << spp << " spp, " << mode
-              << " mode\n";
+              << " mode, " << rhi::backendName(rhi::kNativeBackend) << " backend\n";
 
     // Sibling .txt scenes populate the preview's dropdown (sorted by name).
     std::vector<std::string> scenePaths, sceneNames;
@@ -340,10 +341,12 @@ int main(int argc, char** argv)
     gui::scanSceneDirectory(scenePath, sceneNames, scenePaths, selectedScene);
 
     try {
-        // Runtime MSL compile: shared structs + RHI primitives + renderer kernels,
-        // concatenated (see DeviceDesc::shaderSource in rhi.h).
+        // Metal: runtime MSL compile of shared structs + RHI primitives + renderer
+        // kernels, concatenated (see DeviceDesc::shaderSource in rhi.h). CUDA:
+        // the same files are compiled by nvcc (mini_kernels.cu) and registered.
         rhi::DeviceDesc deviceDesc;
-        deviceDesc.shaderSource = readTextFile(std::string(RHI_SHADER_DIR) + "/gpu_portable.h")
+        if (rhi::kNativeBackend == rhi::BackendKind::Metal)
+            deviceDesc.shaderSource = readTextFile(std::string(RHI_SHADER_DIR) + "/gpu_portable.h")
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/spectrum_shared.h")
                                 + "\n" + readTextFile(std::string(MINI_SHADER_DIR) + "/mini_shared.h")
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/accel_shared.h")
@@ -353,9 +356,10 @@ int main(int argc, char** argv)
                                 + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives_shared.h")
                                 + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives_gpu.h")
                                 + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/raytrace_gpu.h")
-                                + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/texture.metal")
+                                + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/texture_gpu.h")
                                 + "\n" + readTextFile(std::string(MINI_SHADER_DIR) + "/pathtrace_gpu.h");
-        auto device = rhi::createDevice(rhi::BackendKind::Metal, deviceDesc);
+        auto device = rhi::createDevice(rhi::kNativeBackend, deviceDesc);
+        const std::string outSuffix = std::string("_") + rhi::backendName(rhi::kNativeBackend) + ".png";
         auto stream = device->createStream();
         auto megaPipe = device->createPipeline({ "pathtraceKernel" });
 
@@ -483,6 +487,7 @@ int main(int argc, char** argv)
         // ------------------------------------------------------------------
         if (!preview) {
             setCameraExact(params, sg.eye, sg.lookAt, sg.up);
+            auto t0 = std::chrono::steady_clock::now();
             for (int i = 0; i < spp; i++) {
                 params.iter = (unsigned)i;
                 dispatchSample(params);
@@ -492,8 +497,11 @@ int main(int argc, char** argv)
                     std::cout << "  " << (i + 1) << "/" << spp << " spp\r" << std::flush;
             }
             stream->waitIdle();
-            std::cout << "\n";
-            std::string outName = !outOverride.empty() ? outOverride : sg.outputName + "_metal.png";
+            double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            std::cout << "\nmini: rendered " << spp << " spp in " << sec << " s ("
+                      << (sec > 0 ? spp / sec : 0.0) << " spp/s, " << mode << ", "
+                      << rhi::backendName(rhi::kNativeBackend) << ")\n";
+            std::string outName = !outOverride.empty() ? outOverride : sg.outputName + outSuffix;
             if (!savePng(outName, (const float*)accum->hostPtr(), width, height, spp)) {
                 std::cerr << "failed to write " << outName << "\n";
                 return 1;
@@ -526,7 +534,7 @@ int main(int argc, char** argv)
         auto tonemapPipe = device->createPipeline({ "present_tonemap" });
 
         auto outNameFor = [&] {
-            return !outOverride.empty() ? outOverride : sg.outputName + "_metal.png";
+            return !outOverride.empty() ? outOverride : sg.outputName + outSuffix;
         };
 
         // Swap in a different scene: drain the GPU (old buffers are about to be

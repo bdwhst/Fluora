@@ -148,7 +148,7 @@ void pathtraceInit(Scene* scene, Allocator alloc) {
 	{
 		cudaMalloc(&dev_materialHandles, scene->materials.size() * sizeof(MaterialHandle));
 		cudaMemcpy(dev_materialHandles, scene->materials.data(), scene->materials.size() * sizeof(MaterialHandle), cudaMemcpyHostToDevice);
-		dev_materialPool = scene->materialPool.upload(alloc);
+		dev_materialPool = scene->materialPoolDev;  // uploaded once by LoadAllMaterialsToGPU
 	}
 	
 	if (scene->media.size())

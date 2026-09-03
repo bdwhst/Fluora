@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-Fluora is a CUDA/C++20 spectral path tracer (originally UPenn CIS-5650 Project 3) supporting unidirectional path tracing with MIS, volume rendering (NanoVDB), spectral rendering, and an OpenGL/ImGui interactive preview.
+Fluora is a CUDA/C++20 spectral path tracer (originally forked from UPenn's CIS-5650 Project 3 base code) supporting unidirectional path tracing with MIS, volume rendering (NanoVDB), spectral rendering, and an OpenGL/ImGui interactive preview. It is a single-executable interactive renderer: it opens a window, renders progressively via CUDA-OpenGL interop, and lets you fly the camera with WASD + mouse while iterations accumulate.
 
 ## Building and running
 
@@ -12,13 +12,29 @@ Fluora is a CUDA/C++20 spectral path tracer (originally UPenn CIS-5650 Project 3
 
 **Windows (full CUDA renderer)** — requires an NVIDIA GPU + CUDA Toolkit and MSVC (`memoryUtils.h` uses `_aligned_malloc`; prebuilt `.lib` files live in `external/lib`). The full renderer cannot compile on macOS: CUDA-only changes can only be verified on a Windows CUDA machine.
 
-```sh
-git submodule update --init          # src/openvdb -> NanoVDB (feature/nanovdb branch)
-cmake -B build
-cmake --build build --config Release
+```powershell
+git submodule update --init                 # src/openvdb -> NanoVDB (feature/nanovdb branch)
+cmake -S . -B build
+cmake --build build --config Release        # or --config Debug
 ```
 
-Run with a scene file as the only argument: `Fluora.exe scenes/cornell-sphere.txt`. Controls: WASD moves the camera, left mouse rotates, `q` saves the current image.
+The executable lands at `build/bin/<Config>/Fluora.exe`. A scene file path is **required** — `main()` exits with usage if `argc < 2`. Working directory matters: the `.txt` scenes reference meshes/HDRIs as `../scenes/models/...` / `../scenes/environment/...`, i.e. relative to a first-level subdirectory of the repo, so launch from `build/` (or pass absolute paths):
+
+```powershell
+cd build
+bin\Release\Fluora.exe ..\scenes\bunny-skybox.txt
+```
+
+Note that `cornell-sphere.txt` uses a `microfacet` material the main renderer's `.txt` loader does not map (it prints `Unsupported material:` and faults); FluoraMini renders it (as a conductor in PBRT reflectance mode).
+
+The Windows build also produces the RHI targets on the **CUDA backend** (`src/rhi/rhi_cuda.cu`, milestone M4): `FluoraMini.exe`, `RhiTest.exe`, `SharedHostTest.exe` in the same `build/bin/<Config>/`, with the same CLI/behavior as on macOS (`--no-preview`, `--spp`, `--mode wavefront|mega`, `--out`; output suffix `_cuda.png`). Run `RhiTest` and `SharedHostTest` after touching `src/rhi/` or any shared `_gpu.h`/`_shared.h`. Adding a kernel to a `_gpu.h` file needs one `RHI_CUDA_REGISTER_KERNEL(name)` (or `RHI_CUDA_REGISTER_SPEC(name, index, value)` per specialization) in that file's registration `.cu` (`src/mini/mini_kernels.cu`, `src/test/*_kernels.cu`; the primitives are registered by `rhi_cuda.cu`). Kernels have external linkage, so each `_gpu.h` must be compiled into exactly one `.cu` — `primitives_gpu.h` offers `GPU_PRIMITIVES_HELPERS_ONLY` for TUs that only need its helpers. Gotcha: the VS CUDA integration sometimes skips recompiling a `.cu` whose included headers changed; `touch` the registration `.cu` files if a launch-thunk edit seems not to take.
+
+Notes on the Windows build setup:
+- C++20 host, CUDA separable compilation, `CUDA_ARCHITECTURES native` (compiles for the local GPU; pin this if you need a portable build).
+- Requires zlib (`zlibstatic.lib` + `zlib.h`/`zconf.h`) in `external/lib` and `external/include` — CMake fails fast if they are missing. This is because `media.h` enables `NANOVDB_USE_ZIP` for compressed `.nvdb` volumes.
+- OpenImageDenoise is linked from `external/lib`. The post-build step copies every DLL from `external/bin/` (GLEW, OIDN, TBB, oneAPI/SYCL runtimes) next to the .exe — if you move the binary, take the DLLs with it.
+- MSVC is forced into standards-conforming preprocessor mode (`/Zc:preprocessor`) for both C++ and nvcc host passes — CUDA 13's CCCL headers require it. `NOMINMAX` is defined globally; don't reintroduce `min`/`max` macros.
+- Debug builds add `-G` to CUDA flags for cuda-gdb / Nsight device debugging.
 
 **macOS (FluoraMini, Metal vertical slice)** — builds only the `FluoraMini` target (no CUDA/GL deps). See `docs/metal-rhi-design.md` for the migration plan and what the slice does/doesn't support.
 
@@ -27,19 +43,28 @@ cmake -B build-mac -DCMAKE_BUILD_TYPE=Release
 cmake --build build-mac
 ./build-mac/bin/FluoraMini scenes/cornell-sphere.txt --spp 1000 --out out.png
 ./build-mac/bin/FluoraMini      # no scene arg -> opens the Cornell box (scenes/cornell-sphere.txt)
-./build-mac/bin/RhiTest        # RHI parallel-primitive tests — run after touching src/rhi/
-./build-mac/bin/SharedHostTest # host-C++ vs MSL value parity for shared device code
+./build-mac/bin/RhiTest         # RHI parallel-primitive tests — run after touching src/rhi/
+./build-mac/bin/SharedHostTest  # host-C++ vs MSL value parity for shared device code
 ```
 
-Device code is single-source (docs/portable-device-code.md): shared `_gpu.h`/`_shared.h` files compile under MSL, CUDA, and host C++ through `src/rhi/gpu_portable.h` (gpu_* types, GPU_KERNEL macros, wave shims). Never fork a shader per backend; raw `kernel void`/`__global__` in renderer device code is a review flag (backend-private and test scaffolding kernels are exempt).
+Device code is single-source (`docs/portable-device-code.md`): shared `_gpu.h`/`_shared.h` files compile under MSL, CUDA, and host C++ through `src/rhi/gpu_portable.h` (gpu_* types, GPU_KERNEL macros, wave shims). Never fork a shader per backend; raw `kernel void`/`__global__` in renderer device code is a review flag (backend-private and test scaffolding kernels are exempt).
+
+There are no tests, no linter, and no CI for the renderer itself (`RhiTest`/`SharedHostTest` cover the RHI seam only, on both backends). Verification is otherwise visual: render a scene and compare against `img/` references. For FluoraMini, `--mode mega` and `--mode wavefront` must stay bitwise identical (`cmp` the two `--no-preview` PNGs) on every scene — that is the regression check used throughout M2–M4.
+
+### Runtime controls
+
+Windows preview (`preview.cpp` / `main.cpp`):
+- `W`/`A`/`S`/`D`: fly camera (first-person)
+- Left mouse drag: rotate camera
+- Right mouse drag (vertical): zoom
+- Middle mouse drag: pan LOOKAT in X/Z
+- Space: recenter on the scene's original LOOKAT
+- `Q`: save PNG; Esc: save PNG and exit
+- ImGui panel exposes integrator and runtime toggles
 
 FluoraMini opens a live preview window by default with an interactive ImGui overlay: render stats, a fly camera (WASD move, E/C up-down, left-drag look, wheel dolly — accumulation restarts on move), and a dropdown that hot-swaps any sibling `.txt` scene. q/Esc or the close button save the current image and exit. The portable GUI widget/camera code lives in `src/core/gui` (backend-neutral, shared with the future Windows preview); the Metal backend wiring (ImGui Metal renderer + a Cocoa→ImGui-IO event shim) is in `src/rhi/rhi_metal.mm` behind `RHI_ENABLE_IMGUI`. Pass `--no-preview` for headless/scripted renders — headless output stays bitwise identical to the pre-GUI renderer (verified), and the window shows the same orientation as the saved PNG.
 
 Gotcha when comparing images: `saveImage()` (main.cpp) writes PNGs mirrored (`setPixel(width-1-x, y)`) relative to kernel pixel indexing; all `img/` references use that convention and FluoraMini matches it. Another replicated quirk: the camera's `pixelLength` uses `tan(fovy_degrees→radians)` un-halved (scene.cpp) — FOVY in scene files is effectively a half-angle.
-
-Prerequisites the CMake build hard-fails without: a zlib static lib in `external/lib` plus `zlib.h`/`zconf.h` in `external/include` (needed because NanoVDB reads zip-compressed `.nvdb` volumes). OpenImageDenoise is linked from `external/lib`, with DLLs copied from `external/bin` post-build.
-
-There are no tests and no linter. Verification is visual: render a scene and compare against `img/` references.
 
 ## Architecture
 
@@ -55,27 +80,62 @@ There is no virtual dispatch in device code. `taggedptr.h` implements PBRT-style
 
 ### Memory model
 
-`memoryUtils.h` defines `Allocator` over a `MemoryResourceBackend` hierarchy: `CUDAMemoryResourceBackend` uses `cudaMallocManaged` (unified memory — the same pointers are dereferenced on host and device), and `MonotonicBlockMemoryResourceBackend` bump-allocates from blocks on top of it. `main.cpp` owns the global backends. Flat bulk arrays (paths, intersections, geometry) are still allocated with raw `cudaMalloc` in `pathtrace.cu`.
+`memoryUtils.h` defines `Allocator` over a `MemoryResourceBackend` hierarchy: `CUDAMemoryResourceBackend` uses `cudaMallocManaged` (unified memory — the same pointers are dereferenced on host and device), and `MonotonicBlockMemoryResourceBackend` bump-allocates 256 KiB blocks on top of it. `main.cpp` owns the global backends (`baseBackend`, `mainBlockBackend`). Flat bulk arrays (paths, intersections, geometry) are still allocated with raw `cudaMalloc` in `pathtrace.cu`.
+
+Allocate scene-lifetime GPU data through `Allocator(mainBlockBackend)` (bump, no per-object free); allocate things that must be freed individually (e.g. NanoVDB grids, which don't fit the bump allocator) through `Allocator(baseBackend)`.
 
 ### Frame flow
 
-1. `main.cpp` `runCuda()` maps an OpenGL PBO to a CUDA pointer (`cudaGLMapBufferObject`) and calls `pathtrace()`.
-2. `pathtrace.cu` owns all device-side state (`dev_*` statics, set up in `pathtraceInit`) and dispatches to an integrator, selected by the `mainIntegratorType` global at the top of `pathtrace.cu`: `naiveIntegrator.cu` (random walk) or `misIntegrator.cu` (NEE + MIS, the default).
-3. Integrators run the loop: generate rays → intersect (BVH traversal in `intersections.cu`) → shade/scatter → stream-compact terminated paths (Thrust). Radiance accumulates into `RGBFilm` (spectral samples converted via `PixelSensor`, `spectrum.h`, `SpectrumConsts/`).
-4. `sendImageToPBO` tonemaps (ACES) into the PBO; `preview.cpp` draws it with OpenGL + ImGui. Optional OIDN denoising lives in `main.cpp`.
+1. `main.cpp` sets up the backends, calls `initScene()`, then uploads scene assets in stages: `LoadAllTexturesToGPU`, `LoadAllMeshesToGPU`, `LoadAllMaterialsToGPU`, `LoadAllMediaToGPU`, `LoadAllLightsToGPU`. The BVH is built host-side and flattened for stackless GPU traversal here.
+2. `runCuda()` maps an OpenGL PBO to a CUDA pointer (`cudaGLMapBufferObject`) and calls `pathtrace()`; `preview.cpp::mainLoop` drives one `runCuda()` (= one path-tracing iteration) per frame.
+3. `pathtrace.cu` owns all device-side state (`dev_*` statics, set up in `pathtraceInit`) and dispatches to an integrator, selected by the `mainIntegratorType` global at the top of `pathtrace.cu`: `naiveIntegrator.cu` (random walk) or `misIntegrator.cu` (NEE + MIS, the default).
+4. Integrators run the loop: generate camera rays → intersect (BVH traversal in `intersections.cu`) → shade/scatter (`bsdf.cu`, `materials.cu`, `microfacet.cu`) → optional stream compaction and material sort (Thrust) → continue. First-bounce intersections can be cached across iterations (`FIRST_INTERSECTION_CACHING`). Radiance accumulates into `RGBFilm` (spectral samples converted via `PixelSensor`, `spectrum.h`, `SpectrumConsts/`).
+5. `sendImageToPBO` tonemaps (ACES) into the PBO; `preview.cpp` draws it with OpenGL + ImGui. Optional OIDN denoising (beauty + normal + albedo aux buffers) lives in `main.cpp`, gated by `DENOISE` and the ImGui panel.
 
 ### Scene and acceleration
 
-`scene.cpp` parses the custom `.txt` scene format (and `.json` for volume scenes; see `scenes/` for examples), loading glTF/OBJ/PLY geometry and building the BVH on the CPU (`bvh.cpp`, SAH-based). Two stackless GPU traversal layouts exist, chosen by the `MTBVH` macro: the default is the multi-threaded BVH (six direction-ordered arrays with hit/miss links). Textures are uploaded as `cudaTextureObject_t` and looked up by name via maps in `scene.h`/`containers.h`.
+`scene.cpp` parses the scene file, loading glTF (tinygltf), OBJ (tinyobjloader), and PLY (tinyply) geometry, HDR environment maps (tinyexr / stb_image), and building the BVH on the CPU (`bvh.cpp`, SAH-based). Textures are uploaded as `cudaTextureObject_t` and looked up by name via maps in `scene.h`/`containers.h`.
+
+Two stackless GPU BVH layouts coexist in `src/bvh.{h,cpp}`, chosen by the `MTBVH` macro:
+- **State-machine BVH** — single tree with parent links, traversed via FROM_PARENT / FROM_CHILD / FROM_SIBLING states.
+- **MTBVH (Multi-Threaded BVH)** — six precomputed direction-ordered hit/miss chains, much faster but ~4–5× larger. This is the default (`MTBVH 1`).
+
+The README's "BVH building and traversal" section has the algorithmic details and benchmarks.
+
+### Materials, spectra, and media
+
+- `src/materials.{h,cu}` defines material types dispatched through the tagged-pointer / tagged-index machinery above — `diffuse`, `dielectric`, `conductor`, `microfacet`, `emitting`, etc.
+- `src/spectrum.{h,cu}` + `src/SpectrumConsts/` implement PBRT-v4-style sampled spectra and RGB↔spectrum tables (sRGB, ACES, DCI-P3, Rec2020). The renderer can run spectrally rather than RGB.
+- `src/microfacet.{h,cu}` implements GGX VNDF sampling and the asymmetric microfacet model from the SIGGRAPH 2023 "Microfacet theory for non-uniform heightfields" paper (conductor + dielectric variants — see the README showcase).
+- `src/media.{h,cu}` + `src/openvdb/nanovdb` implement homogeneous and heterogeneous (NanoVDB) volumes. `.nvdb` files may be gzip-compressed (hence the zlib requirement).
+
+### Lights
+
+`src/lights.{h,cu}` and `src/lightSamplers.{h,cu}`: area lights from emissive geometry, environment map lights with importance-sampled 2D conditional CDF, plus the `LightSampler` abstraction used by the MIS integrator.
+
+### Other notable subsystems
+
+- `src/openvdb/nanovdb` — vendored NanoVDB headers for volumetric data (git submodule).
+- `src/mikktspace/` — MikkTSpace tangent generation for normal mapping (used when glTF meshes don't ship with tangents).
+- `src/ImGui/` — vendored ImGui (OpenGL3 + GLFW backends on Windows, Metal backend on macOS).
+- `src/soa.h`, `src/workqueue.h`, `src/containers.h` — SoA helpers and queue scaffolding intended for wavefront-style rewrites; not all integrators are fully wavefront yet.
 
 ### Compile-time feature toggles
 
-Renderer options are `#define`s at the top of `sceneStructs.h`: `MTBVH`, `DENOISE`, `TONEMAPPING`, `DOF_ENABLED`, `STOCHASTIC_SAMPLING`, `FIRST_INTERSECTION_CACHING`, `SORT_BY_MATERIAL_TYPE`, etc. Changing behavior often means flipping one of these rather than a runtime setting.
+Renderer options are `#define`s at the top of `src/sceneStructs.h` rather than runtime flags — `USE_BVH`, `MTBVH`, `MIS_POWER_2`, `DENOISE`, `TONEMAPPING`, `DOF_ENABLED`, `STOCHASTIC_SAMPLING`, `FIRST_INTERSECTION_CACHING`, `SORT_BY_MATERIAL_TYPE`, `WHITE_FURNANCE_TEST`, `MAX_DEPTH`, etc. Changing behavior often means flipping one of these rather than a runtime setting, and requires a rebuild. Check this header first before adding a new toggle — it's the canonical place.
 
 ### CUDA specifics to preserve
 
-- Host/device-shared code is marked `__host__ __device__` (or `CPU_GPU_FUNC` from `defines.h`) — most headers under `src/` are compiled by both nvcc and MSVC, so keep them free of host-only constructs.
+- `.cu` files are CUDA translation units, `.cpp` are pure host. Host/device-shared code is marked `__host__ __device__` (or `CPU_GPU_FUNC` from `defines.h`) — most headers under `src/` are compiled by both nvcc and MSVC, so keep them free of host-only constructs.
+- CUDA-aware headers (anything pulling `thrust/...`) must be included from `.cu` files or from `.cpp` files whose translation unit explicitly includes the CUDA Toolkit headers — CMake exposes `${CUDAToolkit_INCLUDE_DIRS}` globally for this reason.
 - `workqueue.h` provides `SOA<T>`-backed work queues with `cuda::atomic` and a generic `GPUParallelFor`; separable compilation is on (`CUDA_SEPARABLE_COMPILATION`), and device-side Thrust (sort/remove/random) is used throughout the integrators.
+- The path tracer accumulates radiance into a film and divides by `iter` at display time. Don't reset the film without also resetting `iteration` in `main.cpp` — camera-change handling already does this via `camchanged`.
+
+## Scene file formats
+
+Two formats live side-by-side under `scenes/`; extension dispatch happens in `Scene::Scene` (`scene.cpp`).
+- `.txt` — the original CIS-5650 line-oriented format (MATERIAL / OBJECT / CAMERA blocks). Documented in `INSTRUCTION.md` and well-suited for quick test scenes. Loader: `Scene::loadMaterial` / `loadObject` / `loadCamera` in `scene.cpp`. This is the only format FluoraMini reads.
+- `.json` — newer format with richer material descriptions (spectral eta/k, named spectra from `SpectrumConsts/`), volumes, and proper camera DOF parameters. Loader: `Scene::loadJSON` in `scene.cpp`. Prefer this for new scenes.
 
 ## Git conventions
 

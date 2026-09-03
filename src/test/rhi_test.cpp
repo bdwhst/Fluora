@@ -51,23 +51,18 @@ int main()
 {
     try {
         rhi::DeviceDesc desc;
-        desc.shaderSource = readTextFile(std::string(RHI_SHADER_DIR) + "/gpu_portable.h")
-                          + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives_shared.h")
-                          + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives_gpu.h")
-                          + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/texture.metal")
-                          // Samples the bindless heap at (uv.xy, index=uv.z).
-                          + R"MSL(
-kernel void test_tex_sample(constant PrimParams& P    [[buffer(0)]],
-                            device const RhiTex* heap [[buffer(1)]],
-                            device const float4* q    [[buffer(2)]],
-                            device float4* outv       [[buffer(3)]],
-                            uint tid [[thread_position_in_grid]])
-{
-    if (tid >= P.n) return;
-    outv[tid] = tex_heap_sample(heap, (uint)q[tid].z, q[tid].xy);
-}
-)MSL";
-        auto device = rhi::createDevice(rhi::BackendKind::Metal, desc);
+        // Metal compiles the primitives + this test's kernel from source at
+        // runtime; the CUDA backend has them pre-registered (rhi_cuda.cu,
+        // rhi_test_kernels.cu).
+        if (rhi::kNativeBackend == rhi::BackendKind::Metal) {
+            desc.shaderSource = readTextFile(std::string(RHI_SHADER_DIR) + "/gpu_portable.h")
+                              + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives_shared.h")
+                              + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives_gpu.h")
+                              + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/texture_gpu.h")
+                              + "\n" + readTextFile(std::string(TEST_SHADER_DIR) + "/rhi_test_gpu.h");
+        }
+        auto device = rhi::createDevice(rhi::kNativeBackend, desc);
+        std::cout << "backend: " << rhi::backendName(rhi::kNativeBackend) << "\n";
         auto stream = device->createStream();
         rhi::Algorithms alg(*device);
 

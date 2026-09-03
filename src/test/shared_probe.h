@@ -86,4 +86,21 @@
                              0.0f);                                            \
     }
 
+
+// The GPU-side probe kernel, single-source (concatenated for MSL after this
+// header, #included by shared_probe_kernels.cu for CUDA). The parameter block
+// is unused; PrimParams keeps the dispatch convention uniform.
+#if defined(__METAL_VERSION__) || defined(__CUDACC__)
+GPU_KERNEL(shared_probe)(GPU_KERNEL_PARAMS(PrimParams, P)
+    GPU_BUFFER(gpu_float4, outv, 1)
+    GPU_BUFFER(const float, r2s, 2)
+    GPU_BUFFER(const float, spd, 3)
+    GPU_TID_1D)
+{
+    if (GPU_GLOBAL_ID_X != 0)
+        return;
+    PROBE_BODY(outv, r2s, spd)
+}
 #endif
+
+#endif  // TEST_SHARED_PROBE_H

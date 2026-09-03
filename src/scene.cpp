@@ -412,6 +412,8 @@ void Scene::LoadAllMaterialsToGPU(Allocator alloc)
         job.params.insert_ptr("colorSpace", RGBColorSpace::sRGB);
         materials.emplace_back(MaterialHandle::create(job.type, job.params, materialPool));
     }
+    // One device upload for the scene's lifetime (see Scene::materialPoolDev).
+    materialPoolDev = materialPool.upload(alloc);
 }
 
 void Scene::LoadAllMediaToGPU(Allocator alloc)

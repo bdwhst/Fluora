@@ -1,7 +1,10 @@
 # Metal RHI: design and migration plan
 
 Status: M0–M3 landed (FluoraMini renders full scenes spectrally on Metal);
-next is M4, the CUDA catch-up · Owner: bdwhst · Last updated: 2026-09-01
+M4 part 1 landed 2026-09-03 (real CUDA backend — FluoraMini, RhiTest and
+SharedHostTest build and pass on Windows/CUDA, both render modes bitwise
+identical; the main CUDA renderer builds again). Next: M4 part 2, migrating
+pathtrace.cu onto the RHI · Owner: bdwhst · Last updated: 2026-09-03
 
 ## 1. Context and goal
 
@@ -52,18 +55,21 @@ Every migrated subsystem must satisfy these; new code should not regress them.
 
 ## 4. RHI shape (host side)
 
-Defined in `src/rhi/rhi.h`; one implementation file per backend
-(`rhi_metal.mm` real, `rhi_cuda.h` sketch until the CUDA migration starts).
+Defined in `src/rhi/rhi.h`; one implementation file per backend, selected by
+`rhi::kNativeBackend`: `rhi_metal.mm` (macOS) and `rhi_cuda.cu` +
+`rhi_cuda_present.cpp` (Windows/CUDA, landed in M4), with `rhi_cuda.h` as the
+kernel-registration API a `.cu` file includes.
 
 | Concept | CUDA backend | Metal backend |
 |---|---|---|
-| `Device` | context + kernel registry | `MTLDevice` + `MTLLibrary` |
-| `Buffer` | `cudaMalloc`/`cudaMallocManaged` | `MTLBuffer` (Private/Shared) |
-| `Texture` | `cudaTextureObject_t` | `MTLTexture` + sampler, bindless heap index (landed) |
-| `ComputePipeline` | registered launch thunk (named) | `MTLComputePipelineState` |
-| `CommandStream` | `cudaStream_t` | `MTLCommandBuffer` + compute encoders |
-| `RayIntersector` | CPU-built MTBVH upload | same (M3) or `MTLAccelerationStructure` (M5) |
-| present | GL PBO interop (as today) | `CAMetalLayer` drawable (landed) |
+| `Device` | context + kernel registry (`RHI_CUDA_REGISTER_KERNEL/SPEC`) | `MTLDevice` + `MTLLibrary` |
+| `Buffer` | `cudaMalloc` / `cudaMallocManaged` | `MTLBuffer` (Private/Shared) |
+| `Texture` | `cudaArray` + `cudaTextureObject_t`; heap = device array of objects + host shadow | `MTLTexture` + sampler, bindless heap index |
+| `ComputePipeline` | registry entry (launch thunk deduced from the kernel signature) | `MTLComputePipelineState` |
+| `CommandStream` | blocking `cudaStream_t` + event ring (2 submits in flight) | `MTLCommandBuffer` + compute encoders |
+| indirect dispatch | 1-thread launcher kernel + dynamic parallelism | `dispatchThreadgroups(indirectBuffer:)` |
+| `RayIntersector` | CPU-built threaded BVH upload (`core/bvh_builder`) | same (M3) or `MTLAccelerationStructure` (M5) |
+| present | GLFW window, GL texture via CUDA-registered PBO, ImGui GLFW/GL3 | `CAMetalLayer` drawable + ImGui Metal |
 
 **Dispatch/binding convention** (I-2): `dispatch(pipeline, gridGroups, groupSize,
 params, paramsSize, {buffers...})`. The parameter block binds at Metal `buffer(0)` via
@@ -284,12 +290,88 @@ core) lives in `src/core/`; backend seams, device-code files, and primitives in
 `src/rhi/`; `src/mini/` is scaffolding that only shrinks and may only *call* the other
 two. Adding capability inside `src/mini` is a review flag.
 
-**M4 — CUDA catch-up and parity** *(needs the Windows/CUDA machine, ~2026-07-27+)*:
-build the CUDA renderer and fix anything M0–M3 broke (starting with the unverified
-materials handle conversion); implement `rhi_cuda` for real; migrate `pathtrace.cu`
-onto the RHI (convert lights/media/spectra to handle pools, replace Thrust with the
-M2 queues/primitives); A/B queues vs compaction on CUDA; golden-image parity between
-backends and against pre-migration renders.
+**M4 — CUDA catch-up and parity** *(Windows/CUDA machine; part 1 landed 2026-09-03)*:
+
+- *Landed (part 1):* **the real CUDA backend**, `src/rhi/rhi_cuda.cu` +
+  `rhi_cuda_present.cpp` + `rhi_cuda.h`. The Windows build now produces
+  `FluoraMini`, `RhiTest` and `SharedHostTest` next to `Fluora`, from the same
+  portable core, tests and single-source kernels the macOS build compiles for
+  Metal (`rhi::kNativeBackend` picks the backend; `DeviceDesc::shaderSource`
+  is only filled for Metal). Verified on an RTX 5080 / CUDA 13.2 / VS 2026:
+  RhiTest passes all six primitives (reduce, scan, compact, radix sort,
+  wave-aggregated queue push, bilinear heap sampling — the wave shims run on
+  cooperative-groups coalesced groups unchanged), SharedHostTest passes host-C++
+  vs CUDA value parity on all 21 slots, and FluoraMini renders cornell, bunny-
+  skybox, dragon-skybox (871k tris, dispersive glass, 4k env map) and
+  lost-empire (textured MTL materials) with **mega ≡ wavefront bitwise** on
+  every scene; the interactive preview (GLFW window, ImGui overlay, fly
+  camera, scene hot-swap) runs on the same `gui::runPreview` policy as Metal.
+  - Kernel registration: `RHI_CUDA_REGISTER_KERNEL(k)` /
+    `RHI_CUDA_REGISTER_SPEC(k, index, value)` once per entry point in one `.cu`
+    per `_gpu.h` file (`mini_kernels.cu`, `rhi_test_kernels.cu`,
+    `shared_probe_kernels.cu`; the backend registers the primitives itself).
+    The thunk is deduced from the kernel's own signature (`KernelSig`), so the
+    binding convention is enforced by the type system. `GPU_SPEC_CONST` lowers
+    to a template parameter on CUDA (one constant per kernel).
+  - Indirect dispatch is a per-kernel one-thread launcher + dynamic parallelism
+    (`cudaStreamFireAndForget`; parent completion waits for the child, so
+    stream order holds). Generated by the macro as a plain `__global__`: nvcc
+    does not register `__global__` templates whose template argument is a
+    kernel address (verified standalone), so the kernel identity lives in a
+    `__device__` helper's template argument. Needs rdc + `cudadevrt` on every
+    RHI target. Kernels have external linkage for the same reason, hence the
+    `GPU_PRIMITIVES_HELPERS_ONLY` guard in `primitives_gpu.h`.
+  - Memory: `Shared` = managed memory. On Windows the host may only touch it
+    while no kernel runs — the same "not in flight" rule `Buffer::hostPtr()`
+    documents — so the texture heap is a device array with a host shadow
+    (written with synchronous H2D copies) rather than managed. Buffer frees are
+    deferred behind events recorded on every live stream (rhi_algorithms'
+    lifetime note). Streams are blocking streams so the legacy default stream
+    (present copy, heap writes) orders after them, the CUDA analog of Metal's
+    single queue; `submit()` bounds in-flight work at 2 via an event ring.
+  - `texture.metal` → `texture_gpu.h`, the one shared file whose function body
+    is per backend (`tex2D` on `cudaTextureObject_t` vs bindless
+    `texture2d`), plus a host stub. Test kernels went single-source too
+    (`rhi_test_gpu.h`, the probe kernel in `shared_probe.h`).
+  - **Fixed what M0–M3 broke:** the main CUDA renderer did not compile —
+    `TypedPoolView::kSizes` (a static constexpr array indexed in device code)
+    is ODR-used, which nvcc rejects; now a pack-fold `typeSize()`. With that,
+    `Fluora.exe` builds and renders bunny-skybox on the M0 handle pools
+    (smoke-tested; note its scene paths are `../scenes/...`, so run it from a
+    repo subdirectory such as `build/`). The material pool is now uploaded
+    once in `Scene::LoadAllMaterialsToGPU` (`Scene::materialPoolDev`) instead
+    of per camera move (§8b leak). CMake's Debug `-g -G` block moved after
+    `enable_language(CUDA)` (§8b).
+  - Shim follow-ups from `portable-device-code.md` §5 closed: NaN-consistent
+    vector `min`/`max` (fmin/fmax overloads in the CUDA and host
+    personalities), `gpu_load3` as one 16-byte load on CUDA, and the atomics
+    note (an aligned volatile 32-bit access *is* the relaxed atomic load/store
+    the API promises).
+  - **A/B, queues vs megakernel on CUDA** (RTX 5080, headless):
+
+    | scene | spp | mega | wavefront |
+    |---|---|---|---|
+    | cornell 800×800 | 500 | 0.38 s | 1.22 s (3.2×) |
+    | bunny-skybox 1440×1440 | 300 | 1.13 s | 1.41 s (1.24×) |
+    | dragon-skybox 1920×1300 | 100 | 1.44 s | 1.44 s (1.0×) |
+    | lost-empire 1000×1000 | 100 | 0.30 s | 0.33 s (1.1×) |
+
+    Same shape as the Metal measurements (M2/M3): the per-stage launch and
+    queue traffic dominate on trivial scenes and vanish once traversal is the
+    cost. Neither mode uses compaction; the M2 decision (queues as the bounce
+    mechanism, primitives kept) stands. On CUDA the indirect launch adds one
+    dynamic-parallelism hop per stage, which is inside the cornell gap.
+  - Parity with Metal: not measured here (no Mac in reach from this machine).
+    Mega ≡ wavefront bitwise on both backends is the strongest available
+    evidence; the cross-backend golden diff (§9) stays open, with the known
+    caveats of MSL fast-math vs nvcc `--fmad` and the shim's tolerance-based
+    SharedHostTest.
+- *Remaining (part 2):* migrate `pathtrace.cu` onto the RHI — convert
+  lights/media/spectra to handle pools, replace Thrust and `GPUParallelFor`
+  with the registered kernels and M2 primitives, route the NEE/MIS integrator
+  and volumes through `rhi::` — and retire `bvh.cpp` in favor of
+  `core/bvh_builder` (which the CUDA backend's `RayIntersector` already
+  consumes). Golden-image parity against pre-migration renders lands with it.
 
 **M5 — Metal-native features**: hardware RT path; preview upgrades (window resize
 — the basic window landed in M3, the ImGui overlay in M3.x); OIDN-on-Metal denoise.
@@ -297,11 +379,16 @@ backends and against pre-migration renders.
 ## 7. Build integration
 
 `CMakeLists.txt` branches at the top: on APPLE it builds only `FluoraMini`
-(C++/Obj-C++, links Metal + Foundation, no CUDA/GL/GLFW dependencies) and returns; the
-CUDA renderer path is untouched otherwise (`enable_language(CUDA)` moved out of
-`project()`). The mini target compiles `src/stb.cpp` for PNG writing and defines
-`MINI_SHADER_DIR` so MSL sources are loaded from the source tree at runtime (dev-time
-convenience; fine until M4 packaging).
+(C++/Obj-C++, links Metal + Foundation, no CUDA/GL/GLFW dependencies) and returns.
+Otherwise it builds the CUDA renderer `Fluora` plus, since M4, the same three RHI
+targets on the CUDA backend through the `fluora_rhi_target()` helper (nvcc for the
+`.cu` registration units, `CUDA_SEPARABLE_COMPILATION` + `cudadevrt` for the
+dynamic-parallelism indirect dispatch, GLEW/GLFW/OpenGL for presentation). The mini
+target compiles `src/stb.cpp` for PNG writing and defines the `*_SHADER_DIR` paths so
+MSL sources are loaded from the source tree at runtime on Metal (dev-time convenience;
+unused on CUDA). Gotcha: the Visual Studio CUDA integration does not always re-run
+nvcc on a `.cu` whose *included headers* changed (seen with `rhi_cuda.h`); `touch`
+the registration `.cu` files when a launch-thunk change seems not to take.
 
 ## 8. Risks / open questions
 
@@ -323,17 +410,13 @@ convenience; fine until M4 packaging).
 Confirmed findings from the pre-push review of M0–M3, deferred to the milestones
 that naturally own them (quick loader/robustness fixes were applied directly):
 
-- **CUDA: material pool re-uploaded per camera move** (`pathtrace.cu`,
-  `materialPool.upload(alloc)` in `pathtraceInit`): every `camchanged` reset
-  bump-allocates a fresh device pool that the monotonic allocator never
-  reclaims — unbounded growth while dragging the camera. Fix in M4 (first CUDA
-  build): upload once at scene load, or before `pathtraceInit` re-runs.
-- **CMake: Windows Debug drops default nvcc flags**: the Debug-mode
-  `set(CMAKE_CUDA_FLAGS ... "-g -G")` near the top now runs before
-  `enable_language(CUDA)` (CUDA left `project()` for the Apple branch); under
-  CMP0126 the normal variable shadows the compiler-detected defaults on a fresh
-  configure. Fix in M4: append `-g -G` after `enable_language(CUDA)` (or use
-  `add_compile_options` with a CUDA generator expression).
+- **CUDA: material pool re-uploaded per camera move** *(resolved in M4)*:
+  `Scene::LoadAllMaterialsToGPU` uploads once into `Scene::materialPoolDev`;
+  `pathtraceInit` just copies the view.
+- **CMake: Windows Debug drops default nvcc flags** *(resolved in M4)*: the
+  early `set(CMAKE_CUDA_FLAGS ...)` block is gone; the post-`enable_language`
+  `CMAKE_CUDA_FLAGS_DEBUG` append (`-G`, on top of CMake's default `-g`) is
+  the only Debug device flag.
 - **Shader-source concat lists**: the "move to metallib in M3" plan (§8) is
   overdue — mini_main carries a 10-file dependency-ordered list, RhiTest a
   second 3-file one, from absolute configure-time paths. Do alongside the M3

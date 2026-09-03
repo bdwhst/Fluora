@@ -22,9 +22,8 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     SET_PROPERTY(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
 endif()
 
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(CMAKE_CUDA_FLAGS ${CMAKE_CUDA_FLAGS} "-g -G")  # enable cuda-gdb
-endif()
+# (Debug device-debug flags are appended after enable_language(CUDA) below:
+# setting CMAKE_CUDA_FLAGS before it shadows the compiler-detected defaults.)
 
 ########################################
 # macOS: Metal vertical slice only (milestone M1)
@@ -246,7 +245,7 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 )
 
 if (WIN32)
-    file(GLOB DLL_FILES 
+    file(GLOB DLL_FILES
         "${PROJECT_SOURCE_DIR}/external/bin/*.dll"
     )
     foreach(DLL_FILE ${DLL_FILES})
@@ -255,3 +254,67 @@ if (WIN32)
         ${DLL_FILE} ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>)
     endforeach()
 endif()
+
+########################################
+# RHI targets on the CUDA backend (milestone M4, docs/metal-rhi-design.md):
+# the same portable renderer core, tests, and single-source kernels the macOS
+# build compiles for Metal, here compiled by nvcc against src/rhi/rhi_cuda.cu.
+# Every target needs relocatable device code + cudadevrt for the dynamic-
+# parallelism indirect dispatch (rhi_cuda.h).
+########################################
+set(FLUORA_RHI_GL_LIBS ${GLEW_LIBRARY} ${GLFW_LIBRARY} ${OPENGL_LIBRARY})
+set(FLUORA_IMGUI_GL_SOURCES
+    src/ImGui/imgui.cpp
+    src/ImGui/imgui_draw.cpp
+    src/ImGui/imgui_tables.cpp
+    src/ImGui/imgui_widgets.cpp
+    src/ImGui/imgui_impl_glfw.cpp
+    src/ImGui/imgui_impl_opengl3.cpp)
+set(FLUORA_RHI_CUDA_SOURCES
+    src/rhi/rhi_cuda.cu
+    src/rhi/rhi_cuda_present.cpp)
+set(FLUORA_SHADER_DIR_DEFINES
+    MINI_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/mini"
+    CORE_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+    RHI_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/rhi"
+    TEST_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/test"
+    FLUORA_SCENES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scenes")
+
+function(fluora_rhi_target name)
+    add_executable(${name} ${ARGN})
+    target_include_directories(${name} PRIVATE external/include src/ImGui)
+    target_compile_definitions(${name} PRIVATE ${FLUORA_SHADER_DIR_DEFINES})
+    set_property(TARGET ${name} PROPERTY CUDA_ARCHITECTURES native)
+    set_target_properties(${name} PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+    target_link_libraries(${name} ${FLUORA_RHI_GL_LIBS} CUDA::cudart cudadevrt)
+endfunction()
+
+fluora_rhi_target(FluoraMini
+    src/mini/mini_main.cpp
+    src/mini/mini_kernels.cu
+    src/core/scene_loader.cpp
+    src/core/mesh_loader.cpp
+    src/core/bvh_builder.cpp
+    src/core/image_loader.cpp
+    src/core/spectra.cpp
+    src/core/gui/gui.cpp
+    src/SpectrumConsts/rgbspectrum_srgb.cpp
+    src/stb.cpp
+    ${FLUORA_RHI_CUDA_SOURCES}
+    ${FLUORA_IMGUI_GL_SOURCES})
+target_compile_definitions(FluoraMini PRIVATE RHI_ENABLE_IMGUI)
+
+fluora_rhi_target(RhiTest
+    src/test/rhi_test.cpp
+    src/test/rhi_test_kernels.cu
+    src/rhi/rhi_algorithms.cpp
+    ${FLUORA_RHI_CUDA_SOURCES})
+
+fluora_rhi_target(SharedHostTest
+    src/test/shared_host_test.cpp
+    src/test/shared_probe_kernels.cu
+    src/core/spectra.cpp
+    src/SpectrumConsts/rgbspectrum_srgb.cpp
+    ${FLUORA_RHI_CUDA_SOURCES})

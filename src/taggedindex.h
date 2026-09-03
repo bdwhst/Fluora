@@ -65,8 +65,18 @@ private:
 template <typename... Ts>
 struct TypedPoolView
 {
-    static constexpr size_t kSizes[sizeof...(Ts)] = { sizeof(Ts)... };
     void* bases[sizeof...(Ts)] = {};
+
+    // Element stride of pool slot i (sizeof of the i-th type). A pack fold
+    // rather than a static constexpr array: indexing such an array ODR-uses it,
+    // which nvcc rejects in device code ("identifier undefined in device code").
+    __device__ __host__ static constexpr size_t typeSize(unsigned int i)
+    {
+        size_t s = 0;
+        unsigned int k = 0;
+        ((k++ == i ? (s = sizeof(Ts), 0) : 0), ...);
+        return s;
+    }
 
     template <typename PtrT>
     __device__ __host__ PtrT resolve(TaggedIndex<Ts...> handle) const
@@ -74,7 +84,7 @@ struct TypedPoolView
         unsigned int tag = handle.Tag();
         if (tag == 0)
             return PtrT(nullptr);
-        void* ptr = (char*)bases[tag - 1] + (size_t)handle.Index() * kSizes[tag - 1];
+        void* ptr = (char*)bases[tag - 1] + (size_t)handle.Index() * typeSize(tag - 1);
         return PtrT(ptr, tag);
     }
 };

@@ -36,18 +36,6 @@ std::string readTextFile(const std::string& path)
 
 constexpr int kSlots = PROBE_SLOTS;
 
-const char* kProbeKernel = R"MSL(
-kernel void shared_probe(device float4* outv [[buffer(1)]],
-                         device const float* r2s [[buffer(2)]],
-                         device const float* spd [[buffer(3)]],
-                         uint tid [[thread_position_in_grid]])
-{
-    if (tid != 0)
-        return;
-    PROBE_BODY(outv, r2s, spd)
-}
-)MSL";
-
 } // namespace
 
 int main()
@@ -67,16 +55,20 @@ int main()
     PROBE_BODY(host, r2sHost.data(), tables.buffer().data())
 
     try {
-        // MSL personality: same headers + the same probe body, on the GPU.
+        // GPU personality (MSL on macOS, CUDA on Windows): same headers + the
+        // same probe body, on the GPU. Metal compiles them at runtime; the CUDA
+        // kernel is registered by shared_probe_kernels.cu.
         rhi::DeviceDesc desc;
-        desc.shaderSource = readTextFile(std::string(RHI_SHADER_DIR) + "/gpu_portable.h")
-                          + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/spectrum_shared.h")
-                          + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/bsdf_shared.h")
-                          + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/envmap_shared.h")
-                          + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/tonemap_shared.h")
-                          + "\n" + readTextFile(std::string(TEST_SHADER_DIR) + "/shared_probe.h")
-                          + "\n" + kProbeKernel;
-        auto device = rhi::createDevice(rhi::BackendKind::Metal, desc);
+        if (rhi::kNativeBackend == rhi::BackendKind::Metal) {
+            desc.shaderSource = readTextFile(std::string(RHI_SHADER_DIR) + "/gpu_portable.h")
+                              + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/primitives_shared.h")
+                              + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/spectrum_shared.h")
+                              + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/bsdf_shared.h")
+                              + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/envmap_shared.h")
+                              + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/tonemap_shared.h")
+                              + "\n" + readTextFile(std::string(TEST_SHADER_DIR) + "/shared_probe.h");
+        }
+        auto device = rhi::createDevice(rhi::kNativeBackend, desc);
         auto stream = device->createStream();
         auto pipeline = device->createPipeline({ "shared_probe" });
         auto out = device->createBuffer(
@@ -107,7 +99,8 @@ int main()
             }
         }
         std::cout << (mismatches == 0 ? "PASS" : "FAIL") << " sharedValueParity ("
-                  << kSlots << " slots, host C++ vs MSL)\n";
+                  << kSlots << " slots, host C++ vs " << rhi::backendName(rhi::kNativeBackend)
+                  << ")\n";
         return mismatches == 0 ? 0 : 1;
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << "\n";

@@ -1,9 +1,10 @@
 #pragma once
 // =============================================================================
-// RHI sketch: the host-side seam between the renderer and a GPU backend
-// (CUDA today, Metal later). NOT wired into the build yet — this header pins
-// down the interface shape and the portability invariants each backend must
-// satisfy. See rhi_cuda.h for how the current CUDA code maps onto it.
+// RHI: the host-side seam between the renderer and a GPU backend. Two real
+// implementations, one per platform, selected by kNativeBackend:
+// rhi_metal.mm (macOS) and rhi_cuda.cu + rhi_cuda.h (Windows/CUDA). This
+// header pins down the interface shape and the portability invariants each
+// backend must satisfy.
 //
 // The two invariants that make a Metal backend possible at all:
 //
@@ -30,6 +31,19 @@
 namespace rhi {
 
 enum class BackendKind { CUDA, Metal };
+
+// The backend compiled into this binary (one per platform). Apps and tests
+// create their device with this; a DeviceDesc::shaderSource is only needed
+// for Metal (runtime MSL compile) — CUDA kernels come pre-registered.
+#if defined(__APPLE__)
+constexpr BackendKind kNativeBackend = BackendKind::Metal;
+#else
+constexpr BackendKind kNativeBackend = BackendKind::CUDA;
+#endif
+inline const char* backendName(BackendKind kind)
+{
+    return kind == BackendKind::Metal ? "metal" : "cuda";
+}
 
 // 64-bit GPU virtual address, embeddable in kernel parameter blocks.
 // CUDA: the device pointer itself. Metal: MTLBuffer.gpuAddress (+offset),
@@ -103,12 +117,13 @@ struct SpecConstant {
 
 struct ComputePipelineDesc {
     // Name of a kernel entry point. CUDA: key into the kernel registry
-    // (RHI_REGISTER_KERNEL in rhi_cuda.h). Metal: function name in the metallib.
+    // (RHI_CUDA_REGISTER_KERNEL in rhi_cuda.h). Metal: function name in the library.
     std::string entryPoint;
     // Specialization constants baked at pipeline creation — one kernel source,
     // N specialized pipelines (e.g. per-material shade kernels). Metal:
     // [[function_constant(index)]] + MTLFunctionConstantValues. CUDA: template
-    // instantiations registered under entryPoint + constant values.
+    // instantiations registered under entryPoint + constant values
+    // (RHI_CUDA_REGISTER_SPEC).
     std::vector<SpecConstant> constants;
 };
 
@@ -140,8 +155,9 @@ public:
     // Indirect dispatch off a GPU-written count — required for the wavefront
     // work-queue design (queue sizes are only known on device). argsBuffer at
     // argsOffset holds three uint32 threadgroup counts {x, y, z}.
-    // CUDA: read count via launch with max size + early-out, or cuLaunch from
-    // a copied-back count. Metal: dispatchThreadgroups(indirectBuffer:).
+    // CUDA: a one-thread launcher kernel reads the counts on device and launches
+    // the real grid via dynamic parallelism. Metal: dispatchThreadgroups(
+    // indirectBuffer:).
     virtual void dispatchIndirect(ComputePipeline& pipeline, Dim3 block,
                                   Buffer& argsBuffer, size_t argsOffset,
                                   const void* params, size_t paramsSize,
@@ -220,9 +236,9 @@ public:
     virtual Buffer& textureHeap() = 0;
 
     // Presentation seam replacing the CUDA<->OpenGL PBO interop in main.cpp:
-    // the backend owns how a final image reaches the window (CUDA: GL PBO as
-    // today; Metal: Cocoa window + CAMetalLayer). Preview/ImGui code talks
-    // only to this.
+    // the backend owns how a final image reaches the window (CUDA: GLFW window
+    // + GL texture fed through an interop PBO, rhi_cuda_present.cpp; Metal:
+    // Cocoa window + CAMetalLayer). Preview/ImGui code talks only to this.
     //
     // presentTarget() creates the window on first call and returns the RGBA8
     // buffer (width*height*4, row-major, row 0 = top of the window) a tonemap

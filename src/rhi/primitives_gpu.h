@@ -38,6 +38,8 @@ GPU_FN inline uint tg_exclusive_scan(uint v, uint lid, uint sgId, uint numSg,
     return lanePrefix + sgScratch[sgId];
 }
 
+// Kernels (see the note at the work-queue test kernel below).
+#ifndef GPU_PRIMITIVES_HELPERS_ONLY
 // --------------------------------------------------------------------------
 // Reduce
 // --------------------------------------------------------------------------
@@ -167,6 +169,7 @@ GPU_KERNEL(prim_radix_scatter)(GPU_KERNEL_PARAMS(PrimParams, P)
     if (gid < P.n)
         keysOut[histScanned[d * P.numBlocks + GPU_GROUP_ID] + rank] = key;
 }
+#endif  // GPU_PRIMITIVES_HELPERS_ONLY
 
 // --------------------------------------------------------------------------
 // Work queue: wave-aggregated slot allocation — one fetch_add per wave
@@ -188,6 +191,10 @@ GPU_FN inline uint prim_queue_alloc(GPU_DEVICE gpu_atomic_uint* counter)
     return base + lanePrefix;
 }
 
+// Kernels are compiled only in the TU that registers them (rhi_cuda.cu on
+// CUDA); renderer files that need just the helpers above define
+// GPU_PRIMITIVES_HELPERS_ONLY before including this header.
+#ifndef GPU_PRIMITIVES_HELPERS_ONLY
 // Test kernel: threads whose value is odd enqueue it.
 GPU_KERNEL(prim_queue_push_test)(GPU_KERNEL_PARAMS(PrimParams, P)
     GPU_BUFFER(const uint, in, 1)
@@ -202,5 +209,6 @@ GPU_KERNEL(prim_queue_push_test)(GPU_KERNEL_PARAMS(PrimParams, P)
     if ((v & 1u) != 0u)
         outItems[prim_queue_alloc(count)] = v;
 }
+#endif  // GPU_PRIMITIVES_HELPERS_ONLY
 
 #endif // RHI_PRIMITIVES_GPU_H

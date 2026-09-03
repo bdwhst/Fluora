@@ -14,8 +14,10 @@
 
 #ifndef __METAL_VERSION__
 #include "../rhi/gpu_portable.h"
+#define GPU_PRIMITIVES_HELPERS_ONLY  // prim_queue_alloc; the kernels live in rhi_cuda.cu
 #include "../rhi/primitives_gpu.h"
 #include "../rhi/raytrace_gpu.h"
+#include "../rhi/texture_gpu.h"
 #include "../core/spectrum_shared.h"
 #include "../core/bsdf_shared.h"
 #include "../core/envmap_shared.h"
