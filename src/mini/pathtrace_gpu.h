@@ -500,6 +500,9 @@ GPU_KERNEL(wf_shade)(GPU_KERNEL_PARAMS(WfCtl, C)
     path.depth++;
     raysOut[prim_queue_alloc(&counts[C.dstCounter])] = path;
 }
+// The pipelines mini_main.cpp creates (one per material type). The CUDA
+// registration TU is generated from this list (cmake/GenerateCudaKernels.cmake).
+GPU_SPEC_INSTANCES(wf_shade, 0, MINI_MAT_DIFFUSE, MINI_MAT_CONDUCTOR, MINI_MAT_GLASS)
 #endif  // GPU_HAS_SPEC_CONST
 
 // ==========================================================================

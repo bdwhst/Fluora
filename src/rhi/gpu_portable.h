@@ -139,6 +139,11 @@ GPU_FN inline uint gpu_wave_broadcast_first(gpu_wave_t, uint v) { return simd_br
 // missing kernel then fails loudly at pipeline creation, not file parse.
 #define GPU_HAS_SPEC_CONST 1
 #define GPU_SPEC_CONST(T, name, idx) constant T name [[function_constant(idx)]];
+// Annotation (no code on any backend): the specialization values a kernel is
+// built with, e.g. GPU_SPEC_INSTANCES(wf_shade, 0, MINI_MAT_DIFFUSE, ...).
+// cmake/GenerateCudaKernels.cmake reads it to emit the CUDA registrations;
+// Metal specializes at pipeline creation and ignores it.
+#define GPU_SPEC_INSTANCES(...)
 
 #else  // ------------------------------------------------------------------
 // CUDA and host personalities share the glm value types; they differ in
@@ -241,6 +246,7 @@ GPU_FN inline uint gpu_wave_broadcast_first(gpu_wave_t w, uint v) { return w.g.s
 // the same {entryPoint, constants} key rhi::ComputePipelineDesc carries.
 #define GPU_HAS_SPEC_CONST 1
 #define GPU_SPEC_CONST(T, name, idx) template <T name>
+#define GPU_SPEC_INSTANCES(...)   // annotation read by cmake/GenerateCudaKernels.cmake
 
 // NaN-consistent vector min/max: MSL's are componentwise fmin/fmax
 // (NaN-suppressing); glm's are `a < b ? a : b` (NaN-propagating), a parity
@@ -290,6 +296,7 @@ GPU_FN inline gpu_float4 min(gpu_float4 a, gpu_float4 b) { return gpu_float4(std
 GPU_FN inline gpu_float4 max(gpu_float4 a, gpu_float4 b) { return gpu_float4(std::fmax(a.x, b.x), std::fmax(a.y, b.y), std::fmax(a.z, b.z), std::fmax(a.w, b.w)); }
 // No kernel/spec-constant lowering on hosts (kernels are not compiled here).
 #define GPU_HAS_SPEC_CONST 0
+#define GPU_SPEC_INSTANCES(...)
 #endif  // __CUDACC__ / host
 
 #define GPU_DEVICE

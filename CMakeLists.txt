@@ -292,9 +292,36 @@ function(fluora_rhi_target name)
     target_link_libraries(${name} ${FLUORA_RHI_GL_LIBS} CUDA::cudart cudadevrt)
 endfunction()
 
+# Generates <build>/generated/<header-stem>_kernels.cu -- the CUDA registration
+# TU for one single-source _gpu.h (RHI_CUDA_REGISTER_* per GPU_KERNEL /
+# GPU_SPEC_INSTANCES found in it) -- and adds it to the target. Re-runs when
+# the header or the generator changes. INCLUDES: headers to include first, for
+# concat-style headers that do not include their own dependencies.
+function(fluora_cuda_kernels target header)
+    cmake_parse_arguments(FCK "" "" "INCLUDES" ${ARGN})
+    get_filename_component(_abs "${header}" ABSOLUTE)
+    get_filename_component(_stem "${header}" NAME_WE)
+    set(_out "${CMAKE_BINARY_DIR}/generated/${target}_${_stem}_kernels.cu")
+    set(_incs "")
+    foreach(_i IN LISTS FCK_INCLUDES)
+        get_filename_component(_i "${_i}" ABSOLUTE)
+        list(APPEND _incs "${_i}")
+    endforeach()
+    set(_gen "${CMAKE_SOURCE_DIR}/cmake/GenerateCudaKernels.cmake")
+    add_custom_command(
+        OUTPUT "${_out}"
+        COMMAND ${CMAKE_COMMAND}
+            -DINPUT=${_abs} -DOUTPUT=${_out} "-DINCLUDES=${_incs}"
+            -DREGISTRY_HEADER=${CMAKE_SOURCE_DIR}/src/rhi/rhi_cuda.h
+            -P "${_gen}"
+        DEPENDS "${_abs}" "${_gen}"
+        COMMENT "Generating CUDA kernel registrations for ${header}"
+        VERBATIM)
+    target_sources(${target} PRIVATE "${_out}")
+endfunction()
+
 fluora_rhi_target(FluoraMini
     src/mini/mini_main.cpp
-    src/mini/mini_kernels.cu
     src/core/scene_loader.cpp
     src/core/mesh_loader.cpp
     src/core/bvh_builder.cpp
@@ -306,16 +333,19 @@ fluora_rhi_target(FluoraMini
     ${FLUORA_RHI_CUDA_SOURCES}
     ${FLUORA_IMGUI_GL_SOURCES})
 target_compile_definitions(FluoraMini PRIVATE RHI_ENABLE_IMGUI)
+fluora_cuda_kernels(FluoraMini src/mini/pathtrace_gpu.h)
 
 fluora_rhi_target(RhiTest
     src/test/rhi_test.cpp
-    src/test/rhi_test_kernels.cu
     src/rhi/rhi_algorithms.cpp
     ${FLUORA_RHI_CUDA_SOURCES})
+fluora_cuda_kernels(RhiTest src/test/rhi_test_gpu.h)
 
 fluora_rhi_target(SharedHostTest
     src/test/shared_host_test.cpp
-    src/test/shared_probe_kernels.cu
     src/core/spectra.cpp
     external/SpectrumConsts/rgbspectrum_srgb.cpp
     ${FLUORA_RHI_CUDA_SOURCES})
+fluora_cuda_kernels(SharedHostTest src/test/shared_probe.h INCLUDES
+    src/rhi/gpu_portable.h src/rhi/primitives_shared.h src/core/spectrum_shared.h
+    src/core/bsdf_shared.h src/core/envmap_shared.h src/core/tonemap_shared.h)
