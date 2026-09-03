@@ -10,10 +10,46 @@
 #include "rhi.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <deque>
 #include <stdexcept>
 #include <string>
+
+// ImGui overlay is a FluoraMini-only feature; the RHI unit-test targets compile
+// this file without it (RHI_ENABLE_IMGUI undefined) and never call enableGui().
+#ifdef RHI_ENABLE_IMGUI
+#include "imgui.h"
+#include "imgui_impl_metal.h"
+
+namespace {
+// macOS virtual key codes -> ImGuiKey, covering the fly-camera keys and a few
+// editing keys; unmapped codes are ignored (character input is fed separately).
+ImGuiKey imguiKeyFromMacKeyCode(unsigned short kc)
+{
+    switch (kc) {
+    case 0:  return ImGuiKey_A;
+    case 1:  return ImGuiKey_S;
+    case 2:  return ImGuiKey_D;
+    case 13: return ImGuiKey_W;
+    case 14: return ImGuiKey_E;
+    case 8:  return ImGuiKey_C;
+    case 12: return ImGuiKey_Q;
+    case 15: return ImGuiKey_R;
+    case 3:  return ImGuiKey_F;
+    case 49: return ImGuiKey_Space;
+    case 53: return ImGuiKey_Escape;
+    case 36: return ImGuiKey_Enter;
+    case 51: return ImGuiKey_Backspace;
+    case 123: return ImGuiKey_LeftArrow;
+    case 124: return ImGuiKey_RightArrow;
+    case 125: return ImGuiKey_DownArrow;
+    case 126: return ImGuiKey_UpArrow;
+    default: return ImGuiKey_None;
+    }
+}
+} // namespace
+#endif
 
 // Flags the close button instead of tearing the window down: present() reports
 // it and the app exits, which is also what q/Esc do.
@@ -59,14 +95,78 @@ private:
     id<MTLBuffer> mBuf;
 };
 
-// Bindless texture: the MTLTexture's gpuResourceID is written into the
-// device's heap table at creation; shaderHandle() is that slot index. Kernels
-// read the heap buffer as texture2d<float> entries (Metal 3 bindless — no
-// argument encoder). Shared storage so upload() is a plain replaceRegion.
+// Owns the bindless texture heap: a buffer of MTLResourceID slots, a freelist of
+// recycled slots, and the dense list of live textures dispatches must keep
+// resident. acquire()/release() are the whole lifecycle — releasing a texture
+// returns its slot so long-lived sessions that swap scenes (each dropping and
+// re-uploading textures) reuse slots instead of leaking them toward kMaxTextures.
+class MetalTextureHeap {
+public:
+    static constexpr size_t kMaxTextures = 1024;
+
+    void setDevice(id<MTLDevice> dev) { mDev = dev; }
+
+    MetalBuffer& buffer()
+    {
+        ensure();
+        return *mHeapBuf;
+    }
+    // Stable address for the lifetime of the heap: command streams capture this
+    // pointer once and read it at dispatch time (see MetalCommandStream::bind).
+    const std::vector<id<MTLTexture>>* resident() const { return &mResident; }
+
+    uint64_t acquire(id<MTLTexture> tex)
+    {
+        ensure();
+        uint64_t slot;
+        if (!mFree.empty()) {
+            slot = mFree.back();
+            mFree.pop_back();
+        } else {
+            slot = mHighWater++;
+            if (slot >= kMaxTextures)
+                throw std::runtime_error("texture heap full");
+        }
+        static_cast<MTLResourceID*>(mHeapBuf->hostPtr())[slot] = [tex gpuResourceID];
+        mResident.push_back(tex);
+        return slot;
+    }
+
+    void release(uint64_t slot, id<MTLTexture> tex)
+    {
+        if (mHeapBuf)
+            std::memset(static_cast<MTLResourceID*>(mHeapBuf->hostPtr()) + slot, 0,
+                        sizeof(MTLResourceID));
+        auto it = std::find(mResident.begin(), mResident.end(), tex);
+        if (it != mResident.end())
+            mResident.erase(it);
+        mFree.push_back(slot);
+    }
+
+private:
+    void ensure()
+    {
+        if (!mHeapBuf)
+            mHeapBuf = std::make_unique<MetalBuffer>(
+                mDev, BufferDesc{ kMaxTextures * sizeof(MTLResourceID),
+                                  MemoryLocation::Shared, "rhi.texheap" });
+    }
+    id<MTLDevice> mDev = nil;
+    std::unique_ptr<MetalBuffer> mHeapBuf;
+    std::vector<id<MTLTexture>> mResident;  // dense; kept resident by dispatches
+    std::vector<uint64_t> mFree;            // recycled slots
+    uint64_t mHighWater = 0;
+};
+
+// Bindless texture: its gpuResourceID lives in a MetalTextureHeap slot;
+// shaderHandle() is that slot index. Kernels read the heap buffer as
+// texture2d<float> entries (Metal 3 bindless — no argument encoder). Shared
+// storage so upload() is a plain replaceRegion. The slot is returned to the heap
+// on destruction.
 class MetalTexture final : public Texture {
 public:
-    MetalTexture(id<MTLDevice> dev, const TextureDesc& desc, uint64_t heapIndex)
-        : mHeapIndex(heapIndex), mWidth(desc.width), mHeight(desc.height)
+    MetalTexture(id<MTLDevice> dev, const TextureDesc& desc)
+        : mWidth(desc.width), mHeight(desc.height)
     {
         MTLPixelFormat fmt;
         switch (desc.format) {
@@ -92,6 +192,19 @@ public:
             mTex.label = [NSString stringWithUTF8String:desc.debugName];
     }
 
+    ~MetalTexture() override
+    {
+        if (mHeap)
+            mHeap->release(mHeapIndex, mTex);
+    }
+
+    // Bind this texture to a heap slot (done by the device right after creation).
+    void assignSlot(MetalTextureHeap* heap, uint64_t slot)
+    {
+        mHeap = heap;
+        mHeapIndex = slot;
+    }
+
     uint64_t shaderHandle() const override { return mHeapIndex; }
 
     void upload(const void* pixels, size_t bytes) override
@@ -109,7 +222,8 @@ public:
 
 private:
     id<MTLTexture> mTex;
-    uint64_t mHeapIndex;
+    MetalTextureHeap* mHeap = nullptr;
+    uint64_t mHeapIndex = 0;
     int mWidth, mHeight;
     size_t mBytesPerPixel = 4;
 };
@@ -292,6 +406,7 @@ public:
         if (!mDev)
             throw std::runtime_error("no Metal device available");
         mQueue = [mDev newCommandQueue];
+        mTexHeap.setDevice(mDev);
         if (!desc.shaderSource.empty()) {
             NSError* err = nil;
             MTLCompileOptions* opts = [MTLCompileOptions new];
@@ -315,23 +430,12 @@ public:
 
     std::unique_ptr<Texture> createTexture(const TextureDesc& desc) override
     {
-        uint64_t index = mTextures.size();
-        if ((index + 1) * sizeof(MTLResourceID) > textureHeap().size())
-            throw std::runtime_error("texture heap full");
-        auto tex = std::make_unique<MetalTexture>(mDev, desc, index);
-        static_cast<MTLResourceID*>(mTexHeap->hostPtr())[index] = [tex->handle() gpuResourceID];
-        mTextures.push_back(tex->handle());
+        auto tex = std::make_unique<MetalTexture>(mDev, desc);
+        tex->assignSlot(&mTexHeap, mTexHeap.acquire(tex->handle()));
         return tex;
     }
 
-    Buffer& textureHeap() override
-    {
-        if (!mTexHeap)
-            mTexHeap = std::make_unique<MetalBuffer>(
-                mDev, BufferDesc{ kMaxTextures * sizeof(MTLResourceID),
-                                  MemoryLocation::Shared, "rhi.texheap" });
-        return *mTexHeap;
-    }
+    Buffer& textureHeap() override { return mTexHeap.buffer(); }
     std::unique_ptr<ComputePipeline> createPipeline(const ComputePipelineDesc& desc) override
     {
         if (!mLib)
@@ -343,7 +447,7 @@ public:
         // All streams and the present blit share one queue: command buffers on
         // a queue start in commit order and default hazard tracking covers the
         // present-target buffer, so present-after-submit needs no fences.
-        return std::make_unique<MetalCommandStream>(mQueue, &mTextures);
+        return std::make_unique<MetalCommandStream>(mQueue, mTexHeap.resident());
     }
 
     std::unique_ptr<RayIntersector> createIntersector() override;
@@ -355,6 +459,16 @@ public:
         else if (width != mPresentW || height != mPresentH)
             throw std::logic_error("present target resize not supported");
         return *mPresentBuf;
+    }
+
+    void enableGui(const GuiDrawFn& draw) override
+    {
+#ifdef RHI_ENABLE_IMGUI
+        mGuiDraw = draw;
+        mGuiEnabled = true;
+#else
+        (void)draw;
+#endif
     }
 
     bool present() override
@@ -370,12 +484,23 @@ public:
                 if (!ev)
                     break;
                 if (ev.type == NSEventTypeKeyDown) {
+                    // Quit keys yield to ImGui while a widget owns the keyboard
+                    // (Esc dismisses popups / cancels slider text entry there).
+                    bool guiWantsKeys = false;
+#ifdef RHI_ENABLE_IMGUI
+                    guiWantsKeys = mGuiEnabled && ImGui::GetIO().WantCaptureKeyboard;
+#endif
                     NSString* ch = ev.charactersIgnoringModifiers;
-                    if (ev.keyCode == 53 /* Esc */ || [ch isEqualToString:@"q"]) {
+                    if (!guiWantsKeys
+                        && (ev.keyCode == 53 /* Esc */ || [ch isEqualToString:@"q"])) {
                         mWinDelegate.closeRequested = YES;
                         continue;
                     }
                 }
+#ifdef RHI_ENABLE_IMGUI
+                if (mGuiEnabled)
+                    guiHandleEvent(ev);
+#endif
                 [NSApp sendEvent:ev];
             }
             if (mWinDelegate.closeRequested)
@@ -396,6 +521,36 @@ public:
             [enc dispatchThreadgroups:MTLSizeMake((mPresentW + 15) / 16, (mPresentH + 15) / 16, 1)
                 threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
             [enc endEncoding];
+#ifdef RHI_ENABLE_IMGUI
+            // Draw the ImGui overlay over the just-blitted image: a render pass
+            // with loadAction=Load preserves the render, storeAction=Store keeps
+            // the composited result. Same command buffer as the blit, so Metal's
+            // automatic hazard tracking orders the compute write before this read.
+            if (mGuiEnabled) {
+                MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+                rpd.colorAttachments[0].texture = drawable.texture;
+                rpd.colorAttachments[0].loadAction = MTLLoadActionLoad;
+                rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+                ImGuiIO& io = ImGui::GetIO();
+                auto now = std::chrono::steady_clock::now();
+                float dt = std::chrono::duration<float>(now - mGuiLastTime).count();
+                mGuiLastTime = now;
+                io.DeltaTime = dt > 0.0f ? dt : 1.0f / 60.0f;
+                io.DisplaySize = ImVec2((float)mPresentW, (float)mPresentH);
+
+                ImGui_ImplMetal_NewFrame(rpd);
+                ImGui::NewFrame();
+                if (mGuiDraw)
+                    mGuiDraw();
+                ImGui::Render();
+
+                id<MTLRenderCommandEncoder> renc =
+                    [cb renderCommandEncoderWithDescriptor:rpd];
+                ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cb, renc);
+                [renc endEncoding];
+            }
+#endif
             [cb presentDrawable:drawable];
             [cb commit];
         }
@@ -418,6 +573,10 @@ private:
                         backing:NSBackingStoreBuffered
                           defer:NO];
         mWindow.releasedWhenClosed = NO;
+        // NSWindow suppresses mouse-moved events by default; without them ImGui
+        // only learns the pointer position during drags, so hover highlights and
+        // click hit-testing would run on stale coordinates.
+        mWindow.acceptsMouseMovedEvents = YES;
         mWindow.title = @"FluoraMini";
         mWinDelegate = [RhiWindowDelegate new];
         mWindow.delegate = mWinDelegate;
@@ -449,15 +608,28 @@ private:
                               "rhi.present" });
         mPresentW = width;
         mPresentH = height;
-    }
 
-    static constexpr size_t kMaxTextures = 1024;
+#ifdef RHI_ENABLE_IMGUI
+        if (mGuiEnabled) {
+            IMGUI_CHECKVERSION();
+            ImGui::CreateContext();
+            ImGui::StyleColorsDark();
+            ImGuiIO& io = ImGui::GetIO();
+            io.IniFilename = nullptr;  // no imgui.ini for a CLI tool
+            io.DisplaySize = ImVec2((float)width, (float)height);
+            // The drawable is sized in points (1:1 with the window), so ImGui
+            // renders in point space; feed mouse coords the same way.
+            io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+            ImGui_ImplMetal_Init(mDev);  // font atlas is built lazily in NewFrame
+            mGuiLastTime = std::chrono::steady_clock::now();
+        }
+#endif
+    }
 
     id<MTLDevice> mDev;
     id<MTLCommandQueue> mQueue;
     id<MTLLibrary> mLib = nil;
-    std::unique_ptr<Buffer> mTexHeap;         // MTLResourceID per texture
-    std::vector<id<MTLTexture>> mTextures;    // kept resident by dispatches
+    MetalTextureHeap mTexHeap;                // bindless slots + resident list + freelist
 
     NSWindow* mWindow = nil;
     CAMetalLayer* mLayer = nil;
@@ -465,6 +637,73 @@ private:
     id<MTLComputePipelineState> mBlitPso = nil;
     std::unique_ptr<Buffer> mPresentBuf;
     int mPresentW = 0, mPresentH = 0;
+
+#ifdef RHI_ENABLE_IMGUI
+    // Translate one Cocoa event into ImGui IO (mouse pos/buttons/wheel, keys).
+    void guiHandleEvent(NSEvent* ev)
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        switch (ev.type) {
+        case NSEventTypeMouseMoved:
+        case NSEventTypeLeftMouseDragged:
+        case NSEventTypeRightMouseDragged:
+        case NSEventTypeOtherMouseDragged: {
+            // Content-view coords (origin bottom-left, points); flip to ImGui's
+            // top-left. Converting through the content view accounts for the
+            // title bar so hit-testing lines up with the drawn widgets.
+            NSPoint p = [mWindow.contentView convertPoint:ev.locationInWindow fromView:nil];
+            io.AddMousePosEvent((float)p.x, (float)(mPresentH - p.y));
+            break;
+        }
+        case NSEventTypeLeftMouseDown:  io.AddMouseButtonEvent(0, true);  break;
+        case NSEventTypeLeftMouseUp:    io.AddMouseButtonEvent(0, false); break;
+        case NSEventTypeRightMouseDown: io.AddMouseButtonEvent(1, true);  break;
+        case NSEventTypeRightMouseUp:   io.AddMouseButtonEvent(1, false); break;
+        case NSEventTypeOtherMouseDown: io.AddMouseButtonEvent(2, true);  break;
+        case NSEventTypeOtherMouseUp:   io.AddMouseButtonEvent(2, false); break;
+        case NSEventTypeScrollWheel: {
+            double dx = ev.scrollingDeltaX, dy = ev.scrollingDeltaY;
+            if (ev.hasPreciseScrollingDeltas) { dx *= 0.01; dy *= 0.01; }
+            if (dx != 0.0 || dy != 0.0)
+                io.AddMouseWheelEvent((float)dx, (float)dy);
+            break;
+        }
+        case NSEventTypeKeyDown:
+        case NSEventTypeKeyUp: {
+            ImGuiKey key = imguiKeyFromMacKeyCode(ev.keyCode);
+            if (key != ImGuiKey_None)
+                io.AddKeyEvent(key, ev.type == NSEventTypeKeyDown);
+            // Text input (e.g. Ctrl+Click slider entry) needs characters, not
+            // just key transitions. Skip command/control chords and the 0xF7xx
+            // function-key range Cocoa reports for arrows/F-keys.
+            if (ev.type == NSEventTypeKeyDown
+                && !(ev.modifierFlags
+                     & (NSEventModifierFlagCommand | NSEventModifierFlagControl))) {
+                NSString* s = ev.characters;
+                for (NSUInteger i = 0; i < s.length; i++) {
+                    unichar c = [s characterAtIndex:i];
+                    if (c >= 32 && c != 127 && !(c >= 0xF700 && c <= 0xF7FF))
+                        io.AddInputCharacterUTF16(c);
+                }
+            }
+            break;
+        }
+        case NSEventTypeFlagsChanged: {
+            NSEventModifierFlags f = ev.modifierFlags;
+            io.AddKeyEvent(ImGuiKey_ModCtrl,  (f & NSEventModifierFlagControl) != 0);
+            io.AddKeyEvent(ImGuiKey_ModShift, (f & NSEventModifierFlagShift) != 0);
+            io.AddKeyEvent(ImGuiKey_ModAlt,   (f & NSEventModifierFlagOption) != 0);
+            io.AddKeyEvent(ImGuiKey_ModSuper, (f & NSEventModifierFlagCommand) != 0);
+            break;
+        }
+        default: break;
+        }
+    }
+
+    bool mGuiEnabled = false;
+    GuiDrawFn mGuiDraw;
+    std::chrono::steady_clock::time_point mGuiLastTime{};
+#endif
 };
 
 // Compute-traversal intersector: uploads the CPU-built threaded BVH; the

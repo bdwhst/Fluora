@@ -21,6 +21,7 @@
 #include <array>
 #include <cstdint>
 #include <cstddef>
+#include <functional>
 #include <initializer_list>
 #include <memory>
 #include <string>
@@ -232,6 +233,16 @@ public:
     // same-queue ordering makes them visible.
     virtual Buffer& presentTarget(int width, int height) = 0;
     virtual bool present() = 0;
+
+    // Optional ImGui overlay. Enable before the first presentTarget(): the
+    // backend creates the ImGui context and its platform/renderer backends and,
+    // inside present(), builds a frame and invokes `draw` to issue ImGui::
+    // widget calls, compositing them over the rendered image. The callback is
+    // portable (issues ImGui:: calls only; lives in src/core/gui) and reads
+    // input through ImGui's backend-neutral IO. No-op on backends built without
+    // a GUI implementation.
+    using GuiDrawFn = std::function<void()>;
+    virtual void enableGui(const GuiDrawFn& /*draw*/) {}
 };
 
 std::unique_ptr<Device> createDevice(BackendKind kind, const DeviceDesc& desc = {});
