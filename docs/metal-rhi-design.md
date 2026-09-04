@@ -4,8 +4,9 @@ Status: M0–M3 landed (FluoraMini renders full scenes spectrally on Metal);
 M4 part 1 landed 2026-09-03 (real CUDA backend — FluoraMini, RhiTest and
 SharedHostTest build and pass on Windows/CUDA, both render modes bitwise
 identical; the main CUDA renderer builds again). M4 part 2 in progress: grow
-the portable renderer instead of migrating pathtrace.cu — NEE+MIS and the
-.json/PLY loader landed, volumes next · Owner: bdwhst · Last updated: 2026-09-04
+the portable renderer instead of migrating pathtrace.cu — NEE+MIS, the
+.json/PLY loader and homogeneous media landed, NanoVDB next · Owner: bdwhst ·
+Last updated: 2026-09-04
 
 ## 1. Context and goal
 
@@ -428,7 +429,37 @@ two. Adding capability inside `src/mini` is a review flag.
      bitwise; the .txt path is unchanged (cornell bitwise across modes,
      FurnaceTest passes).
   4. Volumes: homogeneous first, then a NanoVDB-under-MSL spike before
-     committing to grid media on Metal.
+     committing to grid media on Metal. **Homogeneous media landed
+     2026-09-04** (`core/medium_shared.h` + `miniTrace` in
+     `pathtrace_gpu.h`): every path segment is traced through surfaces and
+     media together — a homogeneous medium is delta-tracked at the hero
+     wavelength (its majorant is sigma_t, so a sampled collision is a real
+     absorb/scatter event), a real scatter becomes a phase-function vertex
+     (HG, routed to a fourth `wf_shade` specialization `MINI_MAT_MEDIUM` in
+     wavefront mode), and surfaceless `MINI_MAT_INTERFACE` hits switch the
+     medium and continue without counting a bounce (PBRT rule: leaving along
+     the geometric normal enters OUTSIDE; also applied after BSDF scatters on
+     surfaces that carry an interface, e.g. the matchbulb glass). Spectral
+     MIS is PBRT-v4's: paths carry `r`, the per-wavelength pdf ratio to the
+     hero, and every contribution divides by its average; with no media `r`
+     is exactly 1 and media-free renders stayed bitwise identical to the
+     pre-change binary (cornell, bunny-skybox, bunny.json, both modes).
+     Shadow rays carry the spectral contribution instead of film RGB and
+     take the analytic Beer-Lambert transmittance through the media they
+     cross (passing interfaces), so there is no ratio-tracking `r_l` term;
+     media-free scenes keep the any-hit path. Light/BSDF MIS stays the
+     scalar power heuristic (the old volume integrator used the balance
+     form). The FurnaceTest gained a chromatic (sigma_s 0.2/0.4/0.8),
+     anisotropic (g 0.3), scattering-only fog box that must vanish: it does
+     (object/background 1.001/1.000/0.996 per channel at 256 spp), bitwise
+     across modes. Not rendered: medium emission (LESCALE — the .json
+     homogeneous media never carried an Le spectrum in the old loader
+     either) and NanoVDB grids, which upload as empty media so their
+     interfaces stay pass-through (matchbulb renders, flame missing).
+     Camera MEDIUM is honoured; volumetric-caustics.json declares the camera
+     inside `smoke_medium` while its box is INSIDE smoke / OUTSIDE vacuum, so
+     under the PBRT rule paths that exit the box leave the fog — the scene
+     file's inconsistency, not the tracker's.
   5. DOF (camera ray generation) and denoise (OIDN behind the present seam on
      CUDA; Metal stays M5).
   6. Retire `pathtrace.cu`, the integrators, `bvh.cpp`, `main.cpp`/

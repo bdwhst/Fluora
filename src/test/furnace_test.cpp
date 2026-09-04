@@ -17,6 +17,15 @@
 // "white" sits slightly below 1, so exact unity is not expected), and the
 // mega and wavefront dumps bitwise identical (the --safe-math invariant,
 // here covering the env-NEE path). Exits nonzero on failure.
+//
+// A second scene runs the same check on participating media: a purely
+// scattering (sigma_a = 0), chromatic, anisotropic homogeneous medium in a
+// surfaceless box. Every scattering event conserves energy, so the box must
+// vanish against the uniform environment just like the sphere does. This
+// covers the delta-tracked distance sampling, HG phase sampling, the
+// interface pass-through (camera paths and shadow rays), Beer-Lambert
+// transmittance on shadow rays, and — because sigma_s differs per wavelength —
+// the hero-wavelength spectral MIS: a wrong r ratio tints the box.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -44,6 +53,8 @@ constexpr int kRes = 200;       // must match RES in the scene below
 constexpr int kSpp = 256;
 constexpr float kSphereR = 30;  // px: safely inside the ~44 px silhouette
 constexpr float kBgR = 55;      // px: safely outside it
+constexpr float kBoxR = 15;     // px: inside the medium box's ~25 px near face
+constexpr float kBoxBgR = 45;   // px: outside its ~35 px diagonal
 
 void setEnvVar(const char* name, const std::string& value)
 {
@@ -106,6 +117,37 @@ void writeScene(const fs::path& path, const std::string& hdrName)
       << hdrName << "\n";
 }
 
+// The medium scene (.json): a 2-unit box of scattering-only fog, camera in
+// vacuum at z=5 looking at it. Optical depth across the box is 0.4..1.6
+// depending on wavelength; DEPTH is generous so truncated paths lose no
+// measurable energy.
+void writeMediumScene(const fs::path& path, const std::string& hdrName)
+{
+    std::ofstream f(path);
+    f << "{\n"
+         "  \"Camera\": { \"RES\": [" << kRes << ", " << kRes << "], \"FOVY\": 45.0,\n"
+         "    \"ITERATIONS\": " << kSpp << ", \"DEPTH\": 64, \"FILE\": \"furnace_medium\",\n"
+         "    \"EYE\": [0, 0, 5], \"LOOKAT\": [0, 0, 0], \"UP\": [0, 1, 0] },\n"
+         "  \"Background\": { \"TYPE\": \"skybox\", \"PATH\": \"" << hdrName << "\" },\n"
+         "  \"Materials\": {},\n"
+         "  \"Media\": {\n"
+         "    \"fog\": { \"TYPE\": \"homogeneous\",\n"
+         "      \"SIGMA_A\": { \"TYPE\": \"rgb\", \"VALUE\": [0, 0, 0] },\n"
+         "      \"SIGMA_S\": { \"TYPE\": \"rgb\", \"VALUE\": [0.2, 0.4, 0.8] },\n"
+         "      \"SIGMA_SCALE\": 1.0, \"G\": 0.3,\n"
+         "      \"TRANS\": [0, 0, 0], \"ROTAT\": [0, 0, 0], \"SCALE\": [1, 1, 1] }\n"
+         "  },\n"
+         "  \"MediumInterfaces\": { \"fogBox\": { \"INSIDE\": \"fog\", \"OUTSIDE\": \"\" } },\n"
+         "  \"Objects\": [\n"
+         "    { \"TYPE\": \"model_inline\",\n"
+         "      \"VERTICES\": [1,-1,1, -1,-1,1, 1,1,1, -1,1,1, -1,-1,-1, 1,-1,-1, -1,1,-1, 1,1,-1],\n"
+         "      \"INDICES\": [0,3,1, 0,2,3, 4,7,5, 4,6,7, 6,2,7, 6,3,2, 5,1,4, 5,0,1, 5,2,0, 5,7,2, 1,6,4, 1,3,6],\n"
+         "      \"MEDIUM_INTERFACE\": \"fogBox\",\n"
+         "      \"TRANS\": [0, 0, 0], \"ROTAT\": [0, 0, 0], \"SCALE\": [1, 1, 1] }\n"
+         "  ]\n"
+         "}\n";
+}
+
 bool runMode(const fs::path& exe, const fs::path& scene, const fs::path& dump, const char* mode)
 {
     setEnvVar("MINI_DUMP_ACCUM", dump.string());
@@ -128,8 +170,9 @@ std::vector<float> readDump(const fs::path& path)
     return v;
 }
 
-// Sphere-region vs background-region channel means; false on non-finite data.
-bool analyze(const std::vector<float>& acc, const char* mode)
+// Object-region (r < rIn) vs background-region (r > rOut) channel means;
+// false on non-finite data.
+bool analyze(const std::vector<float>& acc, const char* mode, float rIn, float rOut)
 {
     double sphere[3] = {}, bg[3] = {};
     long nSphere = 0, nBg = 0;
@@ -140,11 +183,11 @@ bool analyze(const std::vector<float>& acc, const char* mode)
             for (int c = 0; c < 3; c++)
                 finite = finite && std::isfinite(px[c]);
             float r = std::hypot(x - kRes * 0.5f, y - kRes * 0.5f);
-            if (r < kSphereR) {
+            if (r < rIn) {
                 for (int c = 0; c < 3; c++)
                     sphere[c] += px[c];
                 nSphere++;
-            } else if (r > kBgR) {
+            } else if (r > rOut) {
                 for (int c = 0; c < 3; c++)
                     bg[c] += px[c];
                 nBg++;
@@ -158,7 +201,7 @@ bool analyze(const std::vector<float>& acc, const char* mode)
         double ratio = (sphere[c] / nSphere) / bgMean;
         bgOk = bgOk && bgMean > 0.0;
         ratioOk = ratioOk && ratio > 0.97 && ratio < 1.02;
-        std::cout << "  " << mode << " ch" << c << ": sphere/background = " << ratio << "\n";
+        std::cout << "  " << mode << " ch" << c << ": object/background = " << ratio << "\n";
     }
     check(bgOk, (std::string("backgroundNonzero:") + mode).c_str());
     check(ratioOk, (std::string("furnaceRatio:") + mode).c_str());
@@ -175,22 +218,33 @@ int main(int, char** argv)
     fs::create_directories(dir);
     writeUniformHdr(dir / "furnace_env.hdr", 16, 8);
     writeScene(dir / "furnace.txt", "furnace_env.hdr");
+    writeMediumScene(dir / "furnace_medium.json", "furnace_env.hdr");
 
-    fs::path dumpWf = dir / "acc_wavefront.bin", dumpMega = dir / "acc_mega.bin";
-    check(runMode(exe, dir / "furnace.txt", dumpWf, "wavefront"), "renderWavefront");
-    check(runMode(exe, dir / "furnace.txt", dumpMega, "mega"), "renderMega");
-    if (failures)
-        return 1;
+    struct Case { const char* name; const char* scene; float rIn, rOut; };
+    const Case cases[] = {
+        { "sphere", "furnace.txt", kSphereR, kBgR },
+        { "medium", "furnace_medium.json", kBoxR, kBoxBgR },
+    };
+    for (const Case& cs : cases) {
+        std::cout << "== " << cs.name << " (" << cs.scene << ")\n";
+        std::string tag = std::string(":") + cs.name;
+        fs::path dumpWf = dir / (std::string("acc_wavefront_") + cs.name + ".bin");
+        fs::path dumpMega = dir / (std::string("acc_mega_") + cs.name + ".bin");
+        check(runMode(exe, dir / cs.scene, dumpWf, "wavefront"), ("renderWavefront" + tag).c_str());
+        check(runMode(exe, dir / cs.scene, dumpMega, "mega"), ("renderMega" + tag).c_str());
+        if (failures)
+            break;
 
-    std::vector<float> wf = readDump(dumpWf), mega = readDump(dumpMega);
-    check(!wf.empty() && !mega.empty(), "accumDumpsRead");
-    if (failures)
-        return 1;
+        std::vector<float> wf = readDump(dumpWf), mega = readDump(dumpMega);
+        check(!wf.empty() && !mega.empty(), ("accumDumpsRead" + tag).c_str());
+        if (failures)
+            break;
 
-    analyze(wf, "wavefront");
-    analyze(mega, "mega");
-    check(std::memcmp(wf.data(), mega.data(), wf.size() * sizeof(float)) == 0,
-          "megaWavefrontBitwise(safe math)");
+        analyze(wf, ("wavefront" + tag).c_str(), cs.rIn, cs.rOut);
+        analyze(mega, ("mega" + tag).c_str(), cs.rIn, cs.rOut);
+        check(std::memcmp(wf.data(), mega.data(), wf.size() * sizeof(float)) == 0,
+              ("megaWavefrontBitwise(safe math)" + tag).c_str());
+    }
     if (failures == 0)
         fs::remove_all(dir);
     else

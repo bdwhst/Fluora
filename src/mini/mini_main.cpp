@@ -25,6 +25,7 @@
 #include "../core/host_math.h"
 #include "../core/image_loader.h"
 #include "../core/lights.h"
+#include "../core/medium_shared.h"
 #include "../core/scene_loader.h"
 #include "../core/spectra.h"
 #include "../core/spectrum_shared.h"
@@ -53,7 +54,7 @@ std::string readTextFile(const std::string& path)
 // the old one's buffers free when this is reassigned (after a waitIdle()).
 struct SceneGpu {
     std::unique_ptr<rhi::Buffer> matBuf, objBuf, normalBuf, uvBuf, spdBuf, r2sBuf;
-    std::unique_ptr<rhi::Buffer> lightBuf, envDistBuf;
+    std::unique_ptr<rhi::Buffer> lightBuf, envDistBuf, mediaBuf;
     std::unique_ptr<rhi::RayIntersector> intersector;
     std::array<rhi::Buffer*, 3> rt{ nullptr, nullptr, nullptr };
     std::vector<std::unique_ptr<rhi::Texture>> matTextures;
@@ -64,6 +65,8 @@ struct SceneGpu {
     unsigned numObjects = 0;
     unsigned bvhNumNodes = 0;
     unsigned numLights = 0;
+    unsigned numMedia = 0;
+    int cameraMedium = MINI_MEDIUM_NONE;
     unsigned envW = 0, envH = 0;
     int maxDepth = 8;
     float fovyDeg = 45.0f;
@@ -131,16 +134,15 @@ SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
         case CoreMaterialType::Emissive: mm.type = MINI_MAT_EMITTING; break;
         case CoreMaterialType::Dielectric: mm.type = MINI_MAT_GLASS; break;
         case CoreMaterialType::Conductor: mm.type = MINI_MAT_CONDUCTOR; break;
-        // Medium boundary without a surface. The loader emits no geometry for
-        // these (they would block shadow rays), so this entry only keeps the
-        // material indices dense; an index-matched dielectric is the closest
-        // stand-in until the media step gives it a real transition.
-        case CoreMaterialType::Interface: mm.type = MINI_MAT_GLASS; break;
+        // Medium boundary without a surface: rays pass through, switching medium.
+        case CoreMaterialType::Interface: mm.type = MINI_MAT_INTERFACE; break;
         }
         mm.rgb = hostStore3(m.rgb);
         mm.emittance = m.emittance;
-        mm.ior = m.type == CoreMaterialType::Interface ? 1.0f : m.ior;
+        mm.ior = m.ior;
         mm.roughness = m.roughness;
+        mm.mediumIn = m.mediumIn;
+        mm.mediumOut = m.mediumOut;
         mm.texIdx = m.texIdx == kCoreTexNone ? MINI_TEX_NONE : texHeap[m.texIdx];
         mm.etaSpd = resolveSpd(m.etaNamed);
         mm.kSpd = resolveSpd(m.kNamed);
@@ -229,6 +231,35 @@ SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
     sg.numLights = (unsigned)lights.size();
     sg.lightBuf = makeUpload(lights.data(), lights.size() * sizeof(RtLight), "lights");
     std::cout << "mini: " << lights.size() << " lights\n";
+
+    // Participating media (core/medium_shared.h): sigma_a/sigma_s become
+    // unbounded rgb2spec spectra in the spd table, with SIGMA_SCALE folded in.
+    // NanoVDB grids are not rendered yet: they upload as empty media so the
+    // interfaces around them stay pass-through.
+    std::vector<MediumGpu> media;
+    media.reserve(scene.media.size());
+    for (const auto& m : scene.media) {
+        MediumGpu mg = {};
+        if (m.type == CoreMediumType::NanoVdb) {
+            std::cout << "mini: medium '" << m.name << "' is a NanoVDB grid (not rendered yet, "
+                      << "treated as empty)\n";
+            mg.type = MEDIUM_NANOVDB;
+            mg.sigmaASpd = spectra.rgbUnboundedOffset(glm::vec3(0.0f));
+            mg.sigmaSSpd = mg.sigmaASpd;
+        } else {
+            mg.type = MEDIUM_HOMOGENEOUS;
+            mg.sigmaASpd = spectra.rgbUnboundedOffset(m.sigmaA * m.sigmaScale);
+            mg.sigmaSSpd = spectra.rgbUnboundedOffset(m.sigmaS * m.sigmaScale);
+        }
+        mg.g = m.g;
+        media.push_back(mg);
+    }
+    sg.numMedia = (unsigned)media.size();
+    sg.cameraMedium = scene.camera.mediumId;
+    sg.mediaBuf = makeUpload(media.data(), media.size() * sizeof(MediumGpu), "media");
+    if (!media.empty())
+        std::cout << "mini: " << media.size() << " media" << (sg.cameraMedium >= 0 ? " (camera inside one)" : "")
+                  << "\n";
 
     // Spectral tables (invariant I-1: kernels get offsets, not pointers): the
     // dense-spectra buffer (CIE curves, D65, named eta/k) and the sRGB rgb2spec
@@ -384,6 +415,7 @@ int main(int argc, char** argv)
                                 + "\n" + readTextFile(std::string(MINI_SHADER_DIR) + "/mini_shared.h")
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/accel_shared.h")
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/bsdf_shared.h")
+                                + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/medium_shared.h")
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/tonemap_shared.h")
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/envmap_shared.h")
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/light_shared.h")
@@ -425,11 +457,12 @@ int main(int argc, char** argv)
         std::unique_ptr<rhi::Buffer> accum;
         size_t accumBytes = 0;
         rhi::Dim3 grid{ 1, 1, 1 };
-        std::unique_ptr<rhi::Buffer> raysA, raysB, shadowQueue, qDiffuse, qConductor, qGlass;
+        std::unique_ptr<rhi::Buffer> raysA, raysB, shadowQueue, qDiffuse, qConductor, qGlass,
+            qMedium;
         auto allocSizedBuffers = [&] {
             // Release the previous size's buffers before allocating the new
             // ones: assigning over them would keep both sets live at the peak,
-            // and the wavefront queues are five width*height*WF_PATHSTATE_SIZE
+            // and the wavefront queues are six width*height*WF_PATHSTATE_SIZE
             // allocations (gigabytes at large resolutions). Safe because every
             // caller has drained the stream first.
             accum.reset();
@@ -438,6 +471,7 @@ int main(int argc, char** argv)
             qDiffuse.reset();
             qConductor.reset();
             qGlass.reset();
+            qMedium.reset();
             shadowQueue.reset();
             accumBytes = (size_t)width * height * 4 * sizeof(float);
             accum = device->createBuffer({ accumBytes, rhi::MemoryLocation::Shared, "accum" });
@@ -450,6 +484,7 @@ int main(int argc, char** argv)
                 qDiffuse = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.qDiffuse" });
                 qConductor = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.qConductor" });
                 qGlass = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.qGlass" });
+                qMedium = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.qMedium" });
                 shadowQueue = device->createBuffer({ (size_t)width * height * WF_SHADOWRAY_SIZE,
                                                      rhi::MemoryLocation::DeviceLocal, "wf.shadow" });
             }
@@ -469,7 +504,7 @@ int main(int argc, char** argv)
         std::unique_ptr<rhi::Buffer> counts, indirectArgs;
         std::unique_ptr<rhi::ComputePipeline> raygenPipe, prepIntersectPipe, prepShadePipe,
             prepShadowPipe, intersectPipe, shadeDiffusePipe, shadeConductorPipe, shadeGlassPipe,
-            shadowPipe;
+            shadeMediumPipe, shadowPipe;
         if (mode == "wavefront") {
             counts = device->createBuffer({ WF_NUM_COUNTERS * 4, rhi::MemoryLocation::DeviceLocal, "wf.counts" });
             indirectArgs = device->createBuffer({ WF_NUM_ARG_SLOTS * 16, rhi::MemoryLocation::DeviceLocal, "wf.args" });
@@ -481,6 +516,7 @@ int main(int argc, char** argv)
             shadeDiffusePipe = device->createPipeline({ "wf_shade", { { 0, MINI_MAT_DIFFUSE } } });
             shadeConductorPipe = device->createPipeline({ "wf_shade", { { 0, MINI_MAT_CONDUCTOR } } });
             shadeGlassPipe = device->createPipeline({ "wf_shade", { { 0, MINI_MAT_GLASS } } });
+            shadeMediumPipe = device->createPipeline({ "wf_shade", { { 0, MINI_MAT_MEDIUM } } });
             shadowPipe = device->createPipeline({ "wf_shadow" });
         }
         const rhi::Dim3 one{ 1, 1, 1 };
@@ -496,7 +532,7 @@ int main(int argc, char** argv)
                                    sg.rt[0], sg.rt[1], sg.rt[2], texHeap,
                                    sg.normalBuf.get(), sg.uvBuf.get(),
                                    sg.spdBuf.get(), sg.r2sBuf.get(),
-                                   sg.lightBuf.get(), sg.envDistBuf.get() });
+                                   sg.lightBuf.get(), sg.envDistBuf.get(), sg.mediaBuf.get() });
                 return;
             }
             stream->dispatch(*raygenPipe, grid, block, &p, sizeof(p),
@@ -515,6 +551,7 @@ int main(int argc, char** argv)
                 c.numLights = p.numLights;
                 c.envW = p.envW;
                 c.envH = p.envH;
+                c.numMedia = p.numMedia;
                 c.filmR0 = p.filmR0;
                 c.filmR1 = p.filmR1;
                 c.filmR2 = p.filmR2;
@@ -529,7 +566,8 @@ int main(int argc, char** argv)
                                            sg.rt[0], sg.rt[1], sg.rt[2], sg.matBuf.get(), accum.get(),
                                            qDiffuse.get(), qConductor.get(), qGlass.get(),
                                            texHeap, sg.normalBuf.get(), sg.uvBuf.get(),
-                                           sg.spdBuf.get(), sg.r2sBuf.get(), sg.envDistBuf.get() });
+                                           sg.spdBuf.get(), sg.r2sBuf.get(), sg.envDistBuf.get(),
+                                           sg.mediaBuf.get(), qMedium.get() });
                 stream->dispatch(*prepShadePipe, one, one, &c, sizeof(c),
                                  { counts.get(), indirectArgs.get() });
 
@@ -539,6 +577,7 @@ int main(int argc, char** argv)
                     { shadeDiffusePipe.get(), qDiffuse.get(), WF_COUNT_SHADE_DIFFUSE, WF_ARG_DIFFUSE },
                     { shadeConductorPipe.get(), qConductor.get(), WF_COUNT_SHADE_CONDUCTOR, WF_ARG_CONDUCTOR },
                     { shadeGlassPipe.get(), qGlass.get(), WF_COUNT_SHADE_GLASS, WF_ARG_GLASS },
+                    { shadeMediumPipe.get(), qMedium.get(), WF_COUNT_SHADE_MEDIUM, WF_ARG_MEDIUM },
                 };
                 for (const auto& pass : shadePasses) {
                     c.srcCounter = pass.counter;
@@ -549,7 +588,7 @@ int main(int argc, char** argv)
                                                sg.spdBuf.get(), sg.r2sBuf.get(),
                                                sg.lightBuf.get(), sg.objBuf.get(),
                                                sg.rt[1], sg.rt[2], sg.envDistBuf.get(),
-                                               shadowQueue.get() });
+                                               shadowQueue.get(), sg.mediaBuf.get() });
                 }
                 // Next-event estimation shadow rays for this bounce, before the
                 // next intersect so per-pixel contributions land in the same
@@ -559,7 +598,9 @@ int main(int argc, char** argv)
                 stream->dispatchIndirect(*shadowPipe, tile, *indirectArgs,
                                          WF_ARG_SHADOW * 16, &c, sizeof(c),
                                          { counts.get(), shadowQueue.get(), sg.objBuf.get(),
-                                           sg.rt[0], sg.rt[1], sg.rt[2], accum.get() });
+                                           sg.rt[0], sg.rt[1], sg.rt[2], accum.get(),
+                                           sg.matBuf.get(), sg.normalBuf.get(), sg.uvBuf.get(),
+                                           sg.spdBuf.get(), sg.mediaBuf.get() });
                 cur = next;
             }
         };
@@ -579,6 +620,8 @@ int main(int argc, char** argv)
             params.numLights = sg.numLights;
             params.envW = sg.envW;
             params.envH = sg.envH;
+            params.numMedia = sg.numMedia;
+            params.cameraMedium = sg.cameraMedium;
         };
         applySceneParams();
 

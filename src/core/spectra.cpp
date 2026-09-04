@@ -1,5 +1,6 @@
 #include "spectra.h"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
@@ -169,6 +170,34 @@ uint32_t SpectralTables::namedOffset(const std::string& name)
     std::vector<float> dense = densify(p);
     spd.insert(spd.end(), dense.begin(), dense.end());
     cache.emplace(name, off);
+    return off;
+}
+
+uint32_t SpectralTables::rgbUnboundedOffset(const glm::vec3& rgb)
+{
+    // Keyed by the exact float bits so equal coefficients share one run.
+    std::string key = "rgb-unbounded:" + std::to_string(rgb.x) + "," + std::to_string(rgb.y)
+                    + "," + std::to_string(rgb.z);
+    auto it = cache.find(key);
+    if (it != cache.end())
+        return it->second;
+    // The device's rgb2spec lookup runs on the host here (spectrum_shared.h
+    // compiles as plain C++): it wants zNodes and coeffs back to back, the
+    // same layout the rgb2spec upload uses.
+    static const std::vector<float> r2s = [] {
+        Rgb2SpecView v = rgb2specSrgb();
+        std::vector<float> t(v.zNodes, v.zNodes + v.zNodeCount);
+        t.insert(t.end(), v.coeffs, v.coeffs + v.coeffCount);
+        return t;
+    }();
+    glm::vec3 c = glm::max(rgb, glm::vec3(0.0f));
+    float m = std::max(c.x, std::max(c.y, c.z));
+    float scale = 2.0f * m;
+    SpdPoly p = spd_rgb_to_coeffs(r2s.data(), scale != 0.0f ? c / scale : glm::vec3(0.0f));
+    uint32_t off = (uint32_t)spd.size();
+    for (uint32_t i = 0; i < SPD_TABLE_SIZE; i++)
+        spd.push_back(scale * spd_poly_eval(p, SPD_LAMBDA_MIN + (float)i));
+    cache.emplace(key, off);
     return off;
 }
 

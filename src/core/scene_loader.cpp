@@ -545,7 +545,6 @@ bool loadJsonScene(const std::string& path, CoreScene& out, std::string& err)
             return id;
         };
 
-        int skippedInterfaces = 0;
         for (const json& obj : data.at("Objects")) {
             std::string type = obj.at("TYPE").get<std::string>();
             // Unsupported types are skipped before the material is resolved: an
@@ -561,16 +560,6 @@ bool loadJsonScene(const std::string& path, CoreScene& out, std::string& err)
             if (!e.empty()) {
                 err = e;
                 return false;
-            }
-            // An interface-only object is a medium boundary with no surface, and
-            // media are not rendered yet. Its geometry cannot simply be left in:
-            // shadow rays test geometry alone, with no material (sceneOccluded),
-            // so the boundary would cast a hard shadow that no BSDF-side
-            // pass-through undoes. Drop it; the material and its media stay in
-            // the scene for the media step to pick up.
-            if (matId >= 0 && out.materials[matId].type == CoreMaterialType::Interface) {
-                skippedInterfaces++;
-                continue;
             }
             glm::mat4 t = jsonTransform(obj);
             if (type == "geometry_cube" || type == "geometry_sphere") {
@@ -603,15 +592,11 @@ bool loadJsonScene(const std::string& path, CoreScene& out, std::string& err)
                 }
             }
         }
-        if (skippedInterfaces)
-            std::cout << "core: " << skippedInterfaces
-                      << " medium-interface object(s) skipped (no surface to render yet)\n";
     } catch (const std::exception& e) {
         err = std::string("json scene: ") + e.what();
         return false;
     }
     if (!out.media.empty())
-        std::cout << "core: " << out.media.size()
-                  << " media parsed (volumes not rendered yet; boundaries not rendered)\n";
+        std::cout << "core: " << out.media.size() << " media\n";
     return finishScene(out, err);
 }

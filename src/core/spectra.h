@@ -21,6 +21,12 @@ public:
     // densified and appended on first request. SPD_NONE if unknown.
     uint32_t namedOffset(const std::string& name);
 
+    // Float offset of an RGB coefficient widened as an unbounded rgb2spec
+    // spectrum (PBRT RGBUnboundedSpectrum: scale * sigmoid polynomial, the
+    // sRGB table), densified and appended on first request — medium sigma_a
+    // and sigma_s, which exceed 1. Deduplicated by value.
+    uint32_t rgbUnboundedOffset(const glm::vec3& rgb);
+
     const std::vector<float>& buffer() const { return spd; }
 
 private:

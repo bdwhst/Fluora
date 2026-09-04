@@ -23,6 +23,12 @@ typedef gpu_storage4x4 mini_float4x4;
 #define MINI_MAT_EMITTING  1
 #define MINI_MAT_GLASS     2
 #define MINI_MAT_CONDUCTOR 3  // GGX; roughness < 1e-3 degenerates to mirror
+#define MINI_MAT_INTERFACE 4  // surfaceless medium boundary: rays pass through,
+                              // switching medium (never shaded, never a bounce)
+#define MINI_MAT_MEDIUM    5  // not a material: the shade-kernel specialization
+                              // for real-scatter vertices inside a medium (HG phase)
+
+#define MINI_MEDIUM_NONE (-1)  // vacuum
 
 #define MINI_ENV_NONE 0xFFFFFFFFu  // envMapIdx sentinel: black environment
 #define MINI_TEX_NONE 0xFFFFFFFFu  // texIdx sentinel: untextured
@@ -44,7 +50,13 @@ struct MiniMaterial {
     // mode derives k from rgb (eta = 1).
     unsigned int etaSpd;
     unsigned int kSpd;
-    unsigned int pad0;
+    // Medium interface (.json MEDIUM_INTERFACE, indices into the media buffer
+    // or MINI_MEDIUM_NONE): a ray leaving through this surface (new direction
+    // along the normal) enters mediumOut, one going in enters mediumIn. Equal
+    // values mean the surface does not change the medium.
+    int mediumIn;
+    int mediumOut;
+    unsigned int pad0, pad1, pad2;
 };
 
 // Unit primitives (cube [-0.5,0.5]^3, sphere r=0.5) with baked transforms,
@@ -80,6 +92,9 @@ struct MiniParams {
     unsigned int numLights;   // RtLight records (0 = no next-event estimation)
     unsigned int envW;        // env-map / distribution size (light_shared.h ENVDIST_*)
     unsigned int envH;
+    unsigned int numMedia;    // MediumGpu records (0 = no participating media)
+    int cameraMedium;         // medium the eye sits in (.json Camera MEDIUM), or MINI_MEDIUM_NONE
+    unsigned int pad0, pad1;
 };
 
 // ---- wavefront mode (design doc M2/M3) ----
@@ -93,6 +108,7 @@ struct MiniParams {
 #define WF_COUNT_SHADE_CONDUCTOR 3
 #define WF_COUNT_SHADE_GLASS    4
 #define WF_COUNT_SHADOW         5  // shadow rays pushed by the shade kernels
+#define WF_COUNT_SHADE_MEDIUM   6  // real-scatter vertices inside a medium
 #define WF_NUM_COUNTERS 8  // padded
 
 // Indirect-args slots (16-byte stride each)
@@ -101,20 +117,24 @@ struct MiniParams {
 #define WF_ARG_CONDUCTOR 2
 #define WF_ARG_GLASS     3
 #define WF_ARG_SHADOW    4
-#define WF_NUM_ARG_SLOTS 5
+#define WF_ARG_MEDIUM    5
+#define WF_NUM_ARG_SLOTS 6
 
 // WfPath is device-only (the host never reads paths); the host allocates
 // queues with this stride and the device static_asserts the real sizeof
-// matches. Spectral state per path: throughput is one float4 spectrum, and
-// wavelengths are recomputed each stage from lambdaU (+ the dispersion flag)
-// instead of being carried — 8 bytes of queue traffic instead of 32.
-#define WF_PATHSTATE_SIZE 96
+// matches. Spectral state per path: throughput and the hero-wavelength pdf
+// ratio (media) are one float4 spectrum each, and wavelengths are recomputed
+// each stage from lambdaU (+ the dispersion flag) instead of being carried —
+// 8 bytes of queue traffic instead of 32.
+#define WF_PATHSTATE_SIZE 112
 #define WF_FLAG_SECONDARY_TERMINATED 1u
 #define WF_FLAG_PREV_SPECULAR        2u  // last scatter was a delta BSDF (no MIS on hit)
 
-// Shadow rays (next-event estimation) carry the already MIS-weighted film RGB
-// contribution; wf_shadow adds it when the light is visible.
-#define WF_SHADOWRAY_SIZE 48
+// Shadow rays (next-event estimation) carry the already MIS-weighted spectral
+// contribution, what rebuilds its wavelengths, and the medium they start in;
+// wf_shadow scales it by the transmittance to the light (0 when blocked),
+// converts to film RGB and adds it.
+#define WF_SHADOWRAY_SIZE 64
 
 // Per-dispatch control block for the wavefront kernels.
 struct WfCtl {
@@ -128,7 +148,8 @@ struct WfCtl {
     unsigned int envMapIdx;
     unsigned int envW;
     unsigned int envH;
-    unsigned int pad0, pad1;
+    unsigned int numMedia;
+    unsigned int pad0;
     mini_float3 filmR0;        // film matrix rows, as in MiniParams
     mini_float3 filmR1;
     mini_float3 filmR2;

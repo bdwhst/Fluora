@@ -24,10 +24,9 @@ constexpr uint32_t kCoreTexNone = 0xFFFFFFFFu;
 // (frenselSpecular -> Dielectric, microfacet/conductor -> Conductor).
 // Unsupported types (asymMicrofacet, ...) degrade to Diffuse with a warning.
 // Interface is a pass-through boundary: .json objects that only carry a
-// MEDIUM_INTERFACE, no surface. Their geometry is not emitted until media
-// land — a surfaceless boundary still blocks shadow rays, which no BSDF-side
-// pass-through undoes — but the material stays, so the medium pair it names
-// survives into the scene.
+// MEDIUM_INTERFACE, no surface. Their geometry is emitted like any other so
+// rays can cross it and switch medium (mediumIn/mediumOut below); the
+// renderer never shades it and shadow rays pass through it.
 enum class CoreMaterialType { Diffuse, Emissive, Dielectric, Conductor, Interface };
 
 struct CoreMaterial {
