@@ -61,7 +61,7 @@ bool loadTxtScene(const std::string& path, CoreScene& out, std::string& err)
     PendingObject curObj;
 
     std::string sceneDir = "./";
-    if (auto slash = path.find_last_of('/'); slash != std::string::npos)
+    if (auto slash = path.find_last_of("/\\"); slash != std::string::npos)
         sceneDir = path.substr(0, slash + 1);
 
     // Texture paths dedupe to one heap slot (MTL files commonly bind the same

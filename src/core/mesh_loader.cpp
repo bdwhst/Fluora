@@ -45,7 +45,9 @@ bool loadObjMesh(const std::string& path, const glm::mat4& transform,
     std::vector<tinyobj::shape_t> shapes;
     std::vector<tinyobj::material_t> objMaterials;
     std::string warn, err;
-    std::string dir = path.substr(0, path.find_last_of('/') + 1);
+    std::string dir;
+    if (auto slash = path.find_last_of("/\\"); slash != std::string::npos)
+        dir = path.substr(0, slash + 1);
     if (!tinyobj::LoadObj(&attrib, &shapes, &objMaterials, &warn, &err, path.c_str(),
                           dir.c_str(), /*triangulate=*/true)) {
         std::cout << "core: OBJ load failed for " << path << ": " << err << "\n";
