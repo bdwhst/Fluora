@@ -113,6 +113,11 @@ if(APPLE)
         TEST_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/test")
     target_link_libraries(RaytraceTest "-framework Metal" "-framework Foundation"
         "-framework AppKit" "-framework QuartzCore")
+
+    # White-furnace test: drives the FluoraMini binary headlessly (no GPU deps
+    # of its own) and checks energy conservation via MINI_DUMP_ACCUM.
+    add_executable(FurnaceTest src/test/furnace_test.cpp)
+    add_dependencies(FurnaceTest FluoraMini)
     return()
 endif()
 
@@ -377,3 +382,8 @@ fluora_rhi_target(RaytraceTest
     src/core/bvh_builder.cpp
     ${FLUORA_RHI_CUDA_SOURCES})
 fluora_cuda_kernels(RaytraceTest src/test/raytrace_test_gpu.h)
+
+# White-furnace test: drives the FluoraMini binary headlessly (no GPU deps of
+# its own) and checks energy conservation via MINI_DUMP_ACCUM.
+add_executable(FurnaceTest src/test/furnace_test.cpp)
+add_dependencies(FurnaceTest FluoraMini)

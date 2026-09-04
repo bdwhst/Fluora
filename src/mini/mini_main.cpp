@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -551,6 +552,18 @@ int main(int argc, char** argv)
             std::cout << "\nmini: rendered " << spp << " spp in " << sec << " s ("
                       << (sec > 0 ? spp / sec : 0.0) << " spp/s, " << mode << ", "
                       << rhi::backendName(rhi::kNativeBackend) << ")\n";
+            // MINI_DUMP_ACCUM=<path>: also write the raw float accumulator
+            // (width*height RGBA32F, radiance sums before /spp and tonemap).
+            // Float-precision output for FurnaceTest and parity debugging —
+            // the 8-bit PNG quantizes away sub-0.4% differences.
+            if (const char* dumpPath = std::getenv("MINI_DUMP_ACCUM")) {
+                std::ofstream f(dumpPath, std::ios::binary);
+                f.write((const char*)accum->hostPtr(), (std::streamsize)accumBytes);
+                if (!f) {
+                    std::cerr << "failed to write " << dumpPath << "\n";
+                    return 1;
+                }
+            }
             std::string outName = !outOverride.empty() ? outOverride : sg.outputName + outSuffix;
             if (!savePng(outName, (const float*)accum->hostPtr(), width, height, spp)) {
                 std::cerr << "failed to write " << outName << "\n";

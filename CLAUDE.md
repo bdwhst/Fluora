@@ -46,6 +46,7 @@ cmake --build build-mac
 ./build-mac/bin/RhiTest         # RHI parallel-primitive tests — run after touching src/rhi/
 ./build-mac/bin/SharedHostTest  # host-C++ vs MSL value parity for shared device code
 ./build-mac/bin/RaytraceTest    # rt_* intersection units + BVH traversal vs brute force, host and GPU
+./build-mac/bin/FurnaceTest     # white-furnace energy check (drives FluoraMini; catches both-mode integrator bugs)
 ```
 
 Device code is single-source (`docs/portable-device-code.md`): shared `_gpu.h`/`_shared.h` files compile under MSL, CUDA, and host C++ through `src/rhi/gpu_portable.h` (gpu_* types, GPU_KERNEL macros, wave shims). Never fork a shader per backend; raw `kernel void`/`__global__` in renderer device code is a review flag (backend-private and test scaffolding kernels are exempt).
