@@ -26,18 +26,9 @@
 #include "../core/lights.h"
 #include "../core/spectra.h"
 #include "../rhi/rhi.h"
+#include "test_util.h"
 
 namespace {
-
-std::string readTextFile(const std::string& path)
-{
-    std::ifstream f(path);
-    if (!f)
-        throw std::runtime_error("cannot read " + path);
-    std::ostringstream ss;
-    ss << f.rdbuf();
-    return ss.str();
-}
 
 constexpr int kSlots = PROBE_SLOT_COUNT;
 
@@ -126,21 +117,14 @@ int main()
         auto device = rhi::createDevice(rhi::kNativeBackend, desc);
         auto stream = device->createStream();
         auto pipeline = device->createPipeline({ "shared_probe" });
-        auto out = device->createBuffer(
-            { kSlots * sizeof(float) * 4, rhi::MemoryLocation::Shared, "probe.out" });
-        auto r2sBuf = device->createBuffer(
-            { r2sHost.size() * sizeof(float), rhi::MemoryLocation::Shared, "probe.r2s" });
-        std::memcpy(r2sBuf->hostPtr(), r2sHost.data(), r2sHost.size() * sizeof(float));
-        auto spdBuf = device->createBuffer(
-            { tables.buffer().size() * sizeof(float), rhi::MemoryLocation::Shared, "probe.spd" });
-        std::memcpy(spdBuf->hostPtr(), tables.buffer().data(),
-                    tables.buffer().size() * sizeof(float));
-        auto xfBuf = device->createBuffer(
-            { sizeof(xfHost), rhi::MemoryLocation::Shared, "probe.xf" });
-        std::memcpy(xfBuf->hostPtr(), xfHost, sizeof(xfHost));
-        auto envBuf = device->createBuffer(
-            { envDist.size() * sizeof(float), rhi::MemoryLocation::Shared, "probe.env" });
-        std::memcpy(envBuf->hostPtr(), envDist.data(), envDist.size() * sizeof(float));
+        auto out = makeShared(*device, nullptr, kSlots * sizeof(float) * 4, "probe.out");
+        auto r2sBuf = makeShared(*device, r2sHost.data(),
+                                 r2sHost.size() * sizeof(float), "probe.r2s");
+        auto spdBuf = makeShared(*device, tables.buffer().data(),
+                                 tables.buffer().size() * sizeof(float), "probe.spd");
+        auto xfBuf = makeShared(*device, xfHost, sizeof(xfHost), "probe.xf");
+        auto envBuf = makeShared(*device, envDist.data(),
+                                 envDist.size() * sizeof(float), "probe.env");
         stream->dispatch(*pipeline, { 1, 1, 1 }, { 32, 1, 1 }, nullptr, 0,
                          { out.get(), r2sBuf.get(), spdBuf.get(), xfBuf.get(), envBuf.get() });
         stream->waitIdle();

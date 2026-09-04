@@ -13,39 +13,7 @@
 #include "../rhi/rhi.h"
 #include "../rhi/rhi_algorithms.h"
 #include "../rhi/primitives_shared.h"
-
-namespace {
-
-std::string readTextFile(const std::string& path)
-{
-    std::ifstream f(path);
-    if (!f)
-        throw std::runtime_error("cannot read " + path);
-    std::ostringstream ss;
-    ss << f.rdbuf();
-    return ss.str();
-}
-
-int failures = 0;
-
-void check(bool ok, const char* name)
-{
-    std::cout << (ok ? "PASS " : "FAIL ") << name << "\n";
-    if (!ok)
-        failures++;
-}
-
-std::unique_ptr<rhi::Buffer> makeShared(rhi::Device& dev, const void* data, size_t bytes, const char* name)
-{
-    auto buf = dev.createBuffer({ bytes, rhi::MemoryLocation::Shared, name });
-    if (data)
-        std::memcpy(buf->hostPtr(), data, bytes);
-    else
-        std::memset(buf->hostPtr(), 0, bytes);
-    return buf;
-}
-
-} // namespace
+#include "test_util.h"
 
 int main()
 {

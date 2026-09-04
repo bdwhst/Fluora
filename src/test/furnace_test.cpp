@@ -34,6 +34,8 @@
 #include <unistd.h>
 #endif
 
+#include "test_util.h"
+
 namespace fs = std::filesystem;
 
 namespace {
@@ -42,15 +44,6 @@ constexpr int kRes = 200;       // must match RES in the scene below
 constexpr int kSpp = 256;
 constexpr float kSphereR = 30;  // px: safely inside the ~44 px silhouette
 constexpr float kBgR = 55;      // px: safely outside it
-
-int failures = 0;
-
-void check(bool ok, const char* name)
-{
-    std::cout << (ok ? "PASS " : "FAIL ") << name << "\n";
-    if (!ok)
-        failures++;
-}
 
 void setEnvVar(const char* name, const std::string& value)
 {

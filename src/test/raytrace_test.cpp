@@ -25,27 +25,9 @@
 
 #include "../core/bvh_builder.h"
 #include "../rhi/rhi.h"
+#include "test_util.h"
 
 namespace {
-
-std::string readTextFile(const std::string& path)
-{
-    std::ifstream f(path);
-    if (!f)
-        throw std::runtime_error("cannot read " + path);
-    std::ostringstream ss;
-    ss << f.rdbuf();
-    return ss.str();
-}
-
-int failures = 0;
-
-void check(bool ok, const char* name)
-{
-    std::cout << (ok ? "PASS " : "FAIL ") << name << "\n";
-    if (!ok)
-        failures++;
-}
 
 gpu_storage3 store3(float x, float y, float z)
 {
@@ -261,26 +243,18 @@ int main()
         auto stream = device->createStream();
         auto pipeline = device->createPipeline({ "rt_test_trace" });
 
-        auto makeShared = [&](const void* data, size_t bytes, const char* name) {
-            auto buf = device->createBuffer({ bytes, rhi::MemoryLocation::Shared, name });
-            if (data)
-                std::memcpy(buf->hostPtr(), data, bytes);
-            else
-                std::memset(buf->hostPtr(), 0, bytes);
-            return buf;
-        };
         std::vector<gpu_float4> rays(numRays * 2);
         for (uint32_t r = 0; r < numRays; r++) {
             rays[r * 2] = gpu_float4(rayO[r], rayTMax[r]);
             rays[r * 2 + 1] = gpu_float4(rayD[r], 0.0f);
         }
-        auto rayBuf = makeShared(rays.data(), rays.size() * sizeof(gpu_float4), "rays");
-        auto nodeBuf = makeShared(bvh.nodes.data(), bvh.nodes.size() * sizeof(RtBvhNode), "nodes");
-        auto triBuf = makeShared(tris.data(), tris.size() * sizeof(gpu_uint4), "tris");
-        auto posBuf = makeShared(pos.data(), pos.size() * sizeof(gpu_storage3), "positions");
-        auto nrmBuf = makeShared(nrm.data(), nrm.size() * sizeof(gpu_storage3), "normals");
-        auto uvBuf = makeShared(uvs.data(), uvs.size() * sizeof(gpu_float2), "uvs");
-        auto outBuf = makeShared(nullptr, numRays * RT_TEST_OUT_STRIDE * sizeof(gpu_float4), "out");
+        auto rayBuf = makeShared(*device, rays.data(), rays.size() * sizeof(gpu_float4), "rays");
+        auto nodeBuf = makeShared(*device, bvh.nodes.data(), bvh.nodes.size() * sizeof(RtBvhNode), "nodes");
+        auto triBuf = makeShared(*device, tris.data(), tris.size() * sizeof(gpu_uint4), "tris");
+        auto posBuf = makeShared(*device, pos.data(), pos.size() * sizeof(gpu_storage3), "positions");
+        auto nrmBuf = makeShared(*device, nrm.data(), nrm.size() * sizeof(gpu_storage3), "normals");
+        auto uvBuf = makeShared(*device, uvs.data(), uvs.size() * sizeof(gpu_float2), "uvs");
+        auto outBuf = makeShared(*device, nullptr, numRays * RT_TEST_OUT_STRIDE * sizeof(gpu_float4), "out");
 
         RtTestParams p = {};
         p.n = numRays;
