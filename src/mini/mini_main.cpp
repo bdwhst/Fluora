@@ -30,6 +30,7 @@
 #include "../core/spectra.h"
 #include "../core/spectrum_shared.h"
 #include "../core/tonemap_shared.h"
+#include "../core/volume_loader.h"
 #include "../rhi/rhi.h"
 #include "../rhi/primitives_shared.h"
 #include "mini_shared.h"
@@ -54,7 +55,7 @@ std::string readTextFile(const std::string& path)
 // the old one's buffers free when this is reassigned (after a waitIdle()).
 struct SceneGpu {
     std::unique_ptr<rhi::Buffer> matBuf, objBuf, normalBuf, uvBuf, spdBuf, r2sBuf;
-    std::unique_ptr<rhi::Buffer> lightBuf, envDistBuf, mediaBuf;
+    std::unique_ptr<rhi::Buffer> lightBuf, envDistBuf, mediaBuf, volTableBuf, volDataBuf;
     std::unique_ptr<rhi::RayIntersector> intersector;
     std::array<rhi::Buffer*, 3> rt{ nullptr, nullptr, nullptr };
     std::vector<std::unique_ptr<rhi::Texture>> matTextures;
@@ -234,29 +235,85 @@ SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
 
     // Participating media (core/medium_shared.h): sigma_a/sigma_s become
     // unbounded rgb2spec spectra in the spd table, with SIGMA_SCALE folded in.
-    // NanoVDB grids are not rendered yet: they upload as empty media so the
-    // interfaces around them stay pass-through.
+    // NanoVDB grids are read on the host and re-bricked (core/volume_loader)
+    // into two flat buffers all grids share: brick tables (uint) and voxels +
+    // per-brick majorants (float); the medium record carries the offsets.
     std::vector<MediumGpu> media;
+    std::vector<uint32_t> volTable;
+    std::vector<float> volData;
     media.reserve(scene.media.size());
+    auto appendGrid = [&](const BrickGrid& g, uint32_t& tableOff, uint32_t& voxelOff) {
+        tableOff = (uint32_t)volTable.size();
+        volTable.insert(volTable.end(), g.table.begin(), g.table.end());
+        voxelOff = (uint32_t)volData.size();
+        volData.insert(volData.end(), g.voxels.begin(), g.voxels.end());
+    };
     for (const auto& m : scene.media) {
         MediumGpu mg = {};
-        if (m.type == CoreMediumType::NanoVdb) {
-            std::cout << "mini: medium '" << m.name << "' is a NanoVDB grid (not rendered yet, "
-                      << "treated as empty)\n";
-            mg.type = MEDIUM_NANOVDB;
-            mg.sigmaASpd = spectra.rgbUnboundedOffset(glm::vec3(0.0f));
-            mg.sigmaSSpd = mg.sigmaASpd;
-        } else {
-            mg.type = MEDIUM_HOMOGENEOUS;
-            mg.sigmaASpd = spectra.rgbUnboundedOffset(m.sigmaA * m.sigmaScale);
-            mg.sigmaSSpd = spectra.rgbUnboundedOffset(m.sigmaS * m.sigmaScale);
-        }
+        mg.sigmaASpd = spectra.rgbUnboundedOffset(m.sigmaA * m.sigmaScale);
+        mg.sigmaSSpd = spectra.rgbUnboundedOffset(m.sigmaS * m.sigmaScale);
         mg.g = m.g;
+        mg.type = MEDIUM_HOMOGENEOUS;
+        mg.indexFromWorld = glm::mat4(1.0f);
+        mg.tempTable = VOL_TABLE_NONE;
+        mg.tempVoxels = VOL_TABLE_NONE;
+        if (m.type == CoreMediumType::NanoVdb) {
+            BrickGrid density;
+            std::string e;
+            if (!loadNanoVdbGrid(m.vdbPath, "density", density, e)) {
+                // Keep the medium (its interfaces stay pass-through), empty.
+                std::cout << "mini: medium '" << m.name << "': " << e << " -- rendered as empty\n";
+            } else {
+                mg.type = MEDIUM_GRID;
+                mg.indexFromWorld = density.indexFromWorld * glm::inverse(m.worldFromMedium);
+                mg.gridMinX = density.origin.x;
+                mg.gridMinY = density.origin.y;
+                mg.gridMinZ = density.origin.z;
+                mg.brickDimX = density.brickDim.x;
+                mg.brickDimY = density.brickDim.y;
+                mg.brickDimZ = density.brickDim.z;
+                appendGrid(density, mg.densityTable, mg.densityVoxels);
+                mg.majorants = (uint32_t)volData.size();
+                volData.insert(volData.end(), density.majorants.begin(), density.majorants.end());
+                std::cout << "mini: medium '" << m.name << "': " << density.brickDim.x << "x"
+                          << density.brickDim.y << "x" << density.brickDim.z << " bricks, "
+                          << density.voxels.size() / VOL_BRICK_SIZE << " stored ("
+                          << density.activeVoxels << " active voxels, max density "
+                          << density.maxValue << ")";
+                // Emission needs the temperature grid; it shares the file's
+                // index lattice but has its own bounding box.
+                BrickGrid temperature;
+                if (m.leScale > 0.0f
+                    && loadNanoVdbGrid(m.vdbPath, "temperature", temperature, e)) {
+                    appendGrid(temperature, mg.tempTable, mg.tempVoxels);
+                    mg.tempMinX = temperature.origin.x;
+                    mg.tempMinY = temperature.origin.y;
+                    mg.tempMinZ = temperature.origin.z;
+                    mg.tempDimX = temperature.brickDim.x;
+                    mg.tempDimY = temperature.brickDim.y;
+                    mg.tempDimZ = temperature.brickDim.z;
+                    mg.leScale = m.leScale;
+                    mg.tempScale = m.temperatureScale;
+                    mg.tempOffset = m.temperatureOffset;
+                    std::cout << ", temperature grid (blackbody emission, max "
+                              << (temperature.maxValue - m.temperatureOffset) * m.temperatureScale
+                              << " K)";
+                } else if (m.leScale > 0.0f) {
+                    std::cout << ", no emission (" << e << ")";
+                }
+                std::cout << "\n";
+            }
+        }
         media.push_back(mg);
     }
     sg.numMedia = (unsigned)media.size();
     sg.cameraMedium = scene.camera.mediumId;
     sg.mediaBuf = makeUpload(media.data(), media.size() * sizeof(MediumGpu), "media");
+    sg.volTableBuf = makeUpload(volTable.data(), volTable.size() * sizeof(uint32_t), "vol.table");
+    sg.volDataBuf = makeUpload(volData.data(), volData.size() * sizeof(float), "vol.data");
+    if (!volData.empty())
+        std::cout << "mini: volume data " << (volData.size() * sizeof(float)) / (1024 * 1024)
+                  << " MiB\n";
     if (!media.empty())
         std::cout << "mini: " << media.size() << " media" << (sg.cameraMedium >= 0 ? " (camera inside one)" : "")
                   << "\n";
@@ -532,7 +589,8 @@ int main(int argc, char** argv)
                                    sg.rt[0], sg.rt[1], sg.rt[2], texHeap,
                                    sg.normalBuf.get(), sg.uvBuf.get(),
                                    sg.spdBuf.get(), sg.r2sBuf.get(),
-                                   sg.lightBuf.get(), sg.envDistBuf.get(), sg.mediaBuf.get() });
+                                   sg.lightBuf.get(), sg.envDistBuf.get(), sg.mediaBuf.get(),
+                                   sg.volTableBuf.get(), sg.volDataBuf.get() });
                 return;
             }
             stream->dispatch(*raygenPipe, grid, block, &p, sizeof(p),
@@ -567,7 +625,8 @@ int main(int argc, char** argv)
                                            qDiffuse.get(), qConductor.get(), qGlass.get(),
                                            texHeap, sg.normalBuf.get(), sg.uvBuf.get(),
                                            sg.spdBuf.get(), sg.r2sBuf.get(), sg.envDistBuf.get(),
-                                           sg.mediaBuf.get(), qMedium.get() });
+                                           sg.mediaBuf.get(), qMedium.get(),
+                                           sg.volTableBuf.get(), sg.volDataBuf.get() });
                 stream->dispatch(*prepShadePipe, one, one, &c, sizeof(c),
                                  { counts.get(), indirectArgs.get() });
 
@@ -600,7 +659,8 @@ int main(int argc, char** argv)
                                          { counts.get(), shadowQueue.get(), sg.objBuf.get(),
                                            sg.rt[0], sg.rt[1], sg.rt[2], accum.get(),
                                            sg.matBuf.get(), sg.normalBuf.get(), sg.uvBuf.get(),
-                                           sg.spdBuf.get(), sg.mediaBuf.get() });
+                                           sg.spdBuf.get(), sg.mediaBuf.get(),
+                                           sg.volTableBuf.get(), sg.volDataBuf.get() });
                 cur = next;
             }
         };

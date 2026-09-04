@@ -5,8 +5,8 @@ M4 part 1 landed 2026-09-03 (real CUDA backend — FluoraMini, RhiTest and
 SharedHostTest build and pass on Windows/CUDA, both render modes bitwise
 identical; the main CUDA renderer builds again). M4 part 2 in progress: grow
 the portable renderer instead of migrating pathtrace.cu — NEE+MIS, the
-.json/PLY loader and homogeneous media landed, NanoVDB next · Owner: bdwhst ·
-Last updated: 2026-09-04
+.json/PLY loader, homogeneous media and NanoVDB grids landed, DOF + denoise
+next · Owner: bdwhst · Last updated: 2026-09-04
 
 ## 1. Context and goal
 
@@ -460,6 +460,37 @@ two. Adding capability inside `src/mini` is a review flag.
      inside `smoke_medium` while its box is INSIDE smoke / OUTSIDE vacuum, so
      under the PBRT rule paths that exit the box leave the fog — the scene
      file's inconsistency, not the tracker's.
+     **NanoVDB grids landed 2026-09-04.** The MSL spike was settled by
+     inspection rather than a port: the vendored NanoVDB (32.3) has CUDA,
+     OpenCL and host personalities but no Metal one, and the runtime MSL
+     build concatenates sources without resolving `#include`, so its 7k-line
+     header cannot be compiled there. Grids are therefore read on the host
+     with NanoVDB's own reader (`core/volume_loader.cpp`, `NANOVDB_USE_ZIP` —
+     the scene files are ZIP-compressed, so FluoraMini links zlib on both
+     platforms) and re-bricked into a pointer-free layout the same device
+     code samples everywhere: 8^3 bricks (NanoVDB's leaf size; leaves copy
+     across, tile values fill constant bricks) behind a dense brick table
+     over the index-space bounding box, a per-brick majorant (max over the
+     brick and its 26 neighbours, since trilinear samples reach one voxel
+     across), two flat buffers (`vol.table` uints, `vol.data` floats) with
+     offsets in `MediumGpu`. The tracker became PBRT-v4's general
+     `SampleT_maj`: a majorant-segment iterator (one segment for a
+     homogeneous medium, a 3D DDA over bricks for a grid) feeding a
+     delta-tracking loop with null collisions, emission at every collision
+     (temperature grid → peak-normalized blackbody × LESCALE), and ratio
+     tracking with a per-shadow-ray forked RNG stream for transmittance
+     through grids (homogeneous media keep the analytic exponential). The
+     homogeneous path is a special case of the same loop, and the furnace
+     ratios are unchanged to the last digit. Verified: teapot_cloud.json
+     (1.9M active voxels, 10 MiB), ground_explosion.json (27M active voxels,
+     129 MiB, 6900 K peak) and matchbulb.json (flame inside the glass bulb)
+     render bitwise across modes — matchbulb only with
+     `-DFLUORA_CUDA_SAFE_MATH=ON`; under `-fmad=true` about 0.8% of its
+     pixels take a different collision branch, the documented fast-math
+     caveat, while the other two happen to stay bitwise. Memory is the
+     obvious next lever (float voxels; half or a coarser majorant grid would
+     halve the explosion), and RGBGridMedium/GridMedium (`.json` types other
+     than nanovdb/homogeneous) are still not parsed.
   5. DOF (camera ray generation) and denoise (OIDN behind the present seam on
      CUDA; Metal stays M5).
   6. Retire `pathtrace.cu`, the integrators, `bvh.cpp`, `main.cpp`/

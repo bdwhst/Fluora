@@ -244,6 +244,8 @@ struct MiniShadeCtx {
     GPU_DEVICE const float* spd;
     GPU_DEVICE const float* r2s;
     GPU_DEVICE const MediumGpu* media;
+    GPU_DEVICE const uint* volTable;   // grid media: brick tables
+    GPU_DEVICE const float* volData;   // grid media: voxels + majorants
     uint numObjects;
     uint numNodes;
     uint numLights;
@@ -343,21 +345,148 @@ GPU_FN inline void miniMediumSigma(GPU_THREAD const MiniShadeCtx& c, int medium,
     sigmaS = spd_dense_sample(c.spd, m.sigmaSSpd, swl);
 }
 
+// Density factor of a medium at a world point: 1 for a homogeneous medium,
+// the trilinear grid sample for a grid medium.
+GPU_FN inline float miniMediumDensity(GPU_THREAD const MiniShadeCtx& c, GPU_DEVICE const MediumGpu& m,
+                                      gpu_float3 p)
+{
+    if (m.type != MEDIUM_GRID)
+        return 1.0f;
+    VolGrid g = vol_density_grid(c.volTable, c.volData, m);
+    return vol_sample(g, gpu_xyz(m.indexFromWorld * gpu_float4(p, 1.0f)));
+}
+
+// Medium emission at a world point (NanoVDBMedium::Le): the temperature grid
+// mapped through TEMPOFFSET/TEMPSCALE drives a peak-normalized blackbody,
+// scaled by LESCALE. Zero without a temperature grid or below 100 K.
+GPU_FN inline GpuSpectrum miniMediumLe(GPU_THREAD const MiniShadeCtx& c, GPU_DEVICE const MediumGpu& m,
+                                       gpu_float3 p, GpuWavelengths swl)
+{
+    if (m.type != MEDIUM_GRID || m.tempTable == VOL_TABLE_NONE || m.leScale <= 0.0f)
+        return GpuSpectrum(0.0f);
+    VolGrid g = vol_temperature_grid(c.volTable, c.volData, m);
+    float temp = vol_sample(g, gpu_xyz(m.indexFromWorld * gpu_float4(p, 1.0f)));
+    temp = (temp - m.tempOffset) * m.tempScale;
+    if (temp <= VOL_EMISSION_MIN_KELVIN)
+        return GpuSpectrum(0.0f);
+    return spd_blackbody_normalized(swl, temp) * m.leScale;
+}
+
+// Adds a path contribution to the film after the spectral-MIS division.
+GPU_FN inline void miniAddRadiance(GPU_DEVICE gpu_float4* accum, uint pixel, GpuSpectrum Ls,
+                                   GpuSpectrum r, GpuWavelengths swl,
+                                   GPU_THREAD const MiniShadeCtx& c)
+{
+    Ls = Ls / spd_average(r);
+    gpu_float3 rgb = miniFilmRgb(Ls, swl, c.spd, c.filmR0, c.filmR1, c.filmR2);
+    if (gpu_all_finite(rgb))
+        accum[pixel] += gpu_float4(rgb, 0.0f);
+}
+
 // What a traced segment ended with.
 #define MINI_TRACE_MISS     0  // escaped the scene (environment)
 #define MINI_TRACE_SURFACE  1  // hit a shadeable surface: `hit` is valid
 #define MINI_TRACE_SCATTER  2  // real scatter inside `medium` at hit.t along the ray
 #define MINI_TRACE_ABSORBED 3  // absorbed in a medium (or dropped): path ends
+#define MINI_TRACE_THROUGH  4  // (internal) the medium span ended without an event
+
+#define MINI_MAX_MEDIUM_EVENTS 4096u   // collisions per segment before the path is dropped
+
+// Delta tracking along [0, tMax) of the ray inside `medium` (PBRT-v4
+// SampleT_maj with the volume integrator's callback inlined). Segments come
+// from the majorant iterator; within each, collisions are sampled at the hero
+// wavelength's majorant and classified absorb / real scatter / null by the
+// local coefficients (a homogeneous medium's majorant is its sigma_t, so its
+// collisions are never null). throughput and r pick up the per-wavelength
+// ratios of every event's f to the hero pdf; emission is added at every
+// collision (grid media with a temperature grid). Returns SCATTER with the
+// distance in tScatter, ABSORBED, or THROUGH.
+GPU_FN inline int miniTrackMedium(GPU_THREAD const MiniShadeCtx& c, GPU_DEVICE gpu_float4* accum,
+                                  uint pixel, gpu_float3 ro, gpu_float3 rd, int medium, float tMax,
+                                  GPU_THREAD GpuSpectrum& throughput, GPU_THREAD GpuSpectrum& r,
+                                  GpuWavelengths swl, GPU_THREAD GpuRng& rng,
+                                  GPU_THREAD float& tScatter)
+{
+    GPU_DEVICE const MediumGpu& m = c.media[medium];
+    GpuSpectrum sigmaA, sigmaS;
+    miniMediumSigma(c, medium, swl, sigmaA, sigmaS);
+    GpuSpectrum sigmaT = sigmaA + sigmaS;
+    VolMajorantIter it;
+    vol_majorant_init(it, m, ro, rd, tMax);
+    GpuSpectrum Tmaj = GpuSpectrum(1.0f);
+    uint events = 0;
+    float segMin, segMax, majorant;
+    while (vol_majorant_next(it, m, c.volData, segMin, segMax, majorant)) {
+        GpuSpectrum sigmaMaj = sigmaT * majorant;
+        if (sigmaMaj[0] == 0.0f) {
+            // Nothing to sample at the hero wavelength: pure attenuation of
+            // the others across the segment.
+            Tmaj *= medium_transmittance(sigmaMaj, segMax - segMin);
+            continue;
+        }
+        float tMin = segMin;
+        while (true) {
+            if (++events > MINI_MAX_MEDIUM_EVENTS)
+                return MINI_TRACE_ABSORBED;
+            float u = gpu_rand(rng);
+            float t = tMin - log(1.0f - u) / sigmaMaj[0];
+            if (t >= segMax) {
+                Tmaj *= medium_transmittance(sigmaMaj, segMax - tMin);
+                break;
+            }
+            Tmaj *= medium_transmittance(sigmaMaj, t - tMin);
+            gpu_float3 p = ro + rd * t;
+            float d = miniMediumDensity(c, m, p);
+            GpuSpectrum sA = sigmaA * d, sS = sigmaS * d;
+            if (m.tempTable != VOL_TABLE_NONE) {
+                GpuSpectrum Le = miniMediumLe(c, m, p, swl);
+                float pdfE = sigmaMaj[0] * Tmaj[0];
+                GpuSpectrum re = r * sigmaMaj * Tmaj / pdfE;
+                if (spd_average(re) > 0.0f)
+                    miniAddRadiance(accum, pixel, throughput * Tmaj / pdfE * sA * Le, re, swl, c);
+            }
+            float pAbsorb = sA[0] / sigmaMaj[0];
+            float pScatter = sS[0] / sigmaMaj[0];
+            float uMode = gpu_rand(rng);
+            if (uMode < pAbsorb)
+                return MINI_TRACE_ABSORBED;
+            if (uMode < pAbsorb + pScatter) {
+                // Real scatter: f = Tmaj * sigma_s, pdf Tmaj[0] * sigma_s[0].
+                float pdf = Tmaj[0] * sS[0];
+                GpuSpectrum ratio = Tmaj * sS / pdf;
+                throughput *= ratio;
+                r *= ratio;
+                tScatter = t;
+                return MINI_TRACE_SCATTER;
+            }
+            // Null collision: f = Tmaj * sigma_n, pdf Tmaj[0] * sigma_n[0].
+            GpuSpectrum sN = spd_clamp_zero(sigmaMaj - sA - sS);
+            float pdf = Tmaj[0] * sN[0];
+            if (!(pdf > 0.0f))
+                return MINI_TRACE_ABSORBED;
+            GpuSpectrum ratio = Tmaj * sN / pdf;
+            throughput *= ratio;
+            r *= ratio;
+            Tmaj = GpuSpectrum(1.0f);
+            tMin = t;
+        }
+    }
+    // Reached the end of the span: pdf Tmaj[0], transmittance Tmaj.
+    if (!(Tmaj[0] > 0.0f))
+        return MINI_TRACE_ABSORBED;
+    GpuSpectrum ratio = Tmaj / Tmaj[0];
+    throughput *= ratio;
+    r *= ratio;
+    return MINI_TRACE_THROUGH;
+}
 
 // Traces one path segment from (ro, rd) through surfaces and media. Advances
 // ro across MINI_MAT_INTERFACE hits (switching `medium`), so on return the
-// event lies at ro + rd * hit.t. In a medium the segment is delta-tracked at
-// the hero wavelength: the sampled collision is a real absorption/scatter
-// event (homogeneous majorant == sigma_t, so there are no null collisions);
-// throughput and r pick up the per-wavelength ratios of the transmittance
-// and scattering coefficients to the hero's. Consumes RNG draws only inside
-// media, so media-free scenes keep their RNG streams.
-GPU_FN inline int miniTrace(GPU_THREAD const MiniShadeCtx& c,
+// event lies at ro + rd * hit.t. Consumes RNG draws only inside media, so
+// media-free scenes keep their RNG streams. Medium emission is accumulated
+// here (accum, pixel) as it is met, in the same order in both modes.
+GPU_FN inline int miniTrace(GPU_THREAD const MiniShadeCtx& c, GPU_DEVICE gpu_float4* accum,
+                            uint pixel,
                             GPU_THREAD gpu_float3& ro, gpu_float3 rd, GPU_THREAD int& medium,
                             GPU_THREAD GpuSpectrum& throughput, GPU_THREAD GpuSpectrum& r,
                             GpuWavelengths swl, GPU_THREAD GpuRng& rng,
@@ -367,35 +496,17 @@ GPU_FN inline int miniTrace(GPU_THREAD const MiniShadeCtx& c,
         bool found = sceneIntersect(ro, rd, c.objects, c.numObjects, c.nodes, c.numNodes,
                                     c.tris, c.positions, c.normals, c.uvs, hit);
         if (medium >= 0) {
-            GpuSpectrum sigmaA, sigmaS;
-            miniMediumSigma(c, medium, swl, sigmaA, sigmaS);
-            GpuSpectrum sigmaT = sigmaA + sigmaS;
-            float tMax = found ? hit.t : INFINITY;
-            // Exponential distance at the hero wavelength (sample_exponential);
-            // sigma_t == 0 never collides.
-            float u = gpu_rand(rng);
-            float t = sigmaT[0] > 0.0f ? -log(1.0f - u) / sigmaT[0] : INFINITY;
-            if (t < tMax) {
-                GpuSpectrum Tmaj = medium_transmittance(sigmaT, t);
-                float uMode = gpu_rand(rng);
-                if (uMode < sigmaA[0] / sigmaT[0])
-                    return MINI_TRACE_ABSORBED;
-                // Real scatter: f = Tmaj * sigma_s, sampled with pdf Tmaj[0] * sigma_s[0].
-                float pdf = Tmaj[0] * sigmaS[0];
-                GpuSpectrum ratio = Tmaj * sigmaS / pdf;
-                throughput *= ratio;
-                r *= ratio;
-                hit.t = t;
+            float tScatter = 0.0f;
+            int ev = miniTrackMedium(c, accum, pixel, ro, rd, medium, found ? hit.t : INFINITY,
+                                     throughput, r, swl, rng, tScatter);
+            if (ev == MINI_TRACE_ABSORBED)
+                return MINI_TRACE_ABSORBED;
+            if (ev == MINI_TRACE_SCATTER) {
+                hit.t = tScatter;
                 hit.objIdx = -3;
                 hit.matId = (uint)medium;
                 return MINI_TRACE_SCATTER;
             }
-            // No collision before the surface (or ever): pdf Tmaj[0] of
-            // reaching it, transmittance Tmaj for every wavelength.
-            GpuSpectrum Tmaj = medium_transmittance(sigmaT, tMax);
-            GpuSpectrum ratio = Tmaj / Tmaj[0];
-            throughput *= ratio;
-            r *= ratio;
         }
         if (!found)
             return MINI_TRACE_MISS;
@@ -409,19 +520,75 @@ GPU_FN inline int miniTrace(GPU_THREAD const MiniShadeCtx& c,
     return MINI_TRACE_ABSORBED;
 }
 
+// Transmittance estimate along [0, tMax) of the ray inside `medium`: exact
+// Beer-Lambert for a homogeneous medium; ratio tracking at the hero
+// wavelength's majorant for a grid medium (PBRT-v4 sample_Ld's T_ray),
+// unbiased per wavelength — each null collision weighs in as
+// Tmaj * sigma_n / (Tmaj[0] * sigma_maj[0]).
+GPU_FN inline GpuSpectrum miniTransmittance(GPU_THREAD const MiniShadeCtx& c, gpu_float3 ro,
+                                            gpu_float3 rd, float tMax, int medium,
+                                            GpuWavelengths swl, GPU_THREAD GpuRng& rng)
+{
+    GPU_DEVICE const MediumGpu& m = c.media[medium];
+    GpuSpectrum sigmaA, sigmaS;
+    miniMediumSigma(c, medium, swl, sigmaA, sigmaS);
+    GpuSpectrum sigmaT = sigmaA + sigmaS;
+    if (m.type != MEDIUM_GRID)
+        return medium_transmittance(sigmaT, tMax);
+    VolMajorantIter it;
+    vol_majorant_init(it, m, ro, rd, tMax);
+    GpuSpectrum T = GpuSpectrum(1.0f);
+    GpuSpectrum Tmaj = GpuSpectrum(1.0f);
+    uint events = 0;
+    float segMin, segMax, majorant;
+    while (vol_majorant_next(it, m, c.volData, segMin, segMax, majorant)) {
+        GpuSpectrum sigmaMaj = sigmaT * majorant;
+        if (sigmaMaj[0] == 0.0f) {
+            Tmaj *= medium_transmittance(sigmaMaj, segMax - segMin);
+            continue;
+        }
+        float tMin = segMin;
+        while (true) {
+            if (++events > MINI_MAX_MEDIUM_EVENTS)
+                return GpuSpectrum(0.0f);
+            float u = gpu_rand(rng);
+            float t = tMin - log(1.0f - u) / sigmaMaj[0];
+            if (t >= segMax) {
+                Tmaj *= medium_transmittance(sigmaMaj, segMax - tMin);
+                break;
+            }
+            Tmaj *= medium_transmittance(sigmaMaj, t - tMin);
+            float d = miniMediumDensity(c, m, ro + rd * t);
+            GpuSpectrum sN = spd_clamp_zero(sigmaMaj - sigmaT * d);
+            float pdf = Tmaj[0] * sigmaMaj[0];
+            T *= Tmaj * sN / pdf;
+            if (!(spd_average(T) > 0.0f))
+                return GpuSpectrum(0.0f);
+            Tmaj = GpuSpectrum(1.0f);
+            tMin = t;
+        }
+    }
+    if (!(Tmaj[0] > 0.0f))
+        return GpuSpectrum(0.0f);
+    return T * (Tmaj / Tmaj[0]);
+}
+
 // Spectral transmittance from `ro` toward the light at distance tMax (INFINITY
 // for the environment): 0 when a shadeable surface blocks the way, else the
-// Beer-Lambert product over the media crossed. Media-free scenes take the
-// any-hit path, which is what they always did.
+// product of the media crossed (interfaces passed through). Media-free scenes
+// take the any-hit path, which is what they always did. rngSeed starts the
+// ray's private stream for ratio tracking, so the path's stream is untouched.
 GPU_FN inline GpuSpectrum miniShadowTransmittance(GPU_THREAD const MiniShadeCtx& c,
                                                   gpu_float3 ro, gpu_float3 rd, float tMax,
-                                                  int medium, GpuWavelengths swl)
+                                                  int medium, GpuWavelengths swl, uint rngSeed)
 {
     if (c.numMedia == 0) {
         bool blocked = sceneOccluded(ro, rd, tMax, c.objects, c.numObjects, c.nodes, c.numNodes,
                                      c.tris, c.positions);
         return GpuSpectrum(blocked ? 0.0f : 1.0f);
     }
+    GpuRng rng;
+    rng.state = rngSeed;
     GpuSpectrum T = GpuSpectrum(1.0f);
     for (uint crossing = 0; crossing < MINI_MAX_CROSSINGS; crossing++) {
         MiniHit hit;
@@ -429,9 +596,9 @@ GPU_FN inline GpuSpectrum miniShadowTransmittance(GPU_THREAD const MiniShadeCtx&
                                     c.tris, c.positions, c.normals, c.uvs, hit);
         bool reached = !found || hit.t >= tMax;
         if (medium >= 0) {
-            GpuSpectrum sigmaA, sigmaS;
-            miniMediumSigma(c, medium, swl, sigmaA, sigmaS);
-            T *= medium_transmittance(sigmaA + sigmaS, reached ? tMax : hit.t);
+            T *= miniTransmittance(c, ro, rd, reached ? tMax : hit.t, medium, swl, rng);
+            if (!(spd_average(T) > 0.0f))
+                return GpuSpectrum(0.0f);
         }
         if (reached)
             return T;
@@ -458,6 +625,7 @@ struct MiniShadowRay {
     float tMax;
     GpuSpectrum L;
     int medium;    // medium the ray starts in
+    uint rngSeed;  // private RNG stream for ratio tracking through grid media
 };
 
 // Samples one light for the vertex p (surface: facing normal nF; medium
@@ -547,6 +715,9 @@ GPU_FN inline bool miniSampleDirect(uint type, GPU_DEVICE const MiniMaterial& ma
     sr.tMax = tMax;
     sr.L = Ls;
     sr.medium = medium;
+    // Forked from the path's state after the light draws (identical in both
+    // modes), hashed so the two streams do not overlap.
+    sr.rngSeed = (rng.state ^ 0x9E3779B9u) * 0x85EBCA6Bu + 0xC2B2AE35u;
     return true;
 }
 
@@ -640,23 +811,13 @@ GPU_FN inline bool miniShadeVertex(uint type, GPU_DEVICE const MiniMaterial& mat
     return miniScatter(type, mat, p, n, uv, c, ro, rd, medium, throughput, swl, rng, pdf);
 }
 
-// Adds a path contribution to the film after the spectral-MIS division.
-GPU_FN inline void miniAddRadiance(GPU_DEVICE gpu_float4* accum, uint pixel, GpuSpectrum Ls,
-                                   GpuSpectrum r, GpuWavelengths swl,
-                                   GPU_THREAD const MiniShadeCtx& c)
-{
-    Ls = Ls / spd_average(r);
-    gpu_float3 rgb = miniFilmRgb(Ls, swl, c.spd, c.filmR0, c.filmR1, c.filmR2);
-    if (gpu_all_finite(rgb))
-        accum[pixel] += gpu_float4(rgb, 0.0f);
-}
-
 // Traces a shadow ray and lands its contribution (both modes).
 GPU_FN inline void miniResolveShadow(GPU_DEVICE gpu_float4* accum, uint pixel,
                                      GPU_THREAD const MiniShadowRay& sr, GpuWavelengths swl,
                                      GPU_THREAD const MiniShadeCtx& c)
 {
-    GpuSpectrum T = miniShadowTransmittance(c, sr.origin, sr.dir, sr.tMax, sr.medium, swl);
+    GpuSpectrum T = miniShadowTransmittance(c, sr.origin, sr.dir, sr.tMax, sr.medium, swl,
+                                            sr.rngSeed);
     gpu_float3 rgb = miniFilmRgb(sr.L * T, swl, c.spd, c.filmR0, c.filmR1, c.filmR2);
     if (gpu_all_finite(rgb))
         accum[pixel] += gpu_float4(rgb, 0.0f);
@@ -680,7 +841,9 @@ GPU_KERNEL(pathtraceKernel, GPU_TID_2D)(GPU_KERNEL_PARAMS(MiniParams, P),
     GPU_BUFFER(const float, r2s),
     GPU_BUFFER(const RtLight, lights),
     GPU_BUFFER(const float, envDist),
-    GPU_BUFFER(const MediumGpu, media))
+    GPU_BUFFER(const MediumGpu, media),
+    GPU_BUFFER(const uint, volTable),
+    GPU_BUFFER(const float, volData))
 {
     gpu_uint2 gid = GPU_GLOBAL_ID_XY;
     if (gid.x >= P.width || gid.y >= P.height)
@@ -701,6 +864,8 @@ GPU_KERNEL(pathtraceKernel, GPU_TID_2D)(GPU_KERNEL_PARAMS(MiniParams, P),
     c.spd = spd;
     c.r2s = r2s;
     c.media = media;
+    c.volTable = volTable;
+    c.volData = volData;
     c.numObjects = P.numObjects;
     c.numNodes = P.bvhNumNodes;
     c.numLights = P.numLights;
@@ -730,7 +895,7 @@ GPU_KERNEL(pathtraceKernel, GPU_TID_2D)(GPU_KERNEL_PARAMS(MiniParams, P),
     for (uint depth = 0; depth < P.maxDepth; depth++) {
         gpu_float3 roVertex = ro;
         MiniHit hit;
-        int ev = miniTrace(c, ro, rd, medium, throughput, r, swl, rng, hit);
+        int ev = miniTrace(c, accum, idx, ro, rd, medium, throughput, r, swl, rng, hit);
         if (ev == MINI_TRACE_ABSORBED)
             break;
         if (ev == MINI_TRACE_MISS) {
@@ -796,7 +961,7 @@ struct WfShadowRay {
     gpu_packed3 origin;     float tMax;
     gpu_packed3 dir;        uint pixel;
     GpuSpectrum L;
-    float lambdaU;          uint wlFlags;      int medium;     uint pad0;
+    float lambdaU;          uint wlFlags;      int medium;     uint rngSeed;
 };
 static_assert(sizeof(WfShadowRay) == WF_SHADOWRAY_SIZE, "host allocates the shadow queue with this stride");
 
@@ -823,7 +988,9 @@ GPU_FN inline MiniShadeCtx wfCtx(GPU_PARAMS_REF(WfCtl) C,
                                  GPU_DEVICE const RhiTex* texHeap,
                                  GPU_DEVICE const float* spd,
                                  GPU_DEVICE const float* r2s,
-                                 GPU_DEVICE const MediumGpu* media)
+                                 GPU_DEVICE const MediumGpu* media,
+                                 GPU_DEVICE const uint* volTable,
+                                 GPU_DEVICE const float* volData)
 {
     MiniShadeCtx c;
     c.materials = materials;
@@ -839,6 +1006,8 @@ GPU_FN inline MiniShadeCtx wfCtx(GPU_PARAMS_REF(WfCtl) C,
     c.spd = spd;
     c.r2s = r2s;
     c.media = media;
+    c.volTable = volTable;
+    c.volData = volData;
     c.numObjects = C.numObjects;
     c.numNodes = C.bvhNumNodes;
     c.numLights = C.numLights;
@@ -964,7 +1133,9 @@ GPU_KERNEL(wf_intersect, GPU_TID_1D)(GPU_KERNEL_PARAMS(WfCtl, C),
     GPU_BUFFER(const float, r2s),
     GPU_BUFFER(const float, envDist),
     GPU_BUFFER(const MediumGpu, media),
-    GPU_BUFFER(WfPath, qMedium))
+    GPU_BUFFER(WfPath, qMedium),
+    GPU_BUFFER(const uint, volTable),
+    GPU_BUFFER(const float, volData))
 {
     uint tid = GPU_GLOBAL_ID_X;
     if (tid >= gpu_atomic_load(&counts[C.srcCounter]))
@@ -972,7 +1143,8 @@ GPU_KERNEL(wf_intersect, GPU_TID_1D)(GPU_KERNEL_PARAMS(WfCtl, C),
     WfPath path = raysIn[tid];
     // Lights are not needed here (pmf is 1/numLights); pass null.
     MiniShadeCtx c = wfCtx(C, materials, objects, bvhNodes, tris, positions, normals, uvs,
-                           (GPU_DEVICE const RtLight*)0, envDist, texHeap, spd, r2s, media);
+                           (GPU_DEVICE const RtLight*)0, envDist, texHeap, spd, r2s, media,
+                           volTable, volData);
     gpu_float3 roVertex = gpu_float3(path.origin);
     gpu_float3 ro = roVertex;
     gpu_float3 rd = gpu_float3(path.dir);
@@ -984,7 +1156,7 @@ GPU_KERNEL(wf_intersect, GPU_TID_1D)(GPU_KERNEL_PARAMS(WfCtl, C),
     GpuWavelengths swl = wfWavelengths(path.lambdaU, path.wlFlags);
     bool weighted = !(path.depth == 0 || (path.wlFlags & WF_FLAG_PREV_SPECULAR) != 0u);
     MiniHit hit;
-    int ev = miniTrace(c, ro, rd, medium, throughput, r, swl, rng, hit);
+    int ev = miniTrace(c, accum, path.pixel, ro, rd, medium, throughput, r, swl, rng, hit);
     if (ev == MINI_TRACE_ABSORBED)
         return;
     if (ev == MINI_TRACE_MISS) {
@@ -1067,7 +1239,8 @@ GPU_KERNEL(wf_shade, GPU_TID_1D)(GPU_KERNEL_PARAMS(WfCtl, C),
     WfPath path = queue[tid];
     MiniShadeCtx c = wfCtx(C, materials, objects, (GPU_DEVICE const RtBvhNode*)0, tris, positions,
                            (GPU_DEVICE const gpu_storage3*)0, (GPU_DEVICE const gpu_float2*)0,
-                           lights, envDist, texHeap, spd, r2s, media);
+                           lights, envDist, texHeap, spd, r2s, media,
+                           (GPU_DEVICE const uint*)0, (GPU_DEVICE const float*)0);
     GpuRng rng;
     rng.state = path.rng;
     gpu_float3 ro = gpu_float3(path.origin);
@@ -1094,7 +1267,7 @@ GPU_KERNEL(wf_shade, GPU_TID_1D)(GPU_KERNEL_PARAMS(WfCtl, C),
         s.lambdaU = path.lambdaU;
         s.wlFlags = path.wlFlags;   // the vertex's wavelengths (pre-scatter)
         s.medium = sr.medium;
-        s.pad0 = 0;
+        s.rngSeed = sr.rngSeed;
         shadowQueue[prim_queue_alloc(&counts[WF_COUNT_SHADOW])] = s;
     }
     if (!alive || path.depth + 1 >= C.maxDepth)
@@ -1130,7 +1303,9 @@ GPU_KERNEL(wf_shadow, GPU_TID_1D)(GPU_KERNEL_PARAMS(WfCtl, C),
     GPU_BUFFER(const gpu_storage3, normals),
     GPU_BUFFER(const gpu_float2, uvs),
     GPU_BUFFER(const float, spd),
-    GPU_BUFFER(const MediumGpu, media))
+    GPU_BUFFER(const MediumGpu, media),
+    GPU_BUFFER(const uint, volTable),
+    GPU_BUFFER(const float, volData))
 {
     uint tid = GPU_GLOBAL_ID_X;
     if (tid >= gpu_atomic_load(&counts[WF_COUNT_SHADOW]))
@@ -1138,13 +1313,15 @@ GPU_KERNEL(wf_shadow, GPU_TID_1D)(GPU_KERNEL_PARAMS(WfCtl, C),
     WfShadowRay s = shadowQueue[tid];
     MiniShadeCtx c = wfCtx(C, materials, objects, bvhNodes, tris, positions, normals, uvs,
                            (GPU_DEVICE const RtLight*)0, (GPU_DEVICE const float*)0,
-                           (GPU_DEVICE const RhiTex*)0, spd, (GPU_DEVICE const float*)0, media);
+                           (GPU_DEVICE const RhiTex*)0, spd, (GPU_DEVICE const float*)0, media,
+                           volTable, volData);
     MiniShadowRay sr;
     sr.origin = gpu_float3(s.origin);
     sr.dir = gpu_float3(s.dir);
     sr.tMax = s.tMax;
     sr.L = s.L;
     sr.medium = s.medium;
+    sr.rngSeed = s.rngSeed;
     miniResolveShadow(accum, s.pixel, sr, wfWavelengths(s.lambdaU, s.wlFlags), c);
 }
 

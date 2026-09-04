@@ -52,13 +52,20 @@ if(APPLE)
         src/core/image_loader.cpp
         src/core/spectra.cpp
         src/core/lights.cpp
+        src/core/volume_loader.cpp
         src/core/gui/gui.cpp
         external/SpectrumConsts/rgbspectrum_srgb.cpp
         src/rhi/rhi_metal.mm
         src/stb.cpp
         ${FLUORA_IMGUI_SOURCES}
     )
-    target_include_directories(FluoraMini PRIVATE external/include external/ImGui)
+    # NanoVDB grids are read on the host (core/volume_loader.cpp) with the
+    # vendored headers (git submodule external/openvdb) and the system zlib
+    # (the scene .nvdb files are ZIP-compressed).
+    find_package(ZLIB REQUIRED)
+    target_include_directories(FluoraMini PRIVATE external/include external/ImGui
+        external/openvdb/nanovdb)
+    target_link_libraries(FluoraMini ZLIB::ZLIB)
     # MSL sources are loaded from the source tree at runtime (dev convenience;
     # packaging deferred to M5)
     target_compile_definitions(FluoraMini PRIVATE
@@ -378,12 +385,16 @@ fluora_rhi_target(FluoraMini
     src/core/image_loader.cpp
     src/core/spectra.cpp
     src/core/lights.cpp
+    src/core/volume_loader.cpp
     src/core/gui/gui.cpp
     external/SpectrumConsts/rgbspectrum_srgb.cpp
     src/stb.cpp
     ${FLUORA_RHI_CUDA_SOURCES}
     ${FLUORA_IMGUI_GL_SOURCES})
 target_compile_definitions(FluoraMini PRIVATE RHI_ENABLE_IMGUI)
+# NanoVDB grids are read on the host (core/volume_loader.cpp, NANOVDB_USE_ZIP
+# for the compressed scene files); the include dir is global above.
+target_link_libraries(FluoraMini ${ZLIB_STATIC_LIB})
 fluora_cuda_kernels(FluoraMini src/mini/pathtrace_gpu.h)
 
 fluora_rhi_target(RhiTest

@@ -320,4 +320,31 @@ GPU_FN inline gpu_float3 spd_to_sensor_xyz(GpuSpectrum L, GpuWavelengths swl,
                                           spd_average(Z * L));
 }
 
+// Planck's law: emitted radiance of a blackbody at temperature T (kelvin) for
+// wavelength lambda (nm); 0 for T <= 0. Overflow of the exponential for cold
+// bodies at short wavelengths divides to exactly 0.
+GPU_FN inline float spd_blackbody(float lambda, float T)
+{
+    if (T <= 0.0f)
+        return 0.0f;
+    const float c = 299792458.0f;
+    const float h = 6.62606957e-34f;
+    const float kb = 1.3806488e-23f;
+    float l = lambda * 1e-9f;
+    float l5 = (l * l) * (l * l) * l;
+    return (2.0f * h * c * c) / (l5 * (exp((h * c) / (l * kb * T)) - 1.0f));
+}
+
+// BlackbodySpectrum: Planck normalized to peak 1 (Wien's displacement law
+// for the peak wavelength), sampled at the four wavelengths.
+GPU_FN inline GpuSpectrum spd_blackbody_normalized(GpuWavelengths swl, float T)
+{
+    float lambdaMax = 2.8977721e-3f / T;   // metres
+    float norm = 1.0f / spd_blackbody(lambdaMax * 1e9f, T);
+    GpuSpectrum s;
+    for (int i = 0; i < SPD_N_SAMPLES; i++)
+        s[i] = spd_blackbody(swl.lambda[i], T) * norm;
+    return s;
+}
+
 #endif // CORE_SPECTRUM_SHARED_H
