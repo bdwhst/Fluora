@@ -43,6 +43,7 @@ cmake -B build-mac -DCMAKE_BUILD_TYPE=Release
 cmake --build build-mac
 ./build-mac/bin/FluoraMini scenes/cornell-sphere.txt --spp 1000 --out out.png
 ./build-mac/bin/FluoraMini      # no scene arg -> opens the Cornell box (scenes/cornell-sphere.txt)
+ctest --test-dir build-mac --output-on-failure   # all four test suites; on Windows add -C Release
 ./build-mac/bin/RhiTest         # RHI parallel-primitive tests — run after touching src/rhi/
 ./build-mac/bin/SharedHostTest  # host-C++ vs MSL value parity for shared device code
 ./build-mac/bin/RaytraceTest    # rt_* intersection units + BVH traversal vs brute force, host and GPU

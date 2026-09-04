@@ -25,6 +25,10 @@ endif()
 # (Debug device-debug flags are appended after enable_language(CUDA) below:
 # setting CMAKE_CUDA_FLAGS before it shadows the compiler-detected defaults.)
 
+# All four test suites run under CTest: `ctest --test-dir <build>` (add
+# --output-on-failure; on multi-config generators also -C <Config>).
+enable_testing()
+
 ########################################
 # macOS: Metal vertical slice only (milestone M1)
 ########################################
@@ -118,6 +122,11 @@ if(APPLE)
     # of its own) and checks energy conservation via MINI_DUMP_ACCUM.
     add_executable(FurnaceTest src/test/furnace_test.cpp)
     add_dependencies(FurnaceTest FluoraMini)
+
+    add_test(NAME RhiTest COMMAND RhiTest)
+    add_test(NAME SharedHostTest COMMAND SharedHostTest)
+    add_test(NAME RaytraceTest COMMAND RaytraceTest)
+    add_test(NAME FurnaceTest COMMAND FurnaceTest)
     return()
 endif()
 
@@ -387,3 +396,8 @@ fluora_cuda_kernels(RaytraceTest src/test/raytrace_test_gpu.h)
 # its own) and checks energy conservation via MINI_DUMP_ACCUM.
 add_executable(FurnaceTest src/test/furnace_test.cpp)
 add_dependencies(FurnaceTest FluoraMini)
+
+add_test(NAME RhiTest COMMAND RhiTest)
+add_test(NAME SharedHostTest COMMAND SharedHostTest)
+add_test(NAME RaytraceTest COMMAND RaytraceTest)
+add_test(NAME FurnaceTest COMMAND FurnaceTest)
