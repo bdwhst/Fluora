@@ -21,7 +21,7 @@
     "Background":
     {
         "TYPE":"skybox",
-        "PATH":"../scenes/environment/sunflowers_puresky_8k.hdr"
+        "PATH":"../scenes/environment/sunflowers_puresky_4k.hdr"
     },
     "Media":
     {
