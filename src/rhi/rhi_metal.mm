@@ -398,6 +398,10 @@ kernel void rhi_present_blit(constant uint2& dims [[buffer(0)]],
 }
 )MSL";
 
+// No NSWindowStyleMaskResizable: the window size is the render size.
+static const NSWindowStyleMask kWindowStyleMask =
+    NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable;
+
 class MetalDevice final : public Device {
 public:
     explicit MetalDevice(const DeviceDesc& desc)
@@ -459,8 +463,25 @@ public:
         if (!mWindow)
             createWindow(width, height);
         else if (width != mPresentW || height != mPresentH)
-            throw std::logic_error("present target resize not supported");
+            resizeWindow(width, height);
         return *mPresentBuf;
+    }
+
+    // visibleFrame excludes the menu bar and Dock; converting it to a content
+    // rect for our style mask takes the title bar off too, so the result is a
+    // content size a window can actually take on this screen.
+    Extent2D displaySize() const override
+    {
+        @autoreleasepool {
+            NSScreen* screen = mWindow ? mWindow.screen : nil;
+            if (!screen)
+                screen = [NSScreen mainScreen];
+            if (!screen)
+                return {};
+            NSRect content = [NSWindow contentRectForFrameRect:[screen visibleFrame]
+                                                     styleMask:kWindowStyleMask];
+            return Extent2D{ (int)content.size.width, (int)content.size.height };
+        }
     }
 
     void enableGui(const GuiDrawFn& draw) override
@@ -570,8 +591,7 @@ private:
 
         mWindow = [[NSWindow alloc]
             initWithContentRect:NSMakeRect(0, 0, width, height)
-                      styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
-                                 | NSWindowStyleMaskMiniaturizable)
+                      styleMask:kWindowStyleMask
                         backing:NSBackingStoreBuffered
                           defer:NO];
         mWindow.releasedWhenClosed = NO;
@@ -626,6 +646,22 @@ private:
             mGuiLastTime = std::chrono::steady_clock::now();
         }
 #endif
+    }
+
+    // Window follows the render size (the style mask above has no
+    // NSWindowStyleMaskResizable, so the user cannot drag it). The previous
+    // present buffer is released here; a blit still encoding it stays valid
+    // because the command buffer retains the MTLBuffer.
+    void resizeWindow(int width, int height)
+    {
+        [mWindow setContentSize:NSMakeSize(width, height)];
+        mLayer.drawableSize = CGSizeMake(width, height);
+        mPresentBuf = std::make_unique<MetalBuffer>(
+            mDev, BufferDesc{ (size_t)width * height * 4, MemoryLocation::DeviceLocal,
+                              "rhi.present" });
+        mPresentW = width;
+        mPresentH = height;
+        // present() refreshes io.DisplaySize from mPresentW/H every frame.
     }
 
     id<MTLDevice> mDev;

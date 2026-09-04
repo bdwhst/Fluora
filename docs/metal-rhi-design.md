@@ -190,7 +190,11 @@ Unverified on CUDA until M4.
   bitwise identical to the pre-GUI renderer. (Since the ImGui overlay landed the
   preview builds its camera basis from the fly camera — orthonormal, unlike the
   scene.cpp quirk headless replicates — so preview matches headless framing only
-  for the default horizontal-view scenes.) Window resize stays in M5.
+  for the default horizontal-view scenes.) Window size follows the scene
+  since M4 part 2: `presentTarget(w, h)` with a new size resizes the window
+  and replaces the target on both backends, and the scene swap reallocates
+  the accumulation buffer and wavefront queues; the user cannot drag-resize
+  (the render size is the window size).
 - *Landed (pulled forward from M5):* interactive ImGui overlay GUI. `present()`
   draws a Dear ImGui pass over the blit (render pass, `loadAction=Load`) when
   `Device::enableGui(draw)` is set. Everything portable lives in `src/core/gui`
@@ -434,8 +438,9 @@ two. Adding capability inside `src/mini` is a review flag.
   machines plus fast-math/fma flag matching). Queues vs compaction is settled
   by the A/B above (queues stay).
 
-**M5 — Metal-native features**: hardware RT path; preview upgrades (window resize
-— the basic window landed in M3, the ImGui overlay in M3.x); OIDN-on-Metal denoise.
+**M5 — Metal-native features**: hardware RT path; preview upgrades (the basic
+window landed in M3, the ImGui overlay in M3.x, scene-driven window resize in
+M4 part 2); OIDN-on-Metal denoise.
 
 ## 7. Build integration
 

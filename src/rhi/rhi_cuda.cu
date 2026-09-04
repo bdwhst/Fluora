@@ -217,9 +217,25 @@ public:
             mPresentW = width;
             mPresentH = height;
         } else if (width != mPresentW || height != mPresentH) {
-            throw std::logic_error("present target resize not supported");
+            // Window follows the render size. The old target's free is
+            // deferred behind the live streams like any buffer; the presenter
+            // syncs the present copy itself before touching the PBO.
+            mPresenter->resize(width, height);
+            mPresentBuf = std::make_unique<CudaBuffer>(
+                *this, BufferDesc{ (size_t)width * height * 4, MemoryLocation::DeviceLocal,
+                                   "rhi.present" });
+            mPresentW = width;
+            mPresentH = height;
         }
         return *mPresentBuf;
+    }
+
+    Extent2D displaySize() const override
+    {
+        int w = 0, h = 0;
+        if (!cuda::displayContentSize(w, h))
+            return {};
+        return Extent2D{ w, h };
     }
 
     void enableGui(const GuiDrawFn& draw) override

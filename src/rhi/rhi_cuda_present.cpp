@@ -71,6 +71,24 @@ struct Presenter::Impl {
     const GuiDrawFn* guiDraw = nullptr;
 };
 
+bool displayContentSize(int& width, int& height)
+{
+    if (!glfwInit())
+        return false;
+    GLFWmonitor* mon = glfwGetPrimaryMonitor();
+    if (!mon)
+        return false;
+    int x = 0, y = 0, w = 0, h = 0;
+    glfwGetMonitorWorkarea(mon, &x, &y, &w, &h);
+    if (w <= 0 || h <= 0)
+        return false;
+    // Title bar + borders, roughly: erring large only costs a few preview
+    // pixels, while erring small pushes the title bar off-screen.
+    width = w > 16 ? w - 16 : w;
+    height = h > 48 ? h - 48 : h;
+    return true;
+}
+
 Presenter::Presenter(int width, int height, const GuiDrawFn* gui) : mImpl(new Impl)
 {
     Impl& im = *mImpl;
@@ -178,6 +196,30 @@ Presenter::~Presenter()
         glfwDestroyWindow(im.window);
     }
     glfwTerminate();
+}
+
+void Presenter::resize(int width, int height)
+{
+    Impl& im = *mImpl;
+    if (width == im.width && height == im.height)
+        return;
+    // The present copy runs on the legacy default stream; finish it before
+    // the PBO it targets is unregistered and reallocated.
+    cudaCheckP(cudaStreamSynchronize(0), "present resize sync");
+    cudaCheckP(cudaGraphicsUnregisterResource(im.pboRes), "cudaGraphicsUnregisterResource");
+    im.pboRes = nullptr;
+    im.width = width;
+    im.height = height;
+
+    glfwSetWindowSize(im.window, width, height);
+    glBindTexture(GL_TEXTURE_2D, im.tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, im.pbo);
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, (GLsizeiptr)width * height * 4, nullptr, GL_DYNAMIC_COPY);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    cudaCheckP(cudaGraphicsGLRegisterBuffer(&im.pboRes, im.pbo, cudaGraphicsRegisterFlagsWriteDiscard),
+               "cudaGraphicsGLRegisterBuffer");
+    // ImGui's GLFW backend reads the new window size on its next NewFrame.
 }
 
 bool Presenter::present(const void* deviceRgba8)

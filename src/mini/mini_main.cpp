@@ -352,10 +352,11 @@ int main(int argc, char** argv)
         std::cerr << "scene load failed: " << err << "\n";
         return 1;
     }
-    // Window/accumulation size is fixed for the session (present-target resize
-    // is unsupported); swapped-in scenes render at this resolution.
-    const int width = scene.camera.width;
-    const int height = scene.camera.height;
+    // Render size follows the loaded scene: a swapped-in scene at a different
+    // resolution reallocates the size-dependent session buffers and resizes
+    // the window through presentTarget() (the window is never user-resizable).
+    int width = scene.camera.width;
+    int height = scene.camera.height;
     const int spp = sppOverride > 0 ? sppOverride : scene.camera.iterations;
     std::cout << "mini: " << scene.objects.size() << " objects, " << scene.materials.size()
               << " materials, " << width << "x" << height << ", " << spp << " spp, " << mode
@@ -392,41 +393,84 @@ int main(int argc, char** argv)
                                 + "\n" + readTextFile(std::string(RHI_SHADER_DIR) + "/texture_gpu.h")
                                 + "\n" + readTextFile(std::string(MINI_SHADER_DIR) + "/pathtrace_gpu.h");
         auto device = rhi::createDevice(rhi::kNativeBackend, deviceDesc);
+        // The preview window is the render size and is not user-resizable, so a
+        // scene whose RES is larger than the display would open a window the
+        // user can neither shrink nor fully see. Scale the preview down to fit
+        // (aspect preserved); headless renders keep the scene's own RES.
+        auto fitPreviewSize = [&](int& w, int& h) {
+            if (!preview)
+                return;
+            rhi::Extent2D disp = device->displaySize();
+            if (disp.width <= 0 || disp.height <= 0 || (w <= disp.width && h <= disp.height))
+                return;
+            double scale = std::min(disp.width / (double)w, disp.height / (double)h);
+            int fitW = std::max(1, (int)(w * scale));
+            int fitH = std::max(1, (int)(h * scale));
+            std::cout << "mini: " << w << "x" << h << " does not fit the display ("
+                      << disp.width << "x" << disp.height << "), previewing at " << fitW << "x"
+                      << fitH << "\n";
+            w = fitW;
+            h = fitH;
+        };
+        fitPreviewSize(width, height);
+
         const std::string outSuffix = std::string("_") + rhi::backendName(rhi::kNativeBackend) + ".png";
         auto stream = device->createStream();
         auto megaPipe = device->createPipeline({ "pathtraceKernel" });
 
-        // Session-invariant accumulation buffer (survives scene swaps).
-        const size_t accumBytes = (size_t)width * height * 4 * sizeof(float);
-        auto accum = device->createBuffer({ accumBytes, rhi::MemoryLocation::Shared, "accum" });
+        // Size-dependent session resources: the accumulation buffer, the
+        // dispatch grid and (wavefront) the width*height-sized queues. Allocated
+        // here and again from the scene swap when the resolution changes; the
+        // old buffers free on reassignment (after the swap's waitIdle()).
+        std::unique_ptr<rhi::Buffer> accum;
+        size_t accumBytes = 0;
+        rhi::Dim3 grid{ 1, 1, 1 };
+        std::unique_ptr<rhi::Buffer> raysA, raysB, shadowQueue, qDiffuse, qConductor, qGlass;
+        auto allocSizedBuffers = [&] {
+            // Release the previous size's buffers before allocating the new
+            // ones: assigning over them would keep both sets live at the peak,
+            // and the wavefront queues are five width*height*WF_PATHSTATE_SIZE
+            // allocations (gigabytes at large resolutions). Safe because every
+            // caller has drained the stream first.
+            accum.reset();
+            raysA.reset();
+            raysB.reset();
+            qDiffuse.reset();
+            qConductor.reset();
+            qGlass.reset();
+            shadowQueue.reset();
+            accumBytes = (size_t)width * height * 4 * sizeof(float);
+            accum = device->createBuffer({ accumBytes, rhi::MemoryLocation::Shared, "accum" });
+            std::memset(accum->hostPtr(), 0, accumBytes);
+            grid = rhi::Dim3{ (unsigned)(width + 15) / 16, (unsigned)(height + 15) / 16, 1 };
+            if (mode == "wavefront") {
+                const size_t queueBytes = (size_t)width * height * WF_PATHSTATE_SIZE;
+                raysA = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.raysA" });
+                raysB = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.raysB" });
+                qDiffuse = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.qDiffuse" });
+                qConductor = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.qConductor" });
+                qGlass = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.qGlass" });
+                shadowQueue = device->createBuffer({ (size_t)width * height * WF_SHADOWRAY_SIZE,
+                                                     rhi::MemoryLocation::DeviceLocal, "wf.shadow" });
+            }
+        };
+        allocSizedBuffers();
         auto zeroAccum = [&] { std::memset(accum->hostPtr(), 0, accumBytes); };
-        zeroAccum();
 
         // First scene upload.
         SceneGpu sg = buildSceneGpu(*device, scene);
         rhi::Buffer* texHeap = &device->textureHeap();
 
-        const rhi::Dim3 grid{ (unsigned)(width + 15) / 16, (unsigned)(height + 15) / 16, 1 };
         const rhi::Dim3 block{ 16, 16, 1 };
 
-        // Wavefront-mode resources: ping-pong ray queues + one shade queue per
-        // material type, queue counters, indirect-args slots (all session-fixed,
-        // width*height sized). Shade pipelines specialize one kernel per material
-        // type via rhi::SpecConstant.
-        std::unique_ptr<rhi::Buffer> raysA, raysB, counts, indirectArgs, shadowQueue;
-        std::unique_ptr<rhi::Buffer> qDiffuse, qConductor, qGlass;
+        // Wavefront-mode resources that do not depend on the size: queue
+        // counters, indirect-args slots, and the pipelines (shade pipelines
+        // specialize one kernel per material type via rhi::SpecConstant).
+        std::unique_ptr<rhi::Buffer> counts, indirectArgs;
         std::unique_ptr<rhi::ComputePipeline> raygenPipe, prepIntersectPipe, prepShadePipe,
             prepShadowPipe, intersectPipe, shadeDiffusePipe, shadeConductorPipe, shadeGlassPipe,
             shadowPipe;
         if (mode == "wavefront") {
-            const size_t queueBytes = (size_t)width * height * WF_PATHSTATE_SIZE;
-            raysA = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.raysA" });
-            raysB = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.raysB" });
-            qDiffuse = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.qDiffuse" });
-            qConductor = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.qConductor" });
-            qGlass = device->createBuffer({ queueBytes, rhi::MemoryLocation::DeviceLocal, "wf.qGlass" });
-            shadowQueue = device->createBuffer({ (size_t)width * height * WF_SHADOWRAY_SIZE,
-                                                 rhi::MemoryLocation::DeviceLocal, "wf.shadow" });
             counts = device->createBuffer({ WF_NUM_COUNTERS * 4, rhi::MemoryLocation::DeviceLocal, "wf.counts" });
             indirectArgs = device->createBuffer({ WF_NUM_ARG_SLOTS * 16, rhi::MemoryLocation::DeviceLocal, "wf.args" });
             raygenPipe = device->createPipeline({ "wf_raygen" });
@@ -607,9 +651,31 @@ int main(int argc, char** argv)
         };
 
         // Swap in a different scene: drain the GPU (old buffers are about to be
-        // freed), rebuild resources at the session resolution, reset the camera.
-        // Costs a BVH build + reupload (dropdown-speed, not live); the loop zeroes
-        // accumulation afterwards.
+        // freed), rebuild resources, follow the new scene's resolution (window,
+        // accumulation, queues), reset the camera. Costs a BVH build + reupload
+        // (dropdown-speed, not live); the loop zeroes accumulation afterwards.
+        // Uploads a loaded scene and follows its resolution. Requires a drained
+        // stream (it frees the previous scene's buffers) and throws on a failed
+        // GPU allocation, which the caller recovers from.
+        auto activateScene = [&](const CoreScene& s) {
+            // Free the old scene before building the new one so its bindless
+            // texture slots return to the heap freelist and the new upload
+            // reuses them, instead of both scenes' textures being live at once
+            // (which would push the slot high-water toward the 1024 cap on
+            // repeated swaps). Safe after waitIdle(): no dispatch still reads it.
+            sg = {};
+            sg = buildSceneGpu(*device, s);
+            int w = s.camera.width, h = s.camera.height;
+            fitPreviewSize(w, h);
+            if (w != width || h != height) {
+                width = w;
+                height = h;
+                allocSizedBuffers();
+                presentBuf = &device->presentTarget(width, height);
+                std::cout << "mini: window resized to " << width << "x" << height << "\n";
+            }
+        };
+
         auto swapScene = [&](int idx) {
             if (idx < 0 || idx >= (int)scenePaths.size())
                 return;
@@ -620,19 +686,32 @@ int main(int argc, char** argv)
                 return;
             }
             stream->waitIdle();
-            // Free the old scene before building the new one so its bindless
-            // texture slots return to the heap freelist and the new upload
-            // reuses them, instead of both scenes' textures being live at once
-            // (which would push the slot high-water toward the 1024 cap on
-            // repeated swaps). Safe after waitIdle(): no dispatch still reads it.
-            sg = {};
-            sg = buildSceneGpu(*device, next);
+            int shown = idx;
+            try {
+                activateScene(next);
+            } catch (const std::exception& ex) {
+                // Typically an out-of-memory building a much larger scene's
+                // buffers. The scene we came from is already released by now, so
+                // rebuild it rather than letting the throw end the session and
+                // discard the accumulated image; only a failure to restore
+                // (nothing left to render) is fatal.
+                std::cout << "mini: failed to switch to " << sceneNames[idx] << ": " << ex.what()
+                          << "\n";
+                shown = ui.selectedScene;
+                CoreScene back;
+                std::string backErr;
+                if (shown == idx || !loadScene(scenePaths[shown], back, backErr))
+                    throw;
+                activateScene(back);
+                std::cout << "mini: restored " << sceneNames[shown] << "\n";
+            }
             applySceneParams();
             cam = gui::FlyCamera::fromLookAt(sg.eye, sg.lookAt);
             setCameraFly(params, cam);
-            ui.selectedScene = idx;
+            ui.selectedScene = shown;
             applySceneStats();
-            std::cout << "mini: switched to " << sceneNames[idx] << "\n";
+            if (shown == idx)
+                std::cout << "mini: switched to " << sceneNames[idx] << "\n";
         };
 
         // Renderer-side hooks for the portable preview loop (gui::runPreview owns

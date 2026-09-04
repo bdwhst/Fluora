@@ -134,6 +134,9 @@ public:
 
 struct Dim3 { uint32_t x = 1, y = 1, z = 1; };
 
+// Window/display size in window units (points on macOS, pixels elsewhere).
+struct Extent2D { int width = 0, height = 0; };
+
 // Ordered command recording + submission. CUDA: a cudaStream_t, dispatch =
 // kernel launch. Metal: MTLCommandBuffer + compute encoders, submit = commit.
 // The renderer's per-bounce loop (raygen -> intersect -> shade -> queues)
@@ -254,13 +257,23 @@ public:
     //
     // presentTarget() creates the window on first call and returns the RGBA8
     // buffer (width*height*4, row-major, row 0 = top of the window) a tonemap
-    // kernel writes into. present() pumps window events and blits it to screen;
-    // it returns false once the user asked to close (window close, q, Esc) —
+    // kernel writes into. A later call with a different size resizes the
+    // window to it and replaces the target (the previous Buffer& is dead; the
+    // caller drains its streams first, as for any buffer it frees). The window
+    // is never user-resizable: its size is the render size, set only through
+    // this call. present() pumps window events and blits it to screen; it
+    // returns false once the user asked to close (window close, q, Esc) —
     // after that the caller should stop rendering and exit. Writes to the
     // target must be submitted on this device's streams before present() so
     // same-queue ordering makes them visible.
     virtual Buffer& presentTarget(int width, int height) = 0;
     virtual bool present() = 0;
+
+    // Largest window content size the primary display can show (its work area
+    // minus the window frame), or {0, 0} when there is no display to ask. Since
+    // the window size is the render size, a caller that lets scene data pick
+    // the resolution uses this to keep the window on-screen.
+    virtual Extent2D displaySize() const { return {}; }
 
     // Optional ImGui overlay. Enable before the first presentTarget(): the
     // backend creates the ImGui context and its platform/renderer backends and,
