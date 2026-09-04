@@ -1,7 +1,8 @@
 #pragma once
 // Portable mesh loading for the renderer core (no backend headers, invariant
-// I-4). OBJ via tinyobjloader; PLY migrates here with the .json volume scenes
-// (the glTF path in scene.cpp is dead code and does not).
+// I-4). OBJ via tinyobjloader, PLY via tinyply, plus the .json format's inline
+// vertex/index lists. The glTF path in scene.cpp is dead code and does not
+// migrate.
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -36,3 +37,26 @@ bool loadObjMesh(const std::string& path, const glm::mat4& transform,
                  std::vector<gpu_float2>& uvs,
                  std::vector<gpu_uint4>& tris,
                  std::vector<MeshMaterial>& outMaterials);
+
+// Appends a PLY mesh (Scene::loadPly's subset: float x/y/z, optional nx/ny/nz
+// and u/v, triangle faces with int32/uint32 vertex_indices) bound to one
+// scene material. PLY vertices are already unified, so they append 1:1; no
+// dedupe. Fails on non-triangle faces.
+bool loadPlyMesh(const std::string& path, const glm::mat4& transform,
+                 uint32_t materialId,
+                 std::vector<gpu_storage3>& positions,
+                 std::vector<gpu_storage3>& normals,
+                 std::vector<gpu_float2>& uvs,
+                 std::vector<gpu_uint4>& tris);
+
+// Appends an inline mesh (.json "model_inline": flat xyz vertex list, flat
+// triangle index list) bound to one scene material. No normals or uvs (zero
+// / (-1,-1)), like Scene::loadJSON. Fails on an index out of range or a
+// count that is not a multiple of three.
+bool appendInlineMesh(const std::vector<float>& xyz, const std::vector<uint32_t>& indices,
+                      const glm::mat4& transform, uint32_t materialId,
+                      std::vector<gpu_storage3>& positions,
+                      std::vector<gpu_storage3>& normals,
+                      std::vector<gpu_float2>& uvs,
+                      std::vector<gpu_uint4>& tris,
+                      std::string& err);

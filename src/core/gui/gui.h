@@ -71,7 +71,7 @@ struct State {
 // between ImGui::NewFrame() and ImGui::Render(). Backend-agnostic.
 void draw(State& s);
 
-// Populates the scene dropdown from the `.txt` files sibling to `scenePath`
+// Populates the scene dropdown from the `.txt` / `.json` files sibling to `scenePath`
 // (sorted by name). `selected` is set to the entry matching `scenePath`, else 0.
 // Never throws: on any filesystem error the outputs are left empty.
 void scanSceneDirectory(const std::string& scenePath, std::vector<std::string>& names,

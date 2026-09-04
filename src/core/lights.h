@@ -18,3 +18,8 @@ std::vector<RtLight> buildLightList(const CoreScene& scene, bool hasEnvMap);
 // Distribution2D over the env texels' luminance (rgb clamped to maxRadiance),
 // laid out per the ENVDIST_* offsets in light_shared.h. nu = width, nv = height.
 std::vector<float> buildEnvDistribution(const HdrImage& img, const glm::vec3& maxRadiance);
+
+// Bakes CoreScene::envScale / envMaxRadiance into the texels
+// (rgb = min(rgb * scale, maxRadiance)), what scene.cpp's ImageInfiniteLight
+// applies at lookup; the kernels then sample the image as is.
+void applyEnvScale(HdrImage& img, float scale, const glm::vec3& maxRadiance);

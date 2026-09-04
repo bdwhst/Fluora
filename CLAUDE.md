@@ -138,9 +138,9 @@ Renderer options are `#define`s at the top of `src/sceneStructs.h` rather than r
 
 ## Scene file formats
 
-Two formats live side-by-side under `scenes/`; extension dispatch happens in `Scene::Scene` (`scene.cpp`).
-- `.txt` — the original CIS-5650 line-oriented format (MATERIAL / OBJECT / CAMERA blocks). Documented in `INSTRUCTION.md` and well-suited for quick test scenes. Loader: `Scene::loadMaterial` / `loadObject` / `loadCamera` in `scene.cpp`. This is the only format FluoraMini reads.
-- `.json` — newer format with richer material descriptions (spectral eta/k, named spectra from `SpectrumConsts/`), volumes, and proper camera DOF parameters. Loader: `Scene::loadJSON` in `scene.cpp`. Prefer this for new scenes.
+Two formats live side-by-side under `scenes/`; extension dispatch happens in `Scene::Scene` (`scene.cpp`) for the old renderer and in `loadScene()` (`src/core/scene_loader.cpp`) for FluoraMini, which reads both.
+- `.txt` — the original CIS-5650 line-oriented format (MATERIAL / OBJECT / CAMERA blocks). Documented in `INSTRUCTION.md` and well-suited for quick test scenes. Loader: `Scene::loadMaterial` / `loadObject` / `loadCamera` in `scene.cpp`; `loadTxtScene` in the core.
+- `.json` — newer format with richer material descriptions (spectral eta/k, named spectra from `SpectrumConsts/`), volumes, and proper camera DOF parameters. Loader: `Scene::loadJSON` in `scene.cpp`; `loadJsonScene` in the core (PLY/OBJ/inline meshes, EXR textures, env SCALE/MAXRGB; media, medium interfaces and DOF are parsed into `CoreScene` but not rendered yet — interface-only objects render as pass-through boundaries). Prefer this for new scenes. Paths inside both formats are joined with the scene's directory, so the `../scenes/...` form works from the repo root or `build/`.
 
 ## Git conventions
 

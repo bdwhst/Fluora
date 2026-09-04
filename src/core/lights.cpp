@@ -67,3 +67,12 @@ std::vector<float> buildEnvDistribution(const HdrImage& img, const glm::vec3& ma
     d[ENVDIST_OFF_MARG_INT(nu, nv)] = buildDist1D(margFunc, nv, margCdf);
     return d;
 }
+
+void applyEnvScale(HdrImage& img, float scale, const glm::vec3& maxRadiance)
+{
+    for (size_t i = 0; i + 3 < img.rgba.size(); i += 4) {
+        img.rgba[i + 0] = std::min(img.rgba[i + 0] * scale, maxRadiance.r);
+        img.rgba[i + 1] = std::min(img.rgba[i + 1] * scale, maxRadiance.g);
+        img.rgba[i + 2] = std::min(img.rgba[i + 2] * scale, maxRadiance.b);
+    }
+}

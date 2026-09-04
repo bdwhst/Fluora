@@ -2,11 +2,15 @@
 
 #define TINYOBJLOADER_IMPLEMENTATION
 #include <tiny_obj_loader.h>
+#define TINYPLY_IMPLEMENTATION
+#include <tinyply.h>
 
 #include <glm/gtc/matrix_inverse.hpp>
 
 #include <algorithm>
+#include <fstream>
 #include <iostream>
+#include <memory>
 #include <unordered_map>
 
 #include "host_math.h"
@@ -113,5 +117,115 @@ bool loadObjMesh(const std::string& path, const glm::mat4& transform,
     }
     std::cout << "core: loaded " << path << " (" << triCount << " tris, "
               << outMaterials.size() << " mtl materials)\n";
+    return true;
+}
+
+// ---- PLY ----------------------------------------------------------------
+
+bool loadPlyMesh(const std::string& path, const glm::mat4& transform,
+                 uint32_t materialId,
+                 std::vector<gpu_storage3>& positions,
+                 std::vector<gpu_storage3>& normals,
+                 std::vector<gpu_float2>& uvs,
+                 std::vector<gpu_uint4>& tris)
+{
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) {
+        std::cout << "core: cannot open PLY " << path << "\n";
+        return false;
+    }
+    tinyply::PlyFile file;
+    std::shared_ptr<tinyply::PlyData> verts, norms, texcoords, faces;
+    try {
+        file.parse_header(stream);
+        verts = file.request_properties_from_element("vertex", { "x", "y", "z" });
+        // Optional attributes: tinyply throws when an element/property is
+        // missing, so each is requested on its own.
+        try { norms = file.request_properties_from_element("vertex", { "nx", "ny", "nz" }); }
+        catch (const std::exception&) {}
+        try { texcoords = file.request_properties_from_element("vertex", { "u", "v" }); }
+        catch (const std::exception&) {}
+        faces = file.request_properties_from_element("face", { "vertex_indices" }, 0);
+        file.read(stream);
+    } catch (const std::exception& e) {
+        std::cout << "core: PLY load failed for " << path << ": " << e.what() << "\n";
+        return false;
+    }
+    if (!verts || verts->t != tinyply::Type::FLOAT32 || !faces) {
+        std::cout << "core: PLY " << path << " needs float32 vertices and faces\n";
+        return false;
+    }
+    if (norms && norms->t != tinyply::Type::FLOAT32)
+        norms.reset();
+    if (texcoords && texcoords->t != tinyply::Type::FLOAT32)
+        texcoords.reset();
+    if (faces->t != tinyply::Type::INT32 && faces->t != tinyply::Type::UINT32) {
+        std::cout << "core: PLY " << path << " has non-32-bit face indices\n";
+        return false;
+    }
+    // With no list-size hint tinyply packs variable-length lists back to back;
+    // only all-triangle files have exactly 3 indices per face.
+    if (faces->buffer.size_bytes() != faces->count * 3 * sizeof(uint32_t)) {
+        std::cout << "core: PLY " << path << " has non-triangle faces\n";
+        return false;
+    }
+
+    glm::mat4 invT = glm::inverseTranspose(transform);
+    const uint32_t base = (uint32_t)positions.size();
+    const float* p = reinterpret_cast<const float*>(verts->buffer.get());
+    const float* n = norms ? reinterpret_cast<const float*>(norms->buffer.get()) : nullptr;
+    const float* t = texcoords ? reinterpret_cast<const float*>(texcoords->buffer.get()) : nullptr;
+    for (size_t i = 0; i < verts->count; i++) {
+        glm::vec4 pos(p[3 * i], p[3 * i + 1], p[3 * i + 2], 1.0f);
+        positions.push_back(hostStore3(glm::vec3(transform * pos)));
+        glm::vec3 nn(0.0f);
+        if (n)
+            nn = glm::vec3(invT * glm::vec4(n[3 * i], n[3 * i + 1], n[3 * i + 2], 0.0f));
+        normals.push_back(hostStore3(nn));
+        uvs.push_back(t ? gpu_float2(t[2 * i], t[2 * i + 1]) : gpu_float2(-1.0f, -1.0f));
+    }
+    const uint32_t* idx = reinterpret_cast<const uint32_t*>(faces->buffer.get());
+    for (size_t f = 0; f < faces->count; f++) {
+        uint32_t a = idx[3 * f], b = idx[3 * f + 1], c = idx[3 * f + 2];
+        if (a >= verts->count || b >= verts->count || c >= verts->count) {
+            std::cout << "core: PLY " << path << " face index out of range\n";
+            return false;
+        }
+        tris.push_back(gpu_uint4(base + a, base + b, base + c, materialId));
+    }
+    std::cout << "core: loaded " << path << " (" << faces->count << " tris)\n";
+    return true;
+}
+
+// ---- inline (.json) ------------------------------------------------------
+
+bool appendInlineMesh(const std::vector<float>& xyz, const std::vector<uint32_t>& indices,
+                      const glm::mat4& transform, uint32_t materialId,
+                      std::vector<gpu_storage3>& positions,
+                      std::vector<gpu_storage3>& normals,
+                      std::vector<gpu_float2>& uvs,
+                      std::vector<gpu_uint4>& tris,
+                      std::string& err)
+{
+    if (xyz.size() % 3 != 0 || indices.size() % 3 != 0) {
+        err = "inline mesh: VERTICES/INDICES counts must be multiples of three";
+        return false;
+    }
+    const uint32_t base = (uint32_t)positions.size();
+    const uint32_t count = (uint32_t)(xyz.size() / 3);
+    for (uint32_t i = 0; i < count; i++) {
+        glm::vec4 pos(xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2], 1.0f);
+        positions.push_back(hostStore3(glm::vec3(transform * pos)));
+        normals.push_back(hostStore3(glm::vec3(0.0f)));
+        uvs.push_back(gpu_float2(-1.0f, -1.0f));
+    }
+    for (size_t f = 0; f + 2 < indices.size(); f += 3) {
+        uint32_t a = indices[f], b = indices[f + 1], c = indices[f + 2];
+        if (a >= count || b >= count || c >= count) {
+            err = "inline mesh: index out of range";
+            return false;
+        }
+        tris.push_back(gpu_uint4(base + a, base + b, base + c, materialId));
+    }
     return true;
 }

@@ -163,7 +163,8 @@ void scanSceneDirectory(const std::string& scenePath, std::vector<std::string>& 
         fs::path here = fs::weakly_canonical(scenePath);
         std::vector<std::pair<std::string, std::string>> entries;  // (name, path)
         for (const auto& e : fs::directory_iterator(here.parent_path())) {
-            if (e.is_regular_file() && e.path().extension() == ".txt")
+            if (e.is_regular_file()
+                && (e.path().extension() == ".txt" || e.path().extension() == ".json"))
                 entries.emplace_back(e.path().filename().string(), e.path().string());
         }
         std::sort(entries.begin(), entries.end());

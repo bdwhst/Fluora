@@ -3,8 +3,9 @@
 Status: M0–M3 landed (FluoraMini renders full scenes spectrally on Metal);
 M4 part 1 landed 2026-09-03 (real CUDA backend — FluoraMini, RhiTest and
 SharedHostTest build and pass on Windows/CUDA, both render modes bitwise
-identical; the main CUDA renderer builds again). Next: M4 part 2, migrating
-pathtrace.cu onto the RHI · Owner: bdwhst · Last updated: 2026-09-03
+identical; the main CUDA renderer builds again). M4 part 2 in progress: grow
+the portable renderer instead of migrating pathtrace.cu — NEE+MIS and the
+.json/PLY loader landed, volumes next · Owner: bdwhst · Last updated: 2026-09-04
 
 ## 1. Context and goal
 
@@ -381,7 +382,9 @@ two. Adding capability inside `src/mini` is a review flag.
   FluoraMini lacks is features, so those are ported into the core and the old
   renderer becomes the parity reference until it is retired. Order:
   1. Mac sanity pass on what M4 part 1 touched without a Metal build
-     (`texture_gpu.h`, single-source test kernels, `GPU_SPEC_INSTANCES`).
+     (`texture_gpu.h`, single-source test kernels, `GPU_SPEC_INSTANCES`)
+     *(done 2026-09-04: Metal build verified on the owner's Mac, including
+     the NEE stage and the final kernel-macro form)*.
   2. **NEE + MIS** *(landed 2026-09-03)*: `rt_occluded` on the ray seam, area
      lights from emissive triangles and analytic objects (the CUDA renderer's
      cube/sphere/triangle sampling schemes), env-map importance sampling with
@@ -400,8 +403,26 @@ two. Adding capability inside `src/mini` is a review flag.
      Jacobian `p(uv) / (2π² cos(latitude))` (PBRT), not the old renderer's
      `p(uv)/4π`. Lights are one-sided for sampling (back-side emission arrives
      via BSDF sampling with full weight), as in the CUDA renderer.
-  3. `.json` scenes and PLY into `core/scene_loader` (DOF camera parameters
-     come with them).
+  3. **`.json` scenes and PLY into `core/scene_loader`** *(landed
+     2026-09-04)*: `loadScene()` dispatches on the extension; `loadJsonScene`
+     mirrors `Scene::loadJSON` key for key (named materials with const/named
+     eta and k, REFL rgb/texture, NORMAL_MAP path, Background SCALE/MAXRGB
+     baked into the env texels, Camera LENS_RADIUS/FOCAL_LEN/MEDIUM, Media,
+     MediumInterfaces, `geometry_cube`/`geometry_sphere`, `model_inline`,
+     `model_ply` dispatched on the real extension since scenes label OBJ
+     files that way). `mesh_loader` gained tinyply PLY and inline meshes,
+     `image_loader` EXR via tinyexr (linear base color sRGB-encoded into the
+     8-bit heap format). Media and DOF are carried in `CoreScene` for steps
+     4–5; a medium interface rides on a per-(material, inside, outside)
+     material clone because triangles carry one id, and interface-only
+     objects get a `CoreMaterialType::Interface` that FluoraMini maps to an
+     index-matched dielectric (exactly pass-through, but it counts as a
+     bounce and occludes shadow rays — both go away with the media step,
+     where shadow rays need transmittance anyway). Verified on CUDA:
+     bunny.json, matchbulb.json (73k PLY tris, EXR textures, Ag spectra, env
+     scale 0.2) and volumetric-caustics.json render with mega ≡ wavefront
+     bitwise; the .txt path is unchanged (cornell bitwise across modes,
+     FurnaceTest passes).
   4. Volumes: homogeneous first, then a NanoVDB-under-MSL spike before
      committing to grid media on Metal.
   5. DOF (camera ray generation) and denoise (OIDN behind the present seam on

@@ -1,5 +1,5 @@
 // FluoraMini: Cornell-box vertical slice on the Metal RHI backend (M1 in
-// docs/metal-rhi-design.md). Loads a Fluora .txt scene subset, path-traces it
+// docs/metal-rhi-design.md). Loads a Fluora .txt or .json scene, path-traces it
 // via rhi:: with a live preview window, and writes a PNG. The preview is
 // interactive: an ImGui overlay (src/core/gui) shows render stats, a fly
 // camera (WASD / drag / wheel) re-renders on move, and a dropdown hot-swaps
@@ -131,10 +131,15 @@ SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
         case CoreMaterialType::Emissive: mm.type = MINI_MAT_EMITTING; break;
         case CoreMaterialType::Dielectric: mm.type = MINI_MAT_GLASS; break;
         case CoreMaterialType::Conductor: mm.type = MINI_MAT_CONDUCTOR; break;
+        // Medium boundary without a surface. The loader emits no geometry for
+        // these (they would block shadow rays), so this entry only keeps the
+        // material indices dense; an index-matched dielectric is the closest
+        // stand-in until the media step gives it a real transition.
+        case CoreMaterialType::Interface: mm.type = MINI_MAT_GLASS; break;
         }
         mm.rgb = hostStore3(m.rgb);
         mm.emittance = m.emittance;
-        mm.ior = m.ior;
+        mm.ior = m.type == CoreMaterialType::Interface ? 1.0f : m.ior;
         mm.roughness = m.roughness;
         mm.texIdx = m.texIdx == kCoreTexNone ? MINI_TEX_NONE : texHeap[m.texIdx];
         mm.etaSpd = resolveSpd(m.etaNamed);
@@ -200,6 +205,7 @@ SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
     if (!scene.envMapPath.empty()) {
         HdrImage envImg;
         if (loadHdrImage(scene.envMapPath, envImg)) {
+            applyEnvScale(envImg, scene.envScale, scene.envMaxRadiance);
             sg.envTex = device.createTexture(
                 { envImg.width, envImg.height, rhi::TextureFormat::RGBA32Float, true, false,
                   "envmap" });
@@ -208,7 +214,7 @@ SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
             sg.envW = (unsigned)envImg.width;
             sg.envH = (unsigned)envImg.height;
             // Luminance distribution for env-map importance sampling (NEE).
-            envDist = buildEnvDistribution(envImg, glm::vec3(MINI_ENV_MAX_RADIANCE));
+            envDist = buildEnvDistribution(envImg, scene.envMaxRadiance);
             std::cout << "mini: environment map " << scene.envMapPath << " (" << envImg.width
                       << "x" << envImg.height << ")\n";
         } else {
@@ -342,7 +348,7 @@ int main(int argc, char** argv)
 
     CoreScene scene;
     std::string err;
-    if (!loadTxtScene(scenePath, scene, err)) {
+    if (!loadScene(scenePath, scene, err)) {
         std::cerr << "scene load failed: " << err << "\n";
         return 1;
     }
@@ -356,7 +362,7 @@ int main(int argc, char** argv)
               << " mode, " << rhi::backendName(rhi::kNativeBackend) << " backend"
               << (safeMath ? ", safe math" : "") << "\n";
 
-    // Sibling .txt scenes populate the preview's dropdown (sorted by name).
+    // Sibling .txt/.json scenes populate the preview's dropdown (sorted by name).
     std::vector<std::string> scenePaths, sceneNames;
     int selectedScene = 0;
     gui::scanSceneDirectory(scenePath, sceneNames, scenePaths, selectedScene);
@@ -604,12 +610,12 @@ int main(int argc, char** argv)
         // freed), rebuild resources at the session resolution, reset the camera.
         // Costs a BVH build + reupload (dropdown-speed, not live); the loop zeroes
         // accumulation afterwards.
-        auto loadScene = [&](int idx) {
+        auto swapScene = [&](int idx) {
             if (idx < 0 || idx >= (int)scenePaths.size())
                 return;
             CoreScene next;
             std::string e;
-            if (!loadTxtScene(scenePaths[idx], next, e)) {
+            if (!loadScene(scenePaths[idx], next, e)) {
                 std::cout << "mini: failed to load " << scenePaths[idx] << ": " << e << "\n";
                 return;
             }
@@ -653,7 +659,7 @@ int main(int argc, char** argv)
             stream->waitIdle();
             zeroAccum();
         };
-        hooks.loadScene = loadScene;
+        hooks.loadScene = swapScene;
         int previewExit = 0;
         auto saveNow = [&](int samples) {
             stream->waitIdle();
