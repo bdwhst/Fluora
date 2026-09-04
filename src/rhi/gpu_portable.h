@@ -56,6 +56,8 @@ typedef atomic_uint gpu_atomic_uint;
 
 GPU_FN inline gpu_float3 gpu_load3(gpu_storage3 v) { return v; }
 GPU_FN inline gpu_float3 gpu_xyz(gpu_float4 v) { return v.xyz; }
+typedef float4x4 gpu_float4x4;
+GPU_FN inline gpu_float4x4 gpu_load4x4(gpu_storage4x4 m) { return m; }
 GPU_FN inline bool gpu_all_finite(gpu_float3 v) { return all(isfinite(v)); }
 GPU_FN inline bool gpu_isinf(float x) { return isinf(x); }
 
@@ -219,6 +221,7 @@ typedef unsigned char uchar;
 typedef glm::vec2 gpu_float2;
 typedef glm::vec3 gpu_float3;
 typedef glm::vec4 gpu_float4;
+typedef glm::mat4 gpu_float4x4;
 typedef glm::uvec2 gpu_uint2;
 typedef glm::uvec4 gpu_uint4;
 typedef glm::vec3 gpu_packed3;       // 12 bytes, matches MSL packed_float3
@@ -231,6 +234,7 @@ typedef unsigned int gpu_atomic_uint;
 #define GPU_FN __device__
 struct alignas(16) gpu_storage3 { float x, y, z; };  // MSL float3 layout
 typedef glm::mat4 gpu_storage4x4;    // column-major 64B, matches MSL float4x4
+GPU_FN inline gpu_float4x4 gpu_load4x4(const gpu_storage4x4& m) { return m; }
 // One 16-byte vector load (alignas(16) makes the reinterpret valid) instead
 // of three scalar loads — the BVH inner loop reads bmin/bmax/positions this way.
 GPU_FN inline gpu_float3 gpu_load3(const gpu_storage3& v)
@@ -334,10 +338,22 @@ GPU_FN inline gpu_float4 max(gpu_float4 a, gpu_float4 b) { return gpu_float4(fma
 typedef simd_float3 gpu_storage3;
 typedef simd_float4x4 gpu_storage4x4;
 GPU_FN inline gpu_float3 gpu_load3(gpu_storage3 v) { return gpu_float3(v.x, v.y, v.z); }
+// simd_float4x4 and glm::mat4 share the column-major column layout
+// host_math.h::hostStore4x4 stores by; copying the columns over (exact float
+// copies, no arithmetic) keeps the matrix math in glm — the same code CUDA's
+// host pass compiles (I-3 parity).
+inline gpu_float4x4 gpu_load4x4(const gpu_storage4x4& m)
+{
+    gpu_float4x4 r;
+    for (int c = 0; c < 4; ++c)
+        r[c] = gpu_float4(m.columns[c].x, m.columns[c].y, m.columns[c].z, m.columns[c].w);
+    return r;
+}
 #else
 struct alignas(16) gpu_storage3 { float x, y, z; };
 typedef glm::mat4 gpu_storage4x4;
 GPU_FN inline gpu_float3 gpu_load3(gpu_storage3 v) { return gpu_float3(v.x, v.y, v.z); }
+GPU_FN inline gpu_float4x4 gpu_load4x4(const gpu_storage4x4& m) { return m; }
 #endif
 
 struct gpu_uchar4 { uchar x, y, z, w; };

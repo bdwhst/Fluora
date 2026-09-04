@@ -151,11 +151,11 @@ struct LightAreaSample {
 
 GPU_FN inline gpu_float3 light_xform_point(gpu_storage4x4 m, gpu_float3 p)
 {
-    return gpu_xyz(m * gpu_float4(p, 1.0f));
+    return gpu_xyz(gpu_load4x4(m) * gpu_float4(p, 1.0f));
 }
 GPU_FN inline gpu_float3 light_xform_vec(gpu_storage4x4 m, gpu_float3 v)
 {
-    return gpu_xyz(m * gpu_float4(v, 0.0f));
+    return gpu_xyz(gpu_load4x4(m) * gpu_float4(v, 0.0f));
 }
 
 GPU_FN inline float light_sphere_radius(gpu_storage4x4 m)

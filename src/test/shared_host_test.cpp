@@ -16,9 +16,14 @@
 #include "../core/spectrum_shared.h"
 #include "../core/bsdf_shared.h"
 #include "../core/envmap_shared.h"
+#include "../core/light_shared.h"
 #include "../core/tonemap_shared.h"
 #include "shared_probe.h"
 
+#include <glm/gtc/matrix_transform.hpp>
+
+#include "../core/host_math.h"
+#include "../core/lights.h"
 #include "../core/spectra.h"
 #include "../rhi/rhi.h"
 
@@ -34,7 +39,7 @@ std::string readTextFile(const std::string& path)
     return ss.str();
 }
 
-constexpr int kSlots = PROBE_SLOTS;
+constexpr int kSlots = PROBE_SLOT_COUNT;
 
 } // namespace
 
@@ -50,9 +55,58 @@ int main()
     std::memcpy(r2sHost.data() + r2sView.zNodeCount, r2sView.coeffs,
                 r2sView.coeffCount * sizeof(float));
 
+    // Light-sampling fixtures. Two object-to-world transforms built in glm
+    // and stored through host_math.h::hostStore4x4 — the exact same bytes
+    // feed both personalities, so the GPU pass compares identical floats —
+    // and a 4x2 env map run through the real host CDF builder
+    // (core/lights.cpp), with one texel clamped by maxRadiance and one at
+    // zero luminance.
+    const gpu_storage4x4 xfHost[2] = {
+        // sphere: uniform scale 3 + translate
+        hostStore4x4(glm::translate(glm::mat4(1.0f), glm::vec3(1.0f, 2.0f, -0.5f))
+                     * glm::scale(glm::mat4(1.0f), glm::vec3(3.0f))),
+        // cube: rotate 30 deg about Y * scale(2, 1, 0.5) + translate
+        hostStore4x4(glm::translate(glm::mat4(1.0f), glm::vec3(-0.3f, 0.8f, 0.2f))
+                     * glm::rotate(glm::mat4(1.0f), glm::radians(30.0f),
+                                   glm::vec3(0.0f, 1.0f, 0.0f))
+                     * glm::scale(glm::mat4(1.0f), glm::vec3(2.0f, 1.0f, 0.5f))),
+    };
+    HdrImage envImg;
+    envImg.width = 4;
+    envImg.height = 2;
+    envImg.rgba = {
+        1, 0, 0, 1,    0, 2, 0, 1,            0, 0, 3, 1,   4, 4, 4, 1,
+        50, 0, 0, 1,   0.5f, 0.5f, 0.5f, 1,   0, 0, 0, 1,   1, 1, 1, 1,
+    };
+    std::vector<float> envDist = buildEnvDistribution(envImg, glm::vec3(10.0f));
+
     // Host personality evaluation.
     gpu_float4 host[kSlots] = {};
-    PROBE_BODY(host, r2sHost.data(), tables.buffer().data())
+    PROBE_BODY(host, r2sHost.data(), tables.buffer().data(), xfHost,
+               envDist.data())
+
+    // Sample <-> pdf identities of the light slots (checked host-side once;
+    // the parity compare below then carries them to the GPU personality):
+    // the solid-angle pdf of the tri sample must match light_pdf_area of the
+    // same point, envdist_sample's pdf must match envdist_pdf at the sampled
+    // uv, env_sample_dir's pdf must match env_pdf_dir of the sampled wi, the
+    // equirect uv->dir->uv round trip must return, and back-side sampling
+    // must yield exact zeros (one-sided lights).
+    int identityFails = 0;
+    auto ident = [&](float a, float b, const char* name) {
+        if (std::fabs(a - b) > 1e-4f + 1e-4f * std::fabs(a)) {
+            std::cerr << "  identity " << name << ": " << a << " vs " << b << "\n";
+            identityFails++;
+        }
+    };
+    ident(host[PROBE_TRI_WI].w, host[PROBE_TRI_PDFS].y, "triSolidAnglePdf");
+    ident(host[PROBE_ENVDIST_SAMPLE].z, host[PROBE_ENVDIST_SAMPLE].w, "envdistSamplePdf");
+    ident(host[PROBE_ENV_PDF_DIR].x, host[PROBE_ENV_SAMPLE_DIR].w, "envDirPdf");
+    ident(host[PROBE_ENV_PDF_DIR].z, 0.7f, "equirectRoundTripU");
+    ident(host[PROBE_ENV_PDF_DIR].w, 0.4f, "equirectRoundTripV");
+    ident(host[PROBE_ONE_SIDED_ZEROS].x, 0.0f, "backFaceSampleZero");
+    ident(host[PROBE_ONE_SIDED_ZEROS].y, 0.0f, "backFacePdfZero");
+    std::cout << (identityFails == 0 ? "PASS" : "FAIL") << " lightSamplePdfIdentities\n";
 
     try {
         // GPU personality (MSL on macOS, CUDA on Windows): same headers + the
@@ -65,6 +119,7 @@ int main()
                               + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/spectrum_shared.h")
                               + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/bsdf_shared.h")
                               + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/envmap_shared.h")
+                              + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/light_shared.h")
                               + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/tonemap_shared.h")
                               + "\n" + readTextFile(std::string(TEST_SHADER_DIR) + "/shared_probe.h");
         }
@@ -80,8 +135,14 @@ int main()
             { tables.buffer().size() * sizeof(float), rhi::MemoryLocation::Shared, "probe.spd" });
         std::memcpy(spdBuf->hostPtr(), tables.buffer().data(),
                     tables.buffer().size() * sizeof(float));
+        auto xfBuf = device->createBuffer(
+            { sizeof(xfHost), rhi::MemoryLocation::Shared, "probe.xf" });
+        std::memcpy(xfBuf->hostPtr(), xfHost, sizeof(xfHost));
+        auto envBuf = device->createBuffer(
+            { envDist.size() * sizeof(float), rhi::MemoryLocation::Shared, "probe.env" });
+        std::memcpy(envBuf->hostPtr(), envDist.data(), envDist.size() * sizeof(float));
         stream->dispatch(*pipeline, { 1, 1, 1 }, { 32, 1, 1 }, nullptr, 0,
-                         { out.get(), r2sBuf.get(), spdBuf.get() });
+                         { out.get(), r2sBuf.get(), spdBuf.get(), xfBuf.get(), envBuf.get() });
         stream->waitIdle();
 
         const float* gpu = (const float*)out->hostPtr();
@@ -101,7 +162,7 @@ int main()
         std::cout << (mismatches == 0 ? "PASS" : "FAIL") << " sharedValueParity ("
                   << kSlots << " slots, host C++ vs " << rhi::backendName(rhi::kNativeBackend)
                   << ")\n";
-        return mismatches == 0 ? 0 : 1;
+        return (mismatches == 0 && identityFails == 0) ? 0 : 1;
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;

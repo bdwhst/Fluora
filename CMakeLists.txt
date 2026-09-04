@@ -75,7 +75,9 @@ if(APPLE)
         src/rhi/rhi_algorithms.cpp
         src/rhi/rhi_metal.mm
     )
-    target_compile_definitions(RhiTest PRIVATE RHI_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/rhi")
+    target_compile_definitions(RhiTest PRIVATE
+        RHI_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/rhi"
+        TEST_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/test")
     target_link_libraries(RhiTest "-framework Metal" "-framework Foundation"
         "-framework AppKit" "-framework QuartzCore")
 
@@ -84,6 +86,7 @@ if(APPLE)
     # asserting numeric agreement (docs/portable-device-code.md).
     add_executable(SharedHostTest
         src/test/shared_host_test.cpp
+        src/core/lights.cpp
         src/core/spectra.cpp
         external/SpectrumConsts/rgbspectrum_srgb.cpp
         src/rhi/rhi_metal.mm
@@ -345,9 +348,11 @@ fluora_cuda_kernels(RhiTest src/test/rhi_test_gpu.h)
 
 fluora_rhi_target(SharedHostTest
     src/test/shared_host_test.cpp
+    src/core/lights.cpp
     src/core/spectra.cpp
     external/SpectrumConsts/rgbspectrum_srgb.cpp
     ${FLUORA_RHI_CUDA_SOURCES})
 fluora_cuda_kernels(SharedHostTest src/test/shared_probe.h INCLUDES
     src/rhi/gpu_portable.h src/rhi/primitives_shared.h src/core/spectrum_shared.h
-    src/core/bsdf_shared.h src/core/envmap_shared.h src/core/tonemap_shared.h)
+    src/core/bsdf_shared.h src/core/envmap_shared.h src/core/light_shared.h
+    src/core/tonemap_shared.h)
