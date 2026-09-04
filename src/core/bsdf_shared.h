@@ -79,8 +79,17 @@ GPU_FN inline float bsdf_tr_D(gpu_float3 wm, float alpha)
     float cos4 = cos2 * cos2;
     if (cos4 < 1e-16f)
         return 0.0f;
-    float e = tan2 / (alpha * alpha);   // isotropic: (cosPhi^2+sinPhi^2)/a^2
-    return 1.0f / (GPU_PI * alpha * alpha * cos4 * (1.0f + e) * (1.0f + e));
+    float a2 = alpha * alpha;
+    float e = tan2 / a2;   // isotropic: (cosPhi^2+sinPhi^2)/a^2
+    // The d*(1+e)^2 denominator is spelled as explicit fused steps
+    // (d*(1+e) = fma(d, e, d)): under fast math the Metal compiler
+    // contracted this product differently in the megakernel than in the
+    // specialized wf_shade (the M4 mega/wavefront bitwise divergence);
+    // gpu_fma pins one rounding per step in every math mode.
+    float d = GPU_PI * a2 * cos4;
+    d = gpu_fma(d, e, d);
+    d = gpu_fma(d, e, d);
+    return 1.0f / d;
 }
 
 GPU_FN inline float bsdf_tr_lambda(gpu_float3 w, float alpha)

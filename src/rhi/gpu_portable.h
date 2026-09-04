@@ -405,6 +405,24 @@ GPU_FN inline bool gpu_all_finite(gpu_float3 v)
 
 #define GPU_PI 3.14159265358979323846f
 
+// Single-rounding fused multiply-add, identical on every personality: MSL's
+// fma() stays fused in all math modes per spec, CUDA lowers to FFMA, hosts
+// use the correctly rounded std::fmaf. This is the one spelling of a*b+c the
+// optimizer cannot contract differently per kernel or per backend — use it
+// where bitwise cross-kernel/cross-personality stability matters (the
+// megakernel-vs-wf_shade fast-math divergence in bsdf_tr_D was exactly an
+// implicit contraction of this pattern).
+GPU_FN inline float gpu_fma(float a, float b, float c)
+{
+#if defined(__METAL_VERSION__)
+    return fma(a, b, c);
+#elif defined(__CUDACC__)
+    return fmaf(a, b, c);
+#else
+    return std::fmaf(a, b, c);
+#endif
+}
+
 // ---------------------------------------------------------------------------
 // Shared RNG: PCG output permutation on an LCG state (identical draw sequence
 // on every backend — the golden images depend on it). Seed via .state.
