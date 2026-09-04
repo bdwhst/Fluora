@@ -98,6 +98,21 @@ if(APPLE)
         TEST_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/test")
     target_link_libraries(SharedHostTest "-framework Metal" "-framework Foundation"
         "-framework AppKit" "-framework QuartzCore")
+
+    # Intersection/BVH tests: rt_* unit cases, host traversal vs brute force
+    # over a real bvh_builder tree, and the same rays traced on the GPU.
+    add_executable(RaytraceTest
+        src/test/raytrace_test.cpp
+        src/core/bvh_builder.cpp
+        src/rhi/rhi_metal.mm
+    )
+    target_include_directories(RaytraceTest PRIVATE external/include)
+    target_compile_definitions(RaytraceTest PRIVATE
+        CORE_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+        RHI_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/rhi"
+        TEST_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/test")
+    target_link_libraries(RaytraceTest "-framework Metal" "-framework Foundation"
+        "-framework AppKit" "-framework QuartzCore")
     return()
 endif()
 
@@ -356,3 +371,9 @@ fluora_cuda_kernels(SharedHostTest src/test/shared_probe.h INCLUDES
     src/rhi/gpu_portable.h src/rhi/primitives_shared.h src/core/spectrum_shared.h
     src/core/bsdf_shared.h src/core/envmap_shared.h src/core/light_shared.h
     src/core/tonemap_shared.h)
+
+fluora_rhi_target(RaytraceTest
+    src/test/raytrace_test.cpp
+    src/core/bvh_builder.cpp
+    ${FLUORA_RHI_CUDA_SOURCES})
+fluora_cuda_kernels(RaytraceTest src/test/raytrace_test_gpu.h)
