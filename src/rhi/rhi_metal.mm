@@ -410,6 +410,8 @@ public:
         if (!desc.shaderSource.empty()) {
             NSError* err = nil;
             MTLCompileOptions* opts = [MTLCompileOptions new];
+            if (desc.safeMath)
+                opts.mathMode = MTLMathModeSafe;
             mLib = [mDev newLibraryWithSource:[NSString stringWithUTF8String:desc.shaderSource.c_str()]
                                       options:opts
                                         error:&err];

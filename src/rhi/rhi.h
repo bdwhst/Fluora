@@ -215,6 +215,14 @@ struct DeviceDesc {
     // milestones replace this with a precompiled .metallib. CUDA: unused
     // (kernels are registered at static-init time).
     std::string shaderSource;
+    // Compile shaderSource without fast math (Metal MTLMathModeSafe). Fast
+    // math contracts/reassociates the same source differently per kernel, so
+    // shared code (e.g. bsdf_tr_D) can produce last-ulp-different values in
+    // the megakernel vs the specialized wf_shade — this flag restores the
+    // mega == wavefront bitwise invariant for verification runs, at ~40-50%
+    // mega / 0-12% wavefront cost. CUDA: no effect (nvcc compiles offline
+    // without -use_fast_math, so the CUDA backend is already "safe").
+    bool safeMath = false;
 };
 
 class Device {

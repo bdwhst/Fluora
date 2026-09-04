@@ -320,6 +320,7 @@ int main(int argc, char** argv)
     std::string outOverride;
     std::string mode = "wavefront";
     bool preview = true;
+    bool safeMath = false;
     for (int i = haveScene ? 2 : 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "--spp" && i + 1 < argc)
@@ -330,6 +331,8 @@ int main(int argc, char** argv)
             mode = argv[++i];
         else if (arg == "--no-preview")
             preview = false;
+        else if (arg == "--safe-math")
+            safeMath = true;
     }
     if (mode != "wavefront" && mode != "mega") {
         std::cerr << "unknown --mode " << mode << "\n";
@@ -349,7 +352,8 @@ int main(int argc, char** argv)
     const int spp = sppOverride > 0 ? sppOverride : scene.camera.iterations;
     std::cout << "mini: " << scene.objects.size() << " objects, " << scene.materials.size()
               << " materials, " << width << "x" << height << ", " << spp << " spp, " << mode
-              << " mode, " << rhi::backendName(rhi::kNativeBackend) << " backend\n";
+              << " mode, " << rhi::backendName(rhi::kNativeBackend) << " backend"
+              << (safeMath ? ", safe math" : "") << "\n";
 
     // Sibling .txt scenes populate the preview's dropdown (sorted by name).
     std::vector<std::string> scenePaths, sceneNames;
@@ -361,6 +365,11 @@ int main(int argc, char** argv)
         // kernels, concatenated (see DeviceDesc::shaderSource in rhi.h). CUDA:
         // the same files are compiled by nvcc (mini_kernels.cu) and registered.
         rhi::DeviceDesc deviceDesc;
+        // --safe-math: compile shaders without fast math so mega and wavefront
+        // are bitwise identical (DeviceDesc::safeMath in rhi.h) — the mode the
+        // cmp-based regression check runs in. Default fast math keeps full
+        // speed but allows last-ulp divergence between the modes.
+        deviceDesc.safeMath = safeMath;
         if (rhi::kNativeBackend == rhi::BackendKind::Metal)
             deviceDesc.shaderSource = readTextFile(std::string(RHI_SHADER_DIR) + "/gpu_portable.h")
                                 + "\n" + readTextFile(std::string(CORE_SHADER_DIR) + "/spectrum_shared.h")
