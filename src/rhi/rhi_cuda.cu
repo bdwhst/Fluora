@@ -17,6 +17,7 @@
 #include "primitives_gpu.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -144,8 +145,22 @@ class CudaDevice final : public Device {
 public:
     static constexpr size_t kMaxTextures = 1024;
 
-    explicit CudaDevice(const DeviceDesc&)
+    explicit CudaDevice(const DeviceDesc& desc)
     {
+#ifndef RHI_CUDA_SAFE_MATH
+        // Kernels are compiled offline, so a runtime safeMath request cannot
+        // change their codegen: with nvcc's default -fmad=true, ptxas may
+        // contract shared expressions differently per kernel, and bitwise
+        // mega==wavefront is not guaranteed. Warn instead of silently
+        // ignoring the request.
+        if (desc.safeMath)
+            std::fprintf(stderr,
+                         "rhi-cuda: warning: safeMath requested but kernels were "
+                         "compiled with -fmad=true; reconfigure with "
+                         "-DFLUORA_CUDA_SAFE_MATH=ON for bitwise mega==wavefront\n");
+#else
+        (void)desc;
+#endif
         cuda::cudaCheck(cudaSetDevice(0), "cudaSetDevice");
         cuda::cudaCheck(cudaFree(nullptr), "CUDA context creation");
         mHeapShadow.assign(kMaxTextures, 0);

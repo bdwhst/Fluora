@@ -314,6 +314,19 @@ set(FLUORA_SHADER_DIR_DEFINES
     TEST_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/test"
     FLUORA_SCENES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scenes")
 
+# The CUDA lowering of DeviceDesc::safeMath. CUDA kernels are compiled
+# offline, so the runtime flag cannot change their codegen the way Metal's
+# runtime MSL compile can; this option is the build-time equivalent. nvcc
+# never enables -use_fast_math here, but its default -fmad=true still lets
+# ptxas contract the same shared expression differently in the megakernel vs
+# a specialized wf_shade instantiation — the exact mechanism --safe-math
+# suppresses on Metal. OFF by default for perf; configure with
+# -DFLUORA_CUDA_SAFE_MATH=ON before trusting bitwise mega==wavefront checks
+# (FurnaceTest, manual cmp) on this backend. Requesting --safe-math on a
+# build without it logs a runtime warning (rhi_cuda.cu).
+option(FLUORA_CUDA_SAFE_MATH
+    "Compile RHI CUDA device code with -fmad=false (bitwise mega==wavefront)" OFF)
+
 function(fluora_rhi_target name)
     add_executable(${name} ${ARGN})
     target_include_directories(${name} PRIVATE external/include external/ImGui)
@@ -323,6 +336,10 @@ function(fluora_rhi_target name)
         CUDA_SEPARABLE_COMPILATION ON
         CUDA_RESOLVE_DEVICE_SYMBOLS ON)
     target_link_libraries(${name} ${FLUORA_RHI_GL_LIBS} CUDA::cudart cudadevrt)
+    if (FLUORA_CUDA_SAFE_MATH)
+        target_compile_options(${name} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-fmad=false>)
+        target_compile_definitions(${name} PRIVATE RHI_CUDA_SAFE_MATH)
+    endif()
 endfunction()
 
 # Generates <build>/generated/<header-stem>_kernels.cu -- the CUDA registration

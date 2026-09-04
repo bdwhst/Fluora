@@ -217,11 +217,15 @@ struct DeviceDesc {
     std::string shaderSource;
     // Compile shaderSource without fast math (Metal MTLMathModeSafe). Fast
     // math contracts/reassociates the same source differently per kernel, so
-    // shared code (e.g. bsdf_tr_D) can produce last-ulp-different values in
-    // the megakernel vs the specialized wf_shade — this flag restores the
-    // mega == wavefront bitwise invariant for verification runs, at ~40-50%
-    // mega / 0-12% wavefront cost. CUDA: no effect (nvcc compiles offline
-    // without -use_fast_math, so the CUDA backend is already "safe").
+    // shared code can produce last-ulp-different values in the megakernel vs
+    // the specialized wf_shade — this flag restores the mega == wavefront
+    // bitwise invariant for verification runs, at ~40-50% mega / 0-12%
+    // wavefront cost. CUDA: kernels are compiled offline, so this flag
+    // cannot change codegen at runtime; its lowering is the
+    // FLUORA_CUDA_SAFE_MATH CMake option (-fmad=false on the RHI targets).
+    // nvcc never enables -use_fast_math, but its default -fmad=true still
+    // lets ptxas contract shared expressions differently per kernel, so
+    // requesting safeMath on a build without the option logs a warning.
     bool safeMath = false;
 };
 
