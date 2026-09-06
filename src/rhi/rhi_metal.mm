@@ -693,11 +693,26 @@ private:
             io.AddMousePosEvent((float)p.x, (float)(mPresentH - p.y));
             break;
         }
-        case NSEventTypeLeftMouseDown:  io.AddMouseButtonEvent(0, true);  break;
+        case NSEventTypeLeftMouseDown:
+        case NSEventTypeRightMouseDown:
+        case NSEventTypeOtherMouseDown: {
+            // Queue-level interception sees title-bar/resize-edge presses too;
+            // the system then moves the window while still delivering position
+            // deltas, and an unconditionally registered button-down would turn
+            // those into a camera look-drag. Only presses inside the content
+            // view reach ImGui; releases (below) always pass so a drag that
+            // started in-view can end anywhere.
+            NSPoint p = [mWindow.contentView convertPoint:ev.locationInWindow fromView:nil];
+            if (NSPointInRect(p, mWindow.contentView.bounds)) {
+                int b = ev.type == NSEventTypeLeftMouseDown    ? 0
+                        : ev.type == NSEventTypeRightMouseDown ? 1
+                                                               : 2;
+                io.AddMouseButtonEvent(b, true);
+            }
+            break;
+        }
         case NSEventTypeLeftMouseUp:    io.AddMouseButtonEvent(0, false); break;
-        case NSEventTypeRightMouseDown: io.AddMouseButtonEvent(1, true);  break;
         case NSEventTypeRightMouseUp:   io.AddMouseButtonEvent(1, false); break;
-        case NSEventTypeOtherMouseDown: io.AddMouseButtonEvent(2, true);  break;
         case NSEventTypeOtherMouseUp:   io.AddMouseButtonEvent(2, false); break;
         case NSEventTypeScrollWheel: {
             double dx = ev.scrollingDeltaX, dy = ev.scrollingDeltaY;
