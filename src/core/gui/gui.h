@@ -11,6 +11,8 @@
 
 #include <glm/glm.hpp>
 
+struct CoreMaterial;  // scene_loader.h; the editor mutates these in place
+
 namespace gui {
 
 // A fly camera driven entirely by ImGui IO: left-drag looks, WASD moves in the
@@ -65,6 +67,14 @@ struct State {
     bool resetRequested = false;          // app zeroes accumulation, then clears
     bool cameraMoved = false;             // draw() sets it when the fly camera moved
                                           // this frame; app applies + clears
+
+    // Material editor: when `materials` is set, draw() shows a "Materials"
+    // window that edits the app-owned records in place. On any edit it sets
+    // materialsChanged; the loop calls PreviewHooks::applyMaterials (re-upload
+    // + light-list rebuild), restarts accumulation, then clears the flag.
+    std::vector<CoreMaterial>* materials = nullptr;
+    int selectedMaterial = 0;             // list selection; clamped in draw()
+    bool materialsChanged = false;
 };
 
 // Emits the whole overlay (stats, controls, scene picker) and, when `s.camera`
@@ -94,6 +104,8 @@ struct PreviewHooks {
     std::function<void()> applyCamera;               // write State::camera into the renderer
     std::function<void()> zeroAccum;                 // drain + clear the accumulation buffer
     std::function<void(int sceneIdx)> loadScene;     // swap scene (camera reset lives here)
+    std::function<void()> applyMaterials;            // drain + re-upload State::materials
+                                                     // edits (may rebuild the light list)
     std::function<void(int samples)> save;           // drain + write a PNG now
     std::function<void(int samples)> finish;         // final save on exit
 };

@@ -58,6 +58,12 @@ struct SceneGpu {
     std::unique_ptr<rhi::Buffer> lightBuf, envDistBuf, mediaBuf, volTableBuf, volDataBuf;
     std::unique_ptr<rhi::RayIntersector> intersector;
     std::array<rhi::Buffer*, 3> rt{ nullptr, nullptr, nullptr };
+    // Host copy of the uploaded materials, texture/spectrum references already
+    // resolved to heap indices / spd offsets (those mappings are local to
+    // buildSceneGpu and gone after upload). The GUI material editor patches
+    // the editable scalars over a copy of this and re-uploads, so the resolved
+    // fields survive any number of edits.
+    std::vector<MiniMaterial> matHost;
     std::vector<std::unique_ptr<rhi::Texture>> matTextures;
     std::unique_ptr<rhi::Texture> envTex;
     uint32_t envMapIdx = MINI_ENV_NONE;
@@ -77,6 +83,19 @@ struct SceneGpu {
     glm::vec3 eye{ 0, 0, 0 }, lookAt{ 0, 0, -1 }, up{ 0, 1, 0 };
     std::string outputName = "mini";
 };
+
+int miniMaterialType(CoreMaterialType t)
+{
+    switch (t) {
+    case CoreMaterialType::Diffuse: return MINI_MAT_DIFFUSE;
+    case CoreMaterialType::Emissive: return MINI_MAT_EMITTING;
+    case CoreMaterialType::Dielectric: return MINI_MAT_GLASS;
+    case CoreMaterialType::Conductor: return MINI_MAT_CONDUCTOR;
+    // Medium boundary without a surface: rays pass through, switching medium.
+    case CoreMaterialType::Interface: return MINI_MAT_INTERFACE;
+    }
+    return MINI_MAT_DIFFUSE;
+}
 
 // CoreScene -> device PODs + GPU uploads. Spectra are rebuilt per scene because
 // materials reference named eta/k spectra by offset into this table.
@@ -130,14 +149,7 @@ SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
     materials.reserve(scene.materials.size());
     for (const auto& m : scene.materials) {
         MiniMaterial mm = {};
-        switch (m.type) {
-        case CoreMaterialType::Diffuse: mm.type = MINI_MAT_DIFFUSE; break;
-        case CoreMaterialType::Emissive: mm.type = MINI_MAT_EMITTING; break;
-        case CoreMaterialType::Dielectric: mm.type = MINI_MAT_GLASS; break;
-        case CoreMaterialType::Conductor: mm.type = MINI_MAT_CONDUCTOR; break;
-        // Medium boundary without a surface: rays pass through, switching medium.
-        case CoreMaterialType::Interface: mm.type = MINI_MAT_INTERFACE; break;
-        }
+        mm.type = miniMaterialType(m.type);
         mm.rgb = hostStore3(m.rgb);
         mm.emittance = m.emittance;
         mm.ior = m.ior;
@@ -169,6 +181,7 @@ SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
         { std::max<size_t>(materials.size(), 1) * sizeof(MiniMaterial),
           rhi::MemoryLocation::Shared, "materials" });
     std::memcpy(sg.matBuf->hostPtr(), materials.data(), materials.size() * sizeof(MiniMaterial));
+    sg.matHost = std::move(materials);
     sg.objBuf = device.createBuffer(
         { std::max<size_t>(objects.size(), 1) * sizeof(MiniObject),
           rhi::MemoryLocation::Shared, "objects" });
@@ -744,10 +757,12 @@ int main(int argc, char** argv)
         ui.selectedScene = selectedScene;
         ui.stats.targetSpp = spp;
         ui.stats.mode = mode;
+        ui.materials = &scene.materials;  // stays valid: scene swaps move-assign
         auto applySceneStats = [&] {
             ui.stats.numObjects = (int)sg.numObjects;
             ui.stats.numTris = sg.numTris;
             ui.maxDepth = (int)sg.maxDepth;   // re-seed the depth slider per scene
+            ui.selectedMaterial = 0;          // the material list is a new scene's
         };
         applySceneStats();
         device->enableGui([&] { gui::draw(ui); });
@@ -796,8 +811,13 @@ int main(int argc, char** argv)
             }
             stream->waitIdle();
             int shown = idx;
+            // The active scene stays live in `scene` (not just on the GPU):
+            // the material editor edits scene.materials and applyMaterials /
+            // buildLightList re-read it. ui.materials points at the member, so
+            // the move-assign keeps it valid.
             try {
-                activateScene(next);
+                scene = std::move(next);
+                activateScene(scene);
             } catch (const std::exception& ex) {
                 // Typically an out-of-memory building a much larger scene's
                 // buffers. The scene we came from is already released by now, so
@@ -811,7 +831,8 @@ int main(int argc, char** argv)
                 std::string backErr;
                 if (shown == idx || !loadScene(scenePaths[shown], back, backErr))
                     throw;
-                activateScene(back);
+                scene = std::move(back);
+                activateScene(scene);
                 std::cout << "mini: restored " << sceneNames[shown] << "\n";
             }
             applySceneParams();
@@ -849,6 +870,50 @@ int main(int argc, char** argv)
             zeroAccum();
         };
         hooks.loadScene = swapScene;
+        // Live material edits: patch the editable scalars from scene.materials
+        // over a copy of the retained matHost records (texture / spectrum
+        // references were resolved at upload and cannot be recomputed here) and
+        // re-upload, then rebuild the light list — an emissive toggle changes
+        // which objects/triangles are lights, and the new set can be larger
+        // than the old buffer, so the buffer is recreated. Drains first, per
+        // the PreviewHooks contract: in-flight samples still read matBuf, and
+        // the old lightBuf is freed on reassignment.
+        hooks.applyMaterials = [&] {
+            stream->waitIdle();
+            std::vector<MiniMaterial> upload = sg.matHost;
+            size_t n = std::min(scene.materials.size(), upload.size());
+            for (size_t i = 0; i < n; i++) {
+                const CoreMaterial& cm = scene.materials[i];
+                MiniMaterial& mm = upload[i];
+                mm.type = miniMaterialType(cm.type);
+                mm.rgb = hostStore3(cm.rgb);
+                mm.emittance = cm.emittance;
+                mm.ior = cm.ior;
+                mm.roughness = cm.roughness;
+                // Named spectra can only be dropped at runtime (the editor
+                // clears the names on a type switch), never added — an offset
+                // is kept only while its name is still set, and the conductor
+                // both-or-none rule matches buildSceneGpu's.
+                if (cm.etaNamed.empty())
+                    mm.etaSpd = SPD_NONE;
+                if (cm.kNamed.empty())
+                    mm.kSpd = SPD_NONE;
+                if (mm.type == MINI_MAT_CONDUCTOR
+                    && (mm.etaSpd == SPD_NONE || mm.kSpd == SPD_NONE))
+                    mm.etaSpd = mm.kSpd = SPD_NONE;
+            }
+            std::memcpy(sg.matBuf->hostPtr(), upload.data(),
+                        upload.size() * sizeof(MiniMaterial));
+            std::vector<RtLight> lights = buildLightList(scene, sg.envMapIdx != MINI_ENV_NONE);
+            sg.numLights = (unsigned)lights.size();
+            sg.lightBuf = device->createBuffer(
+                { std::max<size_t>(lights.size(), 1) * sizeof(RtLight),
+                  rhi::MemoryLocation::Shared, "lights" });
+            if (!lights.empty())
+                std::memcpy(sg.lightBuf->hostPtr(), lights.data(),
+                            lights.size() * sizeof(RtLight));
+            params.numLights = sg.numLights;
+        };
         int previewExit = 0;
         auto saveNow = [&](int samples) {
             stream->waitIdle();

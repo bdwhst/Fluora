@@ -3,11 +3,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <thread>
 #include <utility>
 
 #include "imgui.h"
+
+#include "../scene_loader.h"
 
 namespace gui {
 
@@ -16,6 +19,129 @@ const glm::vec3 kWorldUp{ 0.0f, 1.0f, 0.0f };
 // Keep pitch just shy of vertical so forward() never becomes parallel to
 // worldUp (which would collapse right()).
 constexpr float kPitchLimit = 1.55334f;  // ~89 degrees
+
+const char* materialTypeName(CoreMaterialType t)
+{
+    switch (t) {
+    case CoreMaterialType::Diffuse: return "diffuse";
+    case CoreMaterialType::Emissive: return "emissive";
+    case CoreMaterialType::Dielectric: return "glass";
+    case CoreMaterialType::Conductor: return "conductor";
+    case CoreMaterialType::Interface: return "interface";
+    }
+    return "?";
+}
+
+// The "Materials" window: a swatch/name/type list of the scene's materials
+// and, for the selection, per-type widgets editing the CoreMaterial in place.
+// Any edit sets s.materialsChanged so the loop re-uploads and restarts
+// accumulation (mixing samples of different materials would ghost).
+void drawMaterials(State& s)
+{
+    if (!s.materials || s.materials->empty())
+        return;
+    std::vector<CoreMaterial>& mats = *s.materials;
+    s.selectedMaterial = std::clamp(s.selectedMaterial, 0, (int)mats.size() - 1);
+
+    ImGui::SetNextWindowPos(ImVec2(340, 10), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Materials")) {
+        // --- List ---------------------------------------------------------
+        float rowH = ImGui::GetTextLineHeightWithSpacing();
+        float listH = rowH * (float)std::min<size_t>(mats.size(), 8)
+                      + ImGui::GetStyle().WindowPadding.y * 2.0f;
+        ImGui::BeginChild("mat-list", ImVec2(0, listH), true);
+        for (int i = 0; i < (int)mats.size(); i++) {
+            const CoreMaterial& m = mats[i];
+            ImGui::PushID(i);
+            ImGui::ColorButton("##swatch", ImVec4(m.rgb.x, m.rgb.y, m.rgb.z, 1.0f),
+                               ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop,
+                               ImVec2(rowH - 4.0f, rowH - 4.0f));
+            ImGui::SameLine();
+            char label[128];
+            std::snprintf(label, sizeof(label), "%s  [%s]",
+                          m.name.empty() ? "(unnamed)" : m.name.c_str(),
+                          materialTypeName(m.type));
+            if (ImGui::Selectable(label, i == s.selectedMaterial))
+                s.selectedMaterial = i;
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+
+        // --- Parameters for the selection ---------------------------------
+        CoreMaterial& m = mats[s.selectedMaterial];
+        bool edited = false;
+
+        if (m.type == CoreMaterialType::Interface) {
+            // Surfaceless medium boundaries: the type encodes the scene's
+            // medium topology (mediumIn/mediumOut), so it is not switchable.
+            ImGui::TextDisabled("medium boundary (in %d / out %d) - not editable",
+                                m.mediumIn, m.mediumOut);
+        } else {
+            static const CoreMaterialType kTypes[] = {
+                CoreMaterialType::Diffuse, CoreMaterialType::Emissive,
+                CoreMaterialType::Dielectric, CoreMaterialType::Conductor
+            };
+            if (ImGui::BeginCombo("type", materialTypeName(m.type))) {
+                for (CoreMaterialType t : kTypes) {
+                    if (ImGui::Selectable(materialTypeName(t), t == m.type) && t != m.type) {
+                        m.type = t;
+                        // Named spectra were bound to the original type (a
+                        // glass eta makes no sense on a conductor and vice
+                        // versa); a switched material runs on constant ior /
+                        // reflectance rgb. The upload honors the same rule.
+                        m.etaNamed.clear();
+                        m.kNamed.clear();
+                        // A light with zero emittance renders black; seed
+                        // something visible on the first switch.
+                        if (t == CoreMaterialType::Emissive && m.emittance <= 0.0f)
+                            m.emittance = 1.0f;
+                        edited = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            switch (m.type) {
+            case CoreMaterialType::Diffuse:
+                edited |= ImGui::ColorEdit3("albedo", &m.rgb.x);
+                if (m.texIdx != kCoreTexNone)
+                    ImGui::TextDisabled("tints the base-color texture");
+                break;
+            case CoreMaterialType::Emissive:
+                edited |= ImGui::ColorEdit3("color", &m.rgb.x);
+                edited |= ImGui::DragFloat("emittance", &m.emittance, 0.05f, 0.0f, 1e6f,
+                                           "%.2f", ImGuiSliderFlags_Logarithmic);
+                break;
+            case CoreMaterialType::Dielectric:
+                if (!m.etaNamed.empty())
+                    ImGui::TextDisabled("dispersive eta: %s", m.etaNamed.c_str());
+                else
+                    edited |= ImGui::SliderFloat("ior", &m.ior, 1.0f, 2.5f, "%.3f",
+                                                 ImGuiSliderFlags_AlwaysClamp);
+                break;
+            case CoreMaterialType::Conductor:
+                edited |= ImGui::SliderFloat("roughness", &m.roughness, 0.0f, 1.0f, "%.4f",
+                                             ImGuiSliderFlags_Logarithmic);
+                if (m.roughness < 1e-3f) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(mirror)");
+                }
+                // The upload needs BOTH measured spectra, else it falls back
+                // to reflectance mode driven by rgb (mini_main's conversion).
+                if (!m.etaNamed.empty() && !m.kNamed.empty())
+                    ImGui::TextDisabled("measured eta/k: %s", m.etaNamed.c_str());
+                else
+                    edited |= ImGui::ColorEdit3("reflectance", &m.rgb.x);
+                break;
+            default:
+                break;
+            }
+        }
+        if (edited)
+            s.materialsChanged = true;
+    }
+    ImGui::End();
+}
 } // namespace
 
 FlyCamera FlyCamera::fromLookAt(const glm::vec3& eye, const glm::vec3& lookAt)
@@ -154,6 +280,8 @@ void draw(State& s)
             s.resetRequested = true;
     }
     ImGui::End();
+
+    drawMaterials(s);
 }
 
 void scanSceneDirectory(const std::string& scenePath, std::vector<std::string>& names,
@@ -244,6 +372,12 @@ void runPreview(State& ui, int targetSpp, const PreviewHooks& h)
             }
             if (ui.depthChanged) {
                 ui.depthChanged = false;
+                restart();
+            }
+            if (ui.materialsChanged) {
+                ui.materialsChanged = false;
+                if (h.applyMaterials)
+                    h.applyMaterials();
                 restart();
             }
             if (ui.requestedScene >= 0) {
