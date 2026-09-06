@@ -39,6 +39,9 @@ Notes on the Windows build setup:
 **macOS (FluoraMini, Metal vertical slice)** — builds only the `FluoraMini` target (no CUDA/GL deps; it does need the `external/openvdb` submodule for the NanoVDB headers and the system zlib, both host-side only). See `docs/metal-rhi-design.md` for the migration plan and what the slice does/doesn't support.
 
 ```sh
+git submodule update --init   # external/openvdb -> NanoVDB (volume_loader.cpp needs it)
+git lfs pull                  # scenes/ assets (.hdr/.nvdb/.obj) are LFS; stubs load as
+                              # black env maps / empty volumes ("0 lights" -> black render)
 cmake -B build-mac -DCMAKE_BUILD_TYPE=Release
 cmake --build build-mac
 ./build-mac/bin/FluoraMini scenes/cornell-sphere.txt --spp 1000 --out out.png
