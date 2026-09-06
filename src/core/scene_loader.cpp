@@ -179,6 +179,7 @@ bool loadTxtScene(const std::string& path, CoreScene& out, std::string& err)
             }
             for (const auto& mm : mtlMats) {
                 CoreMaterial m;
+                m.name = mm.name;
                 m.type = CoreMaterialType::Diffuse;
                 m.rgb = mm.kd;
                 m.texIdx = mm.diffuseTexPath.empty() ? kCoreTexNone
@@ -191,8 +192,10 @@ bool loadTxtScene(const std::string& path, CoreScene& out, std::string& err)
         curObj = PendingObject{};
     };
     auto flushMaterial = [&]() {
-        if (mode == Mode::Material)
+        if (mode == Mode::Material) {
+            curMat.name = "material " + std::to_string(out.materials.size());
             out.materials.push_back(curMat);
+        }
     };
 
     std::string line;
@@ -391,6 +394,7 @@ bool loadJsonScene(const std::string& path, CoreScene& out, std::string& err)
         if (data.contains("Materials")) {
             for (const auto& [name, val] : data["Materials"].items()) {
                 CoreMaterial m;
+                m.name = name;
                 std::string type = val.at("TYPE").get<std::string>();
                 if (type == "diffuse") {
                     m.type = CoreMaterialType::Diffuse;
@@ -515,11 +519,12 @@ bool loadJsonScene(const std::string& path, CoreScene& out, std::string& err)
             }
             std::pair<int, int> iface{ -1, -1 };
             bool hasIface = false;
+            std::string ifaceName;
             if (obj.contains("MEDIUM_INTERFACE")) {
-                std::string iname = obj["MEDIUM_INTERFACE"].get<std::string>();
-                auto it = interfaces.find(iname);
+                ifaceName = obj["MEDIUM_INTERFACE"].get<std::string>();
+                auto it = interfaces.find(ifaceName);
                 if (it == interfaces.end()) {
-                    e = "object references unknown medium interface '" + iname + "'";
+                    e = "object references unknown medium interface '" + ifaceName + "'";
                     return -1;
                 }
                 iface = it->second;
@@ -537,6 +542,7 @@ bool loadJsonScene(const std::string& path, CoreScene& out, std::string& err)
             CoreMaterial m = matId >= 0 ? out.materials[matId] : CoreMaterial{};
             if (matId < 0)
                 m.type = CoreMaterialType::Interface;
+            m.name = (matId >= 0 ? m.name + " @ " : "") + ifaceName;
             m.mediumIn = iface.first;
             m.mediumOut = iface.second;
             int id = (int)out.materials.size();

@@ -30,6 +30,9 @@ constexpr uint32_t kCoreTexNone = 0xFFFFFFFFu;
 enum class CoreMaterialType { Diffuse, Emissive, Dielectric, Conductor, Interface };
 
 struct CoreMaterial {
+    // Display name for the GUI material list: the .json Materials key, the MTL
+    // material name, or "material <id>" for .txt scenes. Not used by rendering.
+    std::string name;
     CoreMaterialType type = CoreMaterialType::Diffuse;
     glm::vec3 rgb { 0.5f, 0.5f, 0.5f };
     float ior = 1.5f;          // REFRIOR / ETA const
