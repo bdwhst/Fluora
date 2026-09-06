@@ -46,7 +46,6 @@ struct Stats {
     std::string mode;         // "wavefront" / "mega"
     int numObjects = 0;
     size_t numTris = 0;
-    int maxDepth = 0;
 };
 
 // Persistent UI state plus one-shot command flags the app reads back after
@@ -58,6 +57,10 @@ struct State {
     std::vector<std::string> sceneNames;  // dropdown labels (scene basenames)
     int selectedScene = 0;                // index currently loaded
     int requestedScene = -1;              // set by the combo; app consumes, resets to -1
+    int maxDepth = 0;                     // live path-depth override; the app seeds it
+                                          // from the scene and reads it every sample
+    bool depthChanged = false;            // draw() sets it when the slider moved; the
+                                          // loop restarts accumulation + clears
     bool saveRequested = false;           // app saves a PNG, then clears
     bool resetRequested = false;          // app zeroes accumulation, then clears
     bool cameraMoved = false;             // draw() sets it when the fly camera moved

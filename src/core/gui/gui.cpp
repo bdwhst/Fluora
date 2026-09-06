@@ -111,7 +111,11 @@ void draw(State& s)
         else
             ImGui::Text("samples: %d", st.sampleCount);
         ImGui::Text("%.1f spp/s   |   %.1f s", st.samplesPerSec, st.elapsedSec);
-        ImGui::Text("max depth: %d", st.maxDepth);
+        // Live edit: mixing samples of different depths would bias the image,
+        // so the loop restarts accumulation on change (same as camera motion).
+        if (ImGui::SliderInt("max depth", &s.maxDepth, 1, 32, "%d",
+                             ImGuiSliderFlags_AlwaysClamp))
+            s.depthChanged = true;
 
         // --- Scene picker -------------------------------------------------
         ImGui::Separator();
@@ -236,6 +240,10 @@ void runPreview(State& ui, int targetSpp, const PreviewHooks& h)
             }
             if (ui.resetRequested) {
                 ui.resetRequested = false;
+                restart();
+            }
+            if (ui.depthChanged) {
+                ui.depthChanged = false;
                 restart();
             }
             if (ui.requestedScene >= 0) {

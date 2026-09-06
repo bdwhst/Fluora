@@ -742,7 +742,7 @@ int main(int argc, char** argv)
         auto applySceneStats = [&] {
             ui.stats.numObjects = (int)sg.numObjects;
             ui.stats.numTris = sg.numTris;
-            ui.stats.maxDepth = sg.maxDepth;
+            ui.maxDepth = (int)sg.maxDepth;   // re-seed the depth slider per scene
         };
         applySceneStats();
         device->enableGui([&] { gui::draw(ui); });
@@ -823,6 +823,7 @@ int main(int argc, char** argv)
         gui::PreviewHooks hooks;
         hooks.renderSample = [&](int iter) {
             params.iter = (unsigned)iter;
+            params.maxDepth = (unsigned)ui.maxDepth;   // GUI depth slider override
             dispatchSample(params);
             stream->submit();
         };
