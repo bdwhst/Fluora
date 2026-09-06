@@ -83,6 +83,38 @@ struct TextureRegistry {
 };
 
 // Shared tail of both loaders: reference checks, then the BVH.
+// Materials nothing references render nowhere but would still occupy GUI
+// material-list rows and device matBuf slots — .json interface cloning
+// routinely orphans the un-cloned original, and hand-written scenes carry
+// leftovers. Compact them out and remap the object/triangle ids. Must run
+// after the id-range checks (marking indexes with the raw ids).
+void pruneUnusedMaterials(CoreScene& out)
+{
+    std::vector<char> used(out.materials.size(), 0);
+    for (const auto& o : out.objects)
+        used[o.materialId] = 1;
+    for (const auto& tri : out.tris)
+        used[tri.w] = 1;
+    std::vector<int> remap(out.materials.size(), -1);
+    std::vector<CoreMaterial> kept;
+    kept.reserve(out.materials.size());
+    for (size_t i = 0; i < out.materials.size(); i++) {
+        if (!used[i])
+            continue;
+        remap[i] = (int)kept.size();
+        kept.push_back(std::move(out.materials[i]));
+    }
+    if (kept.size() == out.materials.size())
+        return;
+    std::cout << "core: dropped " << out.materials.size() - kept.size()
+              << " unused material(s)\n";
+    out.materials = std::move(kept);
+    for (auto& o : out.objects)
+        o.materialId = remap[o.materialId];
+    for (auto& tri : out.tris)
+        tri.w = (unsigned)remap[tri.w];
+}
+
 bool finishScene(CoreScene& out, std::string& err)
 {
     // An env map alone is something to render: a .json scene whose only object
@@ -107,6 +139,7 @@ bool finishScene(CoreScene& out, std::string& err)
             return false;
         }
     }
+    pruneUnusedMaterials(out);
     out.bvh = buildThreadedBvh6(out.positions, out.tris);
     return true;
 }
