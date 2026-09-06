@@ -227,8 +227,9 @@ GPU_FN inline void vol_majorant_init(GPU_THREAD VolMajorantIter& it, GPU_DEVICE 
     it.dimY = m.brickDimY;
     it.dimZ = m.brickDimZ;
     // Ray in brick units: index space minus the brick origin, over 8.
-    gpu_float3 oI = gpu_xyz(m.indexFromWorld * gpu_float4(ro, 1.0f));
-    gpu_float3 dI = gpu_xyz(m.indexFromWorld * gpu_float4(rd, 0.0f));
+    gpu_float4x4 ifw = gpu_load4x4(m.indexFromWorld);
+    gpu_float3 oI = gpu_xyz(ifw * gpu_float4(ro, 1.0f));
+    gpu_float3 dI = gpu_xyz(ifw * gpu_float4(rd, 0.0f));
     gpu_float3 o = (oI - gpu_float3((float)m.gridMinX, (float)m.gridMinY, (float)m.gridMinZ))
                  * (1.0f / (float)VOL_BRICK_DIM);
     gpu_float3 d = dI * (1.0f / (float)VOL_BRICK_DIM);

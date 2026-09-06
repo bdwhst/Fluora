@@ -254,7 +254,7 @@ SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
         mg.sigmaSSpd = spectra.rgbUnboundedOffset(m.sigmaS * m.sigmaScale);
         mg.g = m.g;
         mg.type = MEDIUM_HOMOGENEOUS;
-        mg.indexFromWorld = glm::mat4(1.0f);
+        mg.indexFromWorld = hostStore4x4(glm::mat4(1.0f));
         mg.tempTable = VOL_TABLE_NONE;
         mg.tempVoxels = VOL_TABLE_NONE;
         if (m.type == CoreMediumType::NanoVdb) {
@@ -265,7 +265,8 @@ SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
                 std::cout << "mini: medium '" << m.name << "': " << e << " -- rendered as empty\n";
             } else {
                 mg.type = MEDIUM_GRID;
-                mg.indexFromWorld = density.indexFromWorld * glm::inverse(m.worldFromMedium);
+                mg.indexFromWorld = hostStore4x4(density.indexFromWorld
+                                                 * glm::inverse(m.worldFromMedium));
                 mg.gridMinX = density.origin.x;
                 mg.gridMinY = density.origin.y;
                 mg.gridMinZ = density.origin.z;
