@@ -255,6 +255,7 @@ SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
         mg.g = m.g;
         mg.type = MEDIUM_HOMOGENEOUS;
         mg.indexFromWorld = hostStore4x4(glm::mat4(1.0f));
+        mg.tempIndexFromWorld = hostStore4x4(glm::mat4(1.0f));
         mg.tempTable = VOL_TABLE_NONE;
         mg.tempVoxels = VOL_TABLE_NONE;
         if (m.type == CoreMediumType::NanoVdb) {
@@ -281,12 +282,16 @@ SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
                           << density.voxels.size() / VOL_BRICK_SIZE << " stored ("
                           << density.activeVoxels << " active voxels, max density "
                           << density.maxValue << ")";
-                // Emission needs the temperature grid; it shares the file's
-                // index lattice but has its own bounding box.
+                // Emission needs the temperature grid. It has its own index
+                // lattice — voxel size, origin AND bounding box can all differ
+                // from the density grid's (they do in ground_explosion), so it
+                // gets its own world -> index transform.
                 BrickGrid temperature;
                 if (m.leScale > 0.0f
                     && loadNanoVdbGrid(m.vdbPath, "temperature", temperature, e)) {
                     appendGrid(temperature, mg.tempTable, mg.tempVoxels);
+                    mg.tempIndexFromWorld = hostStore4x4(
+                        temperature.indexFromWorld * glm::inverse(m.worldFromMedium));
                     mg.tempMinX = temperature.origin.x;
                     mg.tempMinY = temperature.origin.y;
                     mg.tempMinZ = temperature.origin.z;

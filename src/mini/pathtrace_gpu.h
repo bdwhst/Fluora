@@ -353,7 +353,7 @@ GPU_FN inline float miniMediumDensity(GPU_THREAD const MiniShadeCtx& c, GPU_DEVI
     if (m.type != MEDIUM_GRID)
         return 1.0f;
     VolGrid g = vol_density_grid(c.volTable, c.volData, m);
-    return vol_sample(g, gpu_xyz(m.indexFromWorld * gpu_float4(p, 1.0f)));
+    return vol_sample(g, gpu_xyz(gpu_load4x4(m.indexFromWorld) * gpu_float4(p, 1.0f)));
 }
 
 // Medium emission at a world point (NanoVDBMedium::Le): the temperature grid
@@ -365,7 +365,7 @@ GPU_FN inline GpuSpectrum miniMediumLe(GPU_THREAD const MiniShadeCtx& c, GPU_DEV
     if (m.type != MEDIUM_GRID || m.tempTable == VOL_TABLE_NONE || m.leScale <= 0.0f)
         return GpuSpectrum(0.0f);
     VolGrid g = vol_temperature_grid(c.volTable, c.volData, m);
-    float temp = vol_sample(g, gpu_xyz(m.indexFromWorld * gpu_float4(p, 1.0f)));
+    float temp = vol_sample(g, gpu_xyz(gpu_load4x4(m.tempIndexFromWorld) * gpu_float4(p, 1.0f)));
     temp = (temp - m.tempOffset) * m.tempScale;
     if (temp <= VOL_EMISSION_MIN_KELVIN)
         return GpuSpectrum(0.0f);

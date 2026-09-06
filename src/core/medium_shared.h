@@ -38,15 +38,20 @@
 // table (SIGMA_SCALE already applied on the host, RGB widened as an unbounded
 // rgb2spec spectrum). Grid media add the index-space mapping and the offsets
 // of their bricks: `*Table` into the volume table buffer (uint per brick),
-// `*Voxels` and `majorants` into the volume data buffer (float). 176 bytes,
-// host/device layout identical (the 4x4 comes first among the 16-byte
+// `*Voxels` and `majorants` into the volume data buffer (float). 240 bytes,
+// host/device layout identical (the 4x4s come first among the 16-byte
 // members, scalars in groups of four).
 struct MediumGpu {
     unsigned int sigmaASpd;
     unsigned int sigmaSSpd;
     float g;                   // Henyey-Greenstein asymmetry, (-1, 1)
     unsigned int type;         // MEDIUM_*
-    gpu_storage4x4 indexFromWorld;   // grid: world -> voxel index space
+    gpu_storage4x4 indexFromWorld;       // grid: world -> density voxel index space
+    // The temperature grid carries its own map (a VDB file's density and
+    // temperature grids need not share voxel size or origin — ground_explosion
+    // has 0.15 vs 0.25 voxels plus a translation; NanoVDBMedium::Le in the
+    // CUDA renderer likewise queries worldToIndexF per grid).
+    gpu_storage4x4 tempIndexFromWorld;   // grid: world -> temperature voxel index space
     int gridMinX, gridMinY, gridMinZ;   // index-space origin of brick (0,0,0), multiple of 8
     int pad0;
     unsigned int brickDimX, brickDimY, brickDimZ;   // bricks per axis
@@ -59,8 +64,8 @@ struct MediumGpu {
     float leScale;               // LESCALE (0 = no emission)
     float tempScale;             // TEMPSCALE: kelvin = (grid - TEMPOFFSET) * TEMPSCALE
     float tempOffset;
-    int tempMinX, tempMinY, tempMinZ;   // the temperature grid's own brick extents
-    int pad2;                           // (same index lattice, different bounding box)
+    int tempMinX, tempMinY, tempMinZ;   // the temperature grid's own brick extents,
+    int pad2;                           // in its own index space (tempIndexFromWorld)
     unsigned int tempDimX, tempDimY, tempDimZ;
     unsigned int pad3;
 };
