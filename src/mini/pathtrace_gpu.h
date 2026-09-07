@@ -183,7 +183,24 @@ GPU_FN inline bool sceneOccluded(gpu_float3 ro, gpu_float3 rd, float tMax,
     return rt_occluded(ro, rd, nodes, numNodes, tris, positions, tMax);
 }
 
-// Same jittered pinhole formula as generateRayFromCamera in pathtrace.cu.
+// util_concentric_sample_disk (pathtrace.cu): PBRT's square-to-disk mapping.
+GPU_FN inline gpu_float2 miniConcentricSampleDisk(float u1, float u2)
+{
+    float ox = 2.0f * u1 - 1.0f;
+    float oy = 2.0f * u2 - 1.0f;
+    if (ox == 0.0f && oy == 0.0f)
+        return gpu_float2(0.0f, 0.0f);
+    const float pi_4 = GPU_PI / 4.0f, pi_2 = GPU_PI / 2.0f;
+    bool x_g_y = fabs(ox) > fabs(oy);
+    float theta = x_g_y ? pi_4 * oy / ox : pi_2 - pi_4 * ox / oy;
+    float r = x_g_y ? ox : oy;
+    return gpu_float2(cos(theta) * r, sin(theta) * r);
+}
+
+// Same jittered pinhole formula as generateRayFromCamera in pathtrace.cu, plus
+// its DOF_ENABLED thin lens: offset the origin on the lens disk and re-aim at
+// the focal-plane point. Guarded so a pinhole camera (lensRadius 0) draws no
+// lens samples — the RNG stream, and so every DOF-free render, is unchanged.
 GPU_FN inline void generateCameraRay(GPU_PARAMS_REF(MiniParams) P, gpu_uint2 gid,
                               GPU_THREAD GpuRng& rng,
                               GPU_THREAD gpu_float3& ro, GPU_THREAD gpu_float3& rd)
@@ -194,6 +211,19 @@ GPU_FN inline void generateCameraRay(GPU_PARAMS_REF(MiniParams) P, gpu_uint2 gid
         - gpu_load3(P.camRight) * P.pixelLenX * ((float)gid.x - (float)P.width * 0.5f + jx)
         - gpu_load3(P.camUp)    * P.pixelLenY * ((float)gid.y - (float)P.height * 0.5f + jy));
     ro = gpu_load3(P.camPos);
+    if (P.lensRadius > 0.0f) {
+        gpu_float3 right = gpu_load3(P.camRight);
+        gpu_float3 up = gpu_load3(P.camUp);
+        // Focal distance is measured along the view axis (cross(right, up)),
+        // not along rd, matching the old renderer exactly.
+        gpu_float3 perpDir = normalize(cross(right, up));
+        float tFocus = P.focalLength / fabs(dot(rd, perpDir));
+        gpu_float2 lens = miniConcentricSampleDisk(gpu_rand(rng), gpu_rand(rng));
+        gpu_float3 newOri = ro + P.lensRadius * (lens.x * right + lens.y * up);
+        gpu_float3 pFocus = ro + rd * tFocus;
+        rd = normalize(pFocus - newOri);
+        ro = newOri;
+    }
 }
 
 // Environment radiance for an escaped ray: equirect texel RGB, clamped like

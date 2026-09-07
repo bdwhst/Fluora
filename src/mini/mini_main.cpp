@@ -77,6 +77,8 @@ struct SceneGpu {
     unsigned envW = 0, envH = 0;
     int maxDepth = 8;
     float fovyDeg = 45.0f;
+    float lensRadius = 0.0f;   // thin-lens DOF; 0 = pinhole
+    float focalLength = 0.0f;
     size_t numTris = 0;
 
     // Camera defaults straight from the scene file.
@@ -105,6 +107,10 @@ SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
     sg.numObjects = (unsigned)scene.objects.size();
     sg.maxDepth = scene.camera.maxDepth;
     sg.fovyDeg = scene.camera.fovyDeg;
+    // A lens without a focal plane is degenerate (tFocus = 0); treat it as a
+    // pinhole so the kernels only ever test lensRadius.
+    sg.lensRadius = scene.camera.focalLength > 0.0f ? scene.camera.lensRadius : 0.0f;
+    sg.focalLength = scene.camera.focalLength;
     sg.numTris = scene.tris.size();
     sg.eye = scene.camera.eye;
     sg.lookAt = scene.camera.lookAt;
@@ -701,6 +707,8 @@ int main(int argc, char** argv)
             params.envH = sg.envH;
             params.numMedia = sg.numMedia;
             params.cameraMedium = sg.cameraMedium;
+            params.lensRadius = sg.lensRadius;
+            params.focalLength = sg.focalLength;
         };
         applySceneParams();
 

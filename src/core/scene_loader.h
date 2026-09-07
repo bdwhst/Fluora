@@ -7,10 +7,9 @@
 //   .json — the newer format (Scene::loadJSON): named materials with
 //           spectral eta/k, DOF camera parameters, env-map scale/clamp, PLY
 //           and inline meshes, and media + medium interfaces.
-// Everything a file says is carried, but not everything is rendered yet:
-// media, medium interfaces and DOF are parsed for the M4 part-2 volume/DOF
-// steps (docs/metal-rhi-design.md) and ignored by FluoraMini until then. Out
-// of scope: glTF (dead code in scene.cpp).
+// Everything a file says is carried, and media, medium interfaces and
+// thin-lens DOF are rendered (M4 part 2, docs/metal-rhi-design.md); normal
+// maps are still parse-only. Out of scope: glTF (dead code in scene.cpp).
 #include <cstdint>
 #include <string>
 #include <vector>

@@ -94,7 +94,12 @@ struct MiniParams {
     unsigned int envH;
     unsigned int numMedia;    // MediumGpu records (0 = no participating media)
     int cameraMedium;         // medium the eye sits in (.json Camera MEDIUM), or MINI_MEDIUM_NONE
-    unsigned int pad0, pad1;
+    // Thin-lens DOF (.json LENS_RADIUS / FOCAL_LEN). lensRadius 0 = pinhole:
+    // raygen then draws no lens samples, keeping the RNG stream (and renders)
+    // of DOF-free scenes bitwise identical. The host zeroes lensRadius when
+    // focalLength is unset.
+    float lensRadius;
+    float focalLength;
 };
 
 // ---- wavefront mode (design doc M2/M3) ----
