@@ -132,12 +132,15 @@ SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
     // indices (the heap grows across scene loads; per-scene 0-based indices no
     // longer equal heap slots after the first load). A 1x1 white fallback keeps
     // the mapping dense when a file fails to load.
-    std::vector<uint32_t> texHeap;  // per scene.texturePaths entry -> heap index
-    texHeap.reserve(scene.texturePaths.size());
-    for (const auto& texPath : scene.texturePaths) {
+    std::vector<uint32_t> texHeap;  // per scene.textures entry -> heap index
+    texHeap.reserve(scene.textures.size());
+    for (const auto& texSrc : scene.textures) {
         LdrImage img;
-        if (!loadLdrImage(texPath, img)) {
-            std::cout << "mini: failed to load texture " << texPath << ", using white\n";
+        // Parse-time-decoded pixels (glTF) upload as-is; paths load here.
+        bool ok = texSrc.path.empty() ? (img = texSrc.pixels, img.width > 0)
+                                      : loadLdrImage(texSrc.path, img);
+        if (!ok) {
+            std::cout << "mini: failed to load texture " << texSrc.path << ", using white\n";
             img.width = img.height = 1;
             img.rgba = { 255, 255, 255, 255 };
         }
@@ -148,8 +151,8 @@ SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
         texHeap.push_back((uint32_t)tex->shaderHandle());
         sg.matTextures.push_back(std::move(tex));
     }
-    if (!scene.texturePaths.empty())
-        std::cout << "mini: " << scene.texturePaths.size() << " material textures\n";
+    if (!scene.textures.empty())
+        std::cout << "mini: " << scene.textures.size() << " material textures\n";
 
     std::vector<MiniMaterial> materials;
     materials.reserve(scene.materials.size());

@@ -67,7 +67,8 @@ CoreObject makeAnalytic(CoreGeomType type, int materialId, const glm::mat4& t)
 }
 
 // Texture paths dedupe to one heap slot (MTL files commonly bind the same
-// atlas to every material).
+// atlas to every material). Embedded images (glTF) get a fresh slot each —
+// they arrive one per material from the loader, nothing to dedupe by.
 struct TextureRegistry {
     CoreScene& out;
     std::unordered_map<std::string, uint32_t> pathToTexIdx;
@@ -75,12 +76,50 @@ struct TextureRegistry {
     {
         auto it = pathToTexIdx.find(p);
         if (it == pathToTexIdx.end()) {
-            it = pathToTexIdx.emplace(p, (uint32_t)out.texturePaths.size()).first;
-            out.texturePaths.push_back(p);
+            it = pathToTexIdx.emplace(p, (uint32_t)out.textures.size()).first;
+            out.textures.push_back({ p, {} });
         }
         return it->second;
     }
+    uint32_t embedded(LdrImage&& img)
+    {
+        out.textures.push_back({ {}, std::move(img) });
+        return (uint32_t)out.textures.size() - 1;
+    }
 };
+
+// Appends a model file's own materials (MTL / glTF via mesh_loader.h's
+// MeshMaterial) to the scene list, in order, so the material ids the loader
+// wrote into tris stay aligned.
+void appendMeshMaterials(std::vector<MeshMaterial>&& mtlMats, TextureRegistry& textures,
+                         CoreScene& out)
+{
+    for (auto& mm : mtlMats) {
+        CoreMaterial m;
+        m.name = mm.name;
+        switch (mm.type) {
+        case MeshMaterialType::Diffuse: m.type = CoreMaterialType::Diffuse; break;
+        case MeshMaterialType::Emissive: m.type = CoreMaterialType::Emissive; break;
+        case MeshMaterialType::Dielectric: m.type = CoreMaterialType::Dielectric; break;
+        case MeshMaterialType::Conductor: m.type = CoreMaterialType::Conductor; break;
+        }
+        m.rgb = mm.kd;
+        m.roughness = mm.roughness;
+        m.ior = mm.ior;
+        m.emittance = mm.emittance;
+        if (!mm.diffuseTexPath.empty())
+            m.texIdx = textures.index(mm.diffuseTexPath);
+        else if (mm.embeddedTex.width > 0)
+            m.texIdx = textures.embedded(std::move(mm.embeddedTex));
+        out.materials.push_back(std::move(m));
+    }
+}
+
+// Model-file extension dispatch shared by both scene formats.
+bool isGltfPath(const std::string& lowerExtension)
+{
+    return lowerExtension == ".gltf" || lowerExtension == ".glb";
+}
 
 // Shared tail of both loaders: reference checks, then the BVH.
 // Materials nothing references render nowhere but would still occupy GUI
@@ -196,29 +235,26 @@ bool loadTxtScene(const std::string& path, CoreScene& out, std::string& err)
                 buildTransform(curObj.trans, curObj.rot, curObj.scale)));
         } else if (curObj.geometry == "mesh") {
             // Model paths in scene files are relative to the scene directory.
-            // material -1 = use the OBJ's MTL materials (Scene::loadModel
-            // convention): they append to the scene material list as textured
-            // diffuse, with each texture path registered for heap upload.
-            std::vector<MeshMaterial> mtlMats;
-            if (!loadObjMesh(sceneDir + curObj.meshPath,
-                             buildTransform(curObj.trans, curObj.rot, curObj.scale),
-                             curObj.materialId, (uint32_t)out.materials.size(),
-                             curObj.useVertexNormal,
-                             out.positions, out.normals, out.uvs, out.tris, mtlMats)) {
-                err = "failed to load mesh " + sceneDir + curObj.meshPath;
+            // material -1 = use the file's own materials (Scene::loadModel
+            // convention): OBJ MTL entries or glTF materials append to the
+            // scene material list via appendMeshMaterials.
+            std::string mpath = sceneDir + curObj.meshPath;
+            glm::mat4 t = buildTransform(curObj.trans, curObj.rot, curObj.scale);
+            std::vector<MeshMaterial> meshMats;
+            bool ok = isGltfPath(lowerExt(mpath))
+                ? loadGltfMesh(mpath, t, curObj.materialId, (uint32_t)out.materials.size(),
+                               curObj.useVertexNormal,
+                               out.positions, out.normals, out.uvs, out.tris, meshMats)
+                : loadObjMesh(mpath, t, curObj.materialId, (uint32_t)out.materials.size(),
+                              curObj.useVertexNormal,
+                              out.positions, out.normals, out.uvs, out.tris, meshMats);
+            if (!ok) {
+                err = "failed to load mesh " + mpath;
                 meshLoadFailed = true;
                 curObj = PendingObject{};
                 return;
             }
-            for (const auto& mm : mtlMats) {
-                CoreMaterial m;
-                m.name = mm.name;
-                m.type = CoreMaterialType::Diffuse;
-                m.rgb = mm.kd;
-                m.texIdx = mm.diffuseTexPath.empty() ? kCoreTexNone
-                                                     : textures.index(mm.diffuseTexPath);
-                out.materials.push_back(std::move(m));
-            }
+            appendMeshMaterials(std::move(meshMats), textures, out);
         } else {
             std::cout << "core: skipping unsupported geometry '" << curObj.geometry << "'\n";
         }
@@ -594,8 +630,13 @@ bool loadJsonScene(const std::string& path, CoreScene& out, std::string& err)
                 std::cout << "core: skipping unsupported object type '" << type << "'\n";
                 continue;
             }
+            // glTF files carry their own materials, so MATERIAL is optional
+            // for them (matId -1 = use the file's, like .txt material -1).
+            bool ownMaterials = type == "model_ply" && !obj.contains("MATERIAL")
+                && !obj.contains("MEDIUM_INTERFACE")
+                && isGltfPath(lowerExt(obj.at("PATH").get<std::string>()));
             std::string e;
-            int matId = objectMaterial(obj, e);
+            int matId = ownMaterials ? -1 : objectMaterial(obj, e);
             if (!e.empty()) {
                 err = e;
                 return false;
@@ -616,8 +657,15 @@ bool loadJsonScene(const std::string& path, CoreScene& out, std::string& err)
                 // Dispatch on the real extension: scenes label OBJ files
                 // model_ply too (bunny.json).
                 std::string mpath = sceneDir + obj.at("PATH").get<std::string>();
+                std::string mext = lowerExt(mpath);
                 bool ok;
-                if (lowerExt(mpath) == ".obj") {
+                if (isGltfPath(mext)) {
+                    std::vector<MeshMaterial> meshMats;
+                    ok = loadGltfMesh(mpath, t, matId, (uint32_t)out.materials.size(),
+                                      /*useVertexNormal=*/true, out.positions, out.normals,
+                                      out.uvs, out.tris, meshMats);
+                    appendMeshMaterials(std::move(meshMats), textures, out);
+                } else if (mext == ".obj") {
                     std::vector<MeshMaterial> unused;
                     ok = loadObjMesh(mpath, t, matId, 0, /*useVertexNormal=*/true, out.positions,
                                      out.normals, out.uvs, out.tris, unused);

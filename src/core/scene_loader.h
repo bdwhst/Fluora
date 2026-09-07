@@ -9,15 +9,26 @@
 //           and inline meshes, and media + medium interfaces.
 // Everything a file says is carried, and media, medium interfaces and
 // thin-lens DOF are rendered (M4 part 2, docs/metal-rhi-design.md); normal
-// maps are still parse-only. Out of scope: glTF (dead code in scene.cpp).
+// maps are still parse-only. Model files dispatch on their real extension:
+// OBJ, PLY, glTF/GLB (gltf_loader.cpp; own materials when the scene binds
+// material -1 / omits MATERIAL).
 #include <cstdint>
 #include <string>
 #include <vector>
 #include <glm/glm.hpp>
 
 #include "bvh_builder.h"
+#include "image_loader.h"
 
 constexpr uint32_t kCoreTexNone = 0xFFFFFFFFu;
+
+// One CoreScene::textures entry: a file the host loads at upload time, or
+// pixels a loader already decoded (glTF embedded/external images — tinygltf
+// decodes both). Exactly one of the two is set.
+struct CoreTexture {
+    std::string path;  // scene-dir joined; empty when `pixels` is set
+    LdrImage pixels;   // width 0 = unset
+};
 
 // Scene-format material types; the .txt names map as in scene.cpp
 // (frenselSpecular -> Dielectric, microfacet/conductor -> Conductor).
@@ -37,7 +48,7 @@ struct CoreMaterial {
     float ior = 1.5f;          // REFRIOR / ETA const
     float emittance = 0.0f;
     float roughness = 0.0f;
-    uint32_t texIdx = kCoreTexNone;  // index into CoreScene::texturePaths
+    uint32_t texIdx = kCoreTexNone;  // index into CoreScene::textures
 
     // Spectral parameters: named spectra resolve against the SpectrumConsts
     // tables (core/spectra.cpp) at upload.
@@ -116,10 +127,11 @@ struct CoreScene {
     std::vector<gpu_uint4> tris;
     BvhBuildResult bvh;
 
-    // Base-color texture files (scene-dir joined), deduped — index ==
-    // CoreMaterial::texIdx, so the host must create heap textures in exactly
-    // this order for heap indices to line up.
-    std::vector<std::string> texturePaths;
+    // Base-color texture sources — index == CoreMaterial::texIdx, so the host
+    // must create heap textures in exactly this order for heap indices to
+    // line up. Either a file to load at upload (scene-dir joined, deduped) or
+    // pixels already decoded at parse time (glTF images, path empty).
+    std::vector<CoreTexture> textures;
 
     // SKYBOX line / Background PATH: equirectangular image (scene-dir
     // relative), or empty. Radiance is min(rgb * envScale, envMaxRadiance),

@@ -48,6 +48,7 @@ if(APPLE)
         src/mini/mini_main.cpp
         src/core/scene_loader.cpp
         src/core/mesh_loader.cpp
+        src/core/gltf_loader.cpp
         src/core/bvh_builder.cpp
         src/core/image_loader.cpp
         src/core/spectra.cpp
@@ -381,6 +382,7 @@ fluora_rhi_target(FluoraMini
     src/mini/mini_main.cpp
     src/core/scene_loader.cpp
     src/core/mesh_loader.cpp
+    src/core/gltf_loader.cpp
     src/core/bvh_builder.cpp
     src/core/image_loader.cpp
     src/core/spectra.cpp
