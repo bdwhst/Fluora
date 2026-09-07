@@ -242,6 +242,14 @@ void draw(State& s)
         if (ImGui::SliderInt("max depth", &s.maxDepth, 1, 32, "%d",
                              ImGuiSliderFlags_AlwaysClamp))
             s.depthChanged = true;
+        // Log scale: useful lens radii cluster near zero (0 = pinhole), and
+        // focal lengths span scene scales.
+        if (ImGui::SliderFloat("lens radius", &s.lensRadius, 0.0f, 1.0f, "%.3f",
+                               ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp))
+            s.dofChanged = true;
+        if (ImGui::SliderFloat("focal length", &s.focalLength, 0.0f, 100.0f, "%.2f",
+                               ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp))
+            s.dofChanged = true;
 
         // --- Scene picker -------------------------------------------------
         ImGui::Separator();
@@ -372,6 +380,10 @@ void runPreview(State& ui, int targetSpp, const PreviewHooks& h)
             }
             if (ui.depthChanged) {
                 ui.depthChanged = false;
+                restart();
+            }
+            if (ui.dofChanged) {
+                ui.dofChanged = false;
                 restart();
             }
             if (ui.materialsChanged) {

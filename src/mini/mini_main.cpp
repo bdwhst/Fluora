@@ -770,6 +770,8 @@ int main(int argc, char** argv)
             ui.stats.numObjects = (int)sg.numObjects;
             ui.stats.numTris = sg.numTris;
             ui.maxDepth = (int)sg.maxDepth;   // re-seed the depth slider per scene
+            ui.lensRadius = sg.lensRadius;    // and the DOF sliders
+            ui.focalLength = sg.focalLength;
             ui.selectedMaterial = 0;          // the material list is a new scene's
         };
         applySceneStats();
@@ -858,6 +860,9 @@ int main(int argc, char** argv)
         hooks.renderSample = [&](int iter) {
             params.iter = (unsigned)iter;
             params.maxDepth = (unsigned)ui.maxDepth;   // GUI depth slider override
+            // GUI DOF override, same pinhole degeneration rule as the upload.
+            params.lensRadius = ui.focalLength > 0.0f ? ui.lensRadius : 0.0f;
+            params.focalLength = ui.focalLength;
             dispatchSample(params);
             stream->submit();
         };

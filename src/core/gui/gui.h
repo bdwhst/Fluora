@@ -63,6 +63,9 @@ struct State {
                                           // from the scene and reads it every sample
     bool depthChanged = false;            // draw() sets it when the slider moved; the
                                           // loop restarts accumulation + clears
+    float lensRadius = 0.0f;              // thin-lens DOF override, same pattern:
+    float focalLength = 0.0f;             // seeded per scene, read every sample
+    bool dofChanged = false;              // (0 radius or focal length = pinhole)
     bool saveRequested = false;           // app saves a PNG, then clears
     bool resetRequested = false;          // app zeroes accumulation, then clears
     bool cameraMoved = false;             // draw() sets it when the fly camera moved
