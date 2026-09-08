@@ -64,6 +64,11 @@ struct SceneGpu {
     // the editable scalars over a copy of this and re-uploads, so the resolved
     // fields survive any number of edits.
     std::vector<MiniMaterial> matHost;
+    // Same for media: grid transforms and brick offsets are resolved here and
+    // the medium editor patches the scalars / rewrites the sigma spd slots
+    // over a copy. A record's sigma*Spd IS its pool slot, so media edits
+    // address the pool through the record itself.
+    std::vector<MediumGpu> mediaHost;
     std::vector<std::unique_ptr<rhi::Texture>> matTextures;
     std::unique_ptr<rhi::Texture> envTex;
     uint32_t envMapIdx = MINI_ENV_NONE;
@@ -99,11 +104,6 @@ int miniMaterialType(CoreMaterialType t)
     return MINI_MAT_DIFFUSE;
 }
 
-// CoreScene -> device PODs + GPU uploads. Spectra are rebuilt per scene because
-// materials reference named eta/k spectra by offset into this table.
-SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
-{
-    SceneGpu sg;
 // Editable spd pool layout (core/spectra.h): the material slots first, eta
 // then k per material, followed by the media, sigma_a then sigma_s per
 // medium. Derived from the index rather than stored, so an edit can recompute
@@ -123,6 +123,11 @@ uint32_t spdSlotMediumSigmaS(size_t numMaterials, size_t medium)
     return (uint32_t)(2 * numMaterials + 2 * medium + 1);
 }
 
+// CoreScene -> device PODs + GPU uploads. Spectra are rebuilt per scene because
+// materials reference named eta/k spectra by offset into this table.
+SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
+{
+    SceneGpu sg;
     sg.numObjects = (unsigned)scene.objects.size();
     sg.maxDepth = scene.camera.maxDepth;
     sg.fovyDeg = scene.camera.fovyDeg;
@@ -381,6 +386,7 @@ uint32_t spdSlotMediumSigmaS(size_t numMaterials, size_t medium)
     if (!media.empty())
         std::cout << "mini: " << media.size() << " media" << (sg.cameraMedium >= 0 ? " (camera inside one)" : "")
                   << "\n";
+    sg.mediaHost = std::move(media);
 
     // Spectral tables (invariant I-1: kernels get offsets, not pointers): the
     // dense-spectra buffer (CIE curves, D65, named eta/k) and the sRGB rgb2spec
@@ -805,6 +811,7 @@ int main(int argc, char** argv)
         ui.stats.targetSpp = spp;
         ui.stats.mode = mode;
         ui.materials = &scene.materials;  // stays valid: scene swaps move-assign
+        ui.media = &scene.media;
         auto applySceneStats = [&] {
             ui.stats.numObjects = (int)sg.numObjects;
             ui.stats.numTris = sg.numTris;
@@ -812,6 +819,13 @@ int main(int argc, char** argv)
             ui.lensRadius = sg.lensRadius;    // and the DOF sliders
             ui.focalLength = sg.focalLength;
             ui.selectedMaterial = 0;          // the material list is a new scene's
+            ui.selectedMedium = 0;
+            // Which media can emit: the loader reads the temperature grid only
+            // when the file's LESCALE > 0, and without it the kernel's emission
+            // path is a no-op, so the editor disables those controls.
+            ui.mediaHasTemperature.clear();
+            for (const MediumGpu& mg : sg.mediaHost)
+                ui.mediaHasTemperature.push_back(mg.tempTable != VOL_TABLE_NONE);
         };
         applySceneStats();
         device->enableGui([&] { gui::draw(ui); });
@@ -965,6 +979,40 @@ int main(int argc, char** argv)
                 std::memcpy(sg.lightBuf->hostPtr(), lights.data(),
                             lights.size() * sizeof(RtLight));
             params.numLights = sg.numLights;
+        };
+        // Live medium edits: rewrite each medium's two sigma runs in the spd
+        // pool (SIGMA_SCALE folded in, exactly as at build) and patch the
+        // scalars over a copy of the retained mediaHost records, whose grid
+        // transforms / brick offsets survive untouched. The record's sigma*Spd
+        // is its pool slot, so no offset arithmetic is needed and the device
+        // record keeps the offset it already has — only the floats behind it
+        // change. Unlike applyMaterials there is no light-list rebuild:
+        // volumetric emission is added at collisions inside miniTrace, never
+        // sampled as a light. Drains first, per the PreviewHooks contract:
+        // in-flight samples read spdBuf and mediaBuf.
+        hooks.applyMedia = [&] {
+            if (sg.mediaHost.empty())
+                return;
+            stream->waitIdle();
+            std::vector<MediumGpu> upload = sg.mediaHost;
+            float* spd = (float*)sg.spdBuf->hostPtr();
+            size_t n = std::min(scene.media.size(), upload.size());
+            for (size_t i = 0; i < n; i++) {
+                const CoreMedium& cm = scene.media[i];
+                MediumGpu& mg = upload[i];
+                spdWriteRgbUnbounded(cm.sigmaA * cm.sigmaScale, spd + mg.sigmaASpd);
+                spdWriteRgbUnbounded(cm.sigmaS * cm.sigmaScale, spd + mg.sigmaSSpd);
+                mg.g = cm.g;
+                // Emission fields stay 0 without a temperature grid, matching
+                // buildSceneGpu (the kernel early-outs on tempTable anyway).
+                if (mg.tempTable != VOL_TABLE_NONE) {
+                    mg.leScale = cm.leScale;
+                    mg.tempScale = cm.temperatureScale;
+                    mg.tempOffset = cm.temperatureOffset;
+                }
+            }
+            std::memcpy(sg.mediaBuf->hostPtr(), upload.data(),
+                        upload.size() * sizeof(MediumGpu));
         };
         int previewExit = 0;
         auto saveNow = [&](int samples) {

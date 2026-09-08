@@ -142,6 +142,95 @@ void drawMaterials(State& s)
     }
     ImGui::End();
 }
+
+const char* mediumTypeName(CoreMediumType t)
+{
+    switch (t) {
+    case CoreMediumType::Homogeneous: return "homogeneous";
+    case CoreMediumType::NanoVdb: return "grid";
+    }
+    return "?";
+}
+
+// The "Media" window: a list of the scene's media and, for the selection, the
+// CoreMedium fields the upload folds into the device record. The swatch is
+// the single-scattering albedo sigma_s / sigma_t — the color the fog actually
+// takes on, which the raw coefficients (unbounded densities) do not show.
+// Any edit sets s.mediaChanged so the loop re-uploads and restarts
+// accumulation. Grid transforms and brick offsets were resolved at upload and
+// are not exposed.
+void drawMedia(State& s)
+{
+    if (!s.media || s.media->empty())
+        return;
+    std::vector<CoreMedium>& media = *s.media;
+    s.selectedMedium = std::clamp(s.selectedMedium, 0, (int)media.size() - 1);
+
+    ImGui::SetNextWindowPos(ImVec2(340, 380), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Media")) {
+        // --- List ---------------------------------------------------------
+        float rowH = ImGui::GetTextLineHeightWithSpacing();
+        float listH = rowH * (float)std::min<size_t>(media.size(), 8)
+                      + ImGui::GetStyle().WindowPadding.y * 2.0f;
+        ImGui::BeginChild("medium-list", ImVec2(0, listH), true);
+        for (int i = 0; i < (int)media.size(); i++) {
+            const CoreMedium& m = media[i];
+            ImGui::PushID(i);
+            glm::vec3 sigmaT = m.sigmaA + m.sigmaS;
+            ImVec4 albedo(sigmaT.x > 0.0f ? m.sigmaS.x / sigmaT.x : 0.0f,
+                          sigmaT.y > 0.0f ? m.sigmaS.y / sigmaT.y : 0.0f,
+                          sigmaT.z > 0.0f ? m.sigmaS.z / sigmaT.z : 0.0f, 1.0f);
+            ImGui::ColorButton("##swatch", albedo,
+                               ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop,
+                               ImVec2(rowH - 4.0f, rowH - 4.0f));
+            ImGui::SameLine();
+            char label[128];
+            std::snprintf(label, sizeof(label), "%s  [%s]",
+                          m.name.empty() ? "(unnamed)" : m.name.c_str(),
+                          mediumTypeName(m.type));
+            if (ImGui::Selectable(label, i == s.selectedMedium))
+                s.selectedMedium = i;
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+
+        // --- Parameters for the selection ---------------------------------
+        CoreMedium& m = media[s.selectedMedium];
+        bool edited = false;
+        // Coefficients are per-unit-length densities, routinely > 1, so the
+        // pickers take unclamped floats. SIGMA_SCALE multiplies both.
+        const ImGuiColorEditFlags coefFlags = ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR;
+        edited |= ImGui::ColorEdit3("sigma_a", &m.sigmaA.x, coefFlags);
+        edited |= ImGui::ColorEdit3("sigma_s", &m.sigmaS.x, coefFlags);
+        edited |= ImGui::DragFloat("sigma scale", &m.sigmaScale, 0.01f, 0.0f, 1e4f, "%.3f",
+                                   ImGuiSliderFlags_Logarithmic);
+        // hg_phase is singular at |g| = 1.
+        edited |= ImGui::SliderFloat("g (anisotropy)", &m.g, -0.99f, 0.99f, "%.3f",
+                                     ImGuiSliderFlags_AlwaysClamp);
+        if (m.type == CoreMediumType::NanoVdb) {
+            bool hasTemp = s.selectedMedium < (int)s.mediaHasTemperature.size()
+                           && s.mediaHasTemperature[s.selectedMedium];
+            ImGui::Separator();
+            ImGui::TextDisabled("blackbody emission");
+            if (!hasTemp)
+                // The loader reads the temperature grid only when the file's
+                // LESCALE > 0; without it these fields are dead in the kernel.
+                ImGui::TextDisabled("no temperature grid loaded (needs LESCALE > 0 in the scene)");
+            ImGui::BeginDisabled(!hasTemp);
+            edited |= ImGui::DragFloat("le scale", &m.leScale, 0.05f, 0.0f, 1e4f, "%.3f",
+                                       ImGuiSliderFlags_Logarithmic);
+            edited |= ImGui::DragFloat("temp scale", &m.temperatureScale, 10.0f, 0.0f, 1e5f,
+                                       "%.0f K");
+            edited |= ImGui::DragFloat("temp offset", &m.temperatureOffset, 0.01f, -1e4f, 1e4f,
+                                       "%.3f");
+            ImGui::EndDisabled();
+        }
+        if (edited)
+            s.mediaChanged = true;
+    }
+    ImGui::End();
+}
 } // namespace
 
 FlyCamera FlyCamera::fromLookAt(const glm::vec3& eye, const glm::vec3& lookAt)
@@ -290,6 +379,7 @@ void draw(State& s)
     ImGui::End();
 
     drawMaterials(s);
+    drawMedia(s);
 }
 
 void scanSceneDirectory(const std::string& scenePath, std::vector<std::string>& names,
@@ -390,6 +480,12 @@ void runPreview(State& ui, int targetSpp, const PreviewHooks& h)
                 ui.materialsChanged = false;
                 if (h.applyMaterials)
                     h.applyMaterials();
+                restart();
+            }
+            if (ui.mediaChanged) {
+                ui.mediaChanged = false;
+                if (h.applyMedia)
+                    h.applyMedia();
                 restart();
             }
             if (ui.requestedScene >= 0) {

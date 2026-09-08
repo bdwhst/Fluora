@@ -11,7 +11,8 @@
 
 #include <glm/glm.hpp>
 
-struct CoreMaterial;  // scene_loader.h; the editor mutates these in place
+struct CoreMaterial;  // scene_loader.h; the editors mutate these in place
+struct CoreMedium;
 
 namespace gui {
 
@@ -78,6 +79,17 @@ struct State {
     std::vector<CoreMaterial>* materials = nullptr;
     int selectedMaterial = 0;             // list selection; clamped in draw()
     bool materialsChanged = false;
+
+    // Medium editor, same pattern: draw() shows a "Media" window when `media`
+    // is set and non-empty, editing CoreMedium records in place; the loop
+    // calls PreviewHooks::applyMedia and restarts accumulation. Emission
+    // needs a temperature grid, which is only known after upload, so the app
+    // reports per medium whether one was loaded: without it LESCALE is inert
+    // and the widgets are disabled rather than silently doing nothing.
+    std::vector<CoreMedium>* media = nullptr;
+    std::vector<unsigned char> mediaHasTemperature;  // indexed like `media`
+    int selectedMedium = 0;
+    bool mediaChanged = false;
 };
 
 // Emits the whole overlay (stats, controls, scene picker) and, when `s.camera`
@@ -109,6 +121,8 @@ struct PreviewHooks {
     std::function<void(int sceneIdx)> loadScene;     // swap scene (camera reset lives here)
     std::function<void()> applyMaterials;            // drain + re-upload State::materials
                                                      // edits (may rebuild the light list)
+    std::function<void()> applyMedia;                // drain + re-upload State::media edits
+                                                     // (sigma spectra + scalars; no lights)
     std::function<void(int samples)> save;           // drain + write a PNG now
     std::function<void(int samples)> finish;         // final save on exit
 };
