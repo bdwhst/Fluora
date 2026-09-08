@@ -104,6 +104,25 @@ int miniMaterialType(CoreMaterialType t)
 SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
 {
     SceneGpu sg;
+// Editable spd pool layout (core/spectra.h): the material slots first, eta
+// then k per material, followed by the media, sigma_a then sigma_s per
+// medium. Derived from the index rather than stored, so an edit can recompute
+// its slot without a side table, and the total is the exact field count.
+uint32_t spdPoolCapacity(size_t numMaterials, size_t numMedia)
+{
+    return (uint32_t)(2 * numMaterials + 2 * numMedia);
+}
+uint32_t spdSlotMatEta(size_t mat) { return (uint32_t)(2 * mat); }
+uint32_t spdSlotMatK(size_t mat) { return (uint32_t)(2 * mat + 1); }
+uint32_t spdSlotMediumSigmaA(size_t numMaterials, size_t medium)
+{
+    return (uint32_t)(2 * numMaterials + 2 * medium);
+}
+uint32_t spdSlotMediumSigmaS(size_t numMaterials, size_t medium)
+{
+    return (uint32_t)(2 * numMaterials + 2 * medium + 1);
+}
+
     sg.numObjects = (unsigned)scene.objects.size();
     sg.maxDepth = scene.camera.maxDepth;
     sg.fovyDeg = scene.camera.fovyDeg;
@@ -118,14 +137,23 @@ SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
     sg.outputName = scene.camera.outputName;
 
     SpectralTables spectra;
-    auto resolveSpd = [&](const std::string& name) {
+    // Exact capacity — a count of the device fields that can hold an spd
+    // offset — so no slot request below can fail and the table is never
+    // resized again. Reserved before anything is written into it.
+    spectra.reservePool(spdPoolCapacity(scene.materials.size(), scene.media.size()));
+    // Writes the named spectrum into the field's own slot and returns that
+    // slot's offset. Copied rather than shared: the pool is already sized for
+    // every field, so sharing one run between materials would save nothing and
+    // would make a future edit to one of them visible in the other.
+    auto resolveSpd = [&](const std::string& name, uint32_t slot) {
         if (name.empty())
             return (uint32_t)SPD_NONE;
-        uint32_t off = spectra.namedOffset(name);
-        if (off == SPD_NONE)
+        if (!spdWriteNamed(name, spectra.poolSlotData(slot))) {
             std::cout << "mini: unknown named spectrum '" << name
                       << "', falling back to RGB parameters\n";
-        return off;
+            return (uint32_t)SPD_NONE;
+        }
+        return spectra.poolSlotOffset(slot);
     };
 
     // Base-color textures first, so material texIdx can be remapped to real heap
@@ -156,7 +184,8 @@ SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
 
     std::vector<MiniMaterial> materials;
     materials.reserve(scene.materials.size());
-    for (const auto& m : scene.materials) {
+    for (size_t mi = 0; mi < scene.materials.size(); mi++) {
+        const CoreMaterial& m = scene.materials[mi];
         MiniMaterial mm = {};
         mm.type = miniMaterialType(m.type);
         mm.rgb = hostStore3(m.rgb);
@@ -166,8 +195,8 @@ SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
         mm.mediumIn = m.mediumIn;
         mm.mediumOut = m.mediumOut;
         mm.texIdx = m.texIdx == kCoreTexNone ? MINI_TEX_NONE : texHeap[m.texIdx];
-        mm.etaSpd = resolveSpd(m.etaNamed);
-        mm.kSpd = resolveSpd(m.kNamed);
+        mm.etaSpd = resolveSpd(m.etaNamed, spdSlotMatEta(mi));
+        mm.kSpd = resolveSpd(m.kNamed, spdSlotMatK(mi));
         // Conductor Fresnel needs eta AND k; with only one, use reflectance
         // mode (both SPD_NONE).
         if (mm.type == MINI_MAT_CONDUCTOR && (mm.etaSpd == SPD_NONE || mm.kSpd == SPD_NONE))
@@ -270,10 +299,17 @@ SceneGpu buildSceneGpu(rhi::Device& device, const CoreScene& scene)
         voxelOff = (uint32_t)volData.size();
         volData.insert(volData.end(), g.voxels.begin(), g.voxels.end());
     };
-    for (const auto& m : scene.media) {
+    for (size_t medIdx = 0; medIdx < scene.media.size(); medIdx++) {
+        const CoreMedium& m = scene.media[medIdx];
         MediumGpu mg = {};
-        mg.sigmaASpd = spectra.rgbUnboundedOffset(m.sigmaA * m.sigmaScale);
-        mg.sigmaSSpd = spectra.rgbUnboundedOffset(m.sigmaS * m.sigmaScale);
+        // SIGMA_SCALE is folded in here, so editing either the coefficients or
+        // the scale is the same operation: rewrite these two slots.
+        uint32_t sigmaASlot = spdSlotMediumSigmaA(scene.materials.size(), medIdx);
+        uint32_t sigmaSSlot = spdSlotMediumSigmaS(scene.materials.size(), medIdx);
+        spdWriteRgbUnbounded(m.sigmaA * m.sigmaScale, spectra.poolSlotData(sigmaASlot));
+        spdWriteRgbUnbounded(m.sigmaS * m.sigmaScale, spectra.poolSlotData(sigmaSSlot));
+        mg.sigmaASpd = spectra.poolSlotOffset(sigmaASlot);
+        mg.sigmaSSpd = spectra.poolSlotOffset(sigmaSSlot);
         mg.g = m.g;
         mg.type = MEDIUM_HOMOGENEOUS;
         mg.indexFromWorld = hostStore4x4(glm::mat4(1.0f));

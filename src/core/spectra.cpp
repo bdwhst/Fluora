@@ -162,25 +162,51 @@ uint32_t SpectralTables::namedOffset(const std::string& name)
     auto it = cache.find(name);
     if (it != cache.end())
         return it->second;
-    bool ok = false;
-    Piecewise p = namedPiecewise(name, ok);
-    if (!ok)
-        return SPD_NONE;
     uint32_t off = (uint32_t)spd.size();
-    std::vector<float> dense = densify(p);
-    spd.insert(spd.end(), dense.begin(), dense.end());
+    spd.resize(off + SPD_TABLE_SIZE);
+    if (!spdWriteNamed(name, spd.data() + off)) {
+        spd.resize(off);
+        return SPD_NONE;
+    }
     cache.emplace(name, off);
     return off;
 }
 
-uint32_t SpectralTables::rgbUnboundedOffset(const glm::vec3& rgb)
+void SpectralTables::reservePool(uint32_t numSlots)
 {
-    // Keyed by the exact float bits so equal coefficients share one run.
-    std::string key = "rgb-unbounded:" + std::to_string(rgb.x) + "," + std::to_string(rgb.y)
-                    + "," + std::to_string(rgb.z);
-    auto it = cache.find(key);
-    if (it != cache.end())
-        return it->second;
+    if (poolReserved)
+        throw std::runtime_error("spd pool already reserved");
+    poolReserved = true;
+    poolBase = (uint32_t)spd.size();
+    poolSlots = numSlots;
+    spd.resize(poolBase + (size_t)numSlots * SPD_TABLE_SIZE, 0.0f);
+}
+
+uint32_t SpectralTables::poolSlotOffset(uint32_t slot) const
+{
+    if (slot >= poolSlots)
+        throw std::out_of_range("spd pool slot out of range");
+    return poolBase + slot * SPD_TABLE_SIZE;
+}
+
+float* SpectralTables::poolSlotData(uint32_t slot)
+{
+    return spd.data() + poolSlotOffset(slot);
+}
+
+bool spdWriteNamed(const std::string& name, float* dst)
+{
+    bool ok = false;
+    Piecewise p = namedPiecewise(name, ok);
+    if (!ok)
+        return false;
+    std::vector<float> dense = densify(p);
+    std::copy(dense.begin(), dense.end(), dst);
+    return true;
+}
+
+void spdWriteRgbUnbounded(const glm::vec3& rgb, float* dst)
+{
     // The device's rgb2spec lookup runs on the host here (spectrum_shared.h
     // compiles as plain C++): it wants zNodes and coeffs back to back, the
     // same layout the rgb2spec upload uses.
@@ -194,11 +220,8 @@ uint32_t SpectralTables::rgbUnboundedOffset(const glm::vec3& rgb)
     float m = std::max(c.x, std::max(c.y, c.z));
     float scale = 2.0f * m;
     SpdPoly p = spd_rgb_to_coeffs(r2s.data(), scale != 0.0f ? c / scale : glm::vec3(0.0f));
-    uint32_t off = (uint32_t)spd.size();
     for (uint32_t i = 0; i < SPD_TABLE_SIZE; i++)
-        spd.push_back(scale * spd_poly_eval(p, SPD_LAMBDA_MIN + (float)i));
-    cache.emplace(key, off);
-    return off;
+        dst[i] = scale * spd_poly_eval(p, SPD_LAMBDA_MIN + (float)i);
 }
 
 extern const int sRGBToSpectrumTable_Res;
